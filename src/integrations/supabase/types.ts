@@ -124,33 +124,52 @@ export type Database = {
       }
       sessions: {
         Row: {
+          connection_quality: string
+          disconnects: number
           ended_at: string | null
           id: string
           idle_minutes: number
+          lab_template_id: string | null
           region: string
           started_at: string
+          status: string
           user_id: string | null
           vm_id: string | null
         }
         Insert: {
+          connection_quality?: string
+          disconnects?: number
           ended_at?: string | null
           id?: string
           idle_minutes?: number
+          lab_template_id?: string | null
           region?: string
           started_at?: string
+          status?: string
           user_id?: string | null
           vm_id?: string | null
         }
         Update: {
+          connection_quality?: string
+          disconnects?: number
           ended_at?: string | null
           id?: string
           idle_minutes?: number
+          lab_template_id?: string | null
           region?: string
           started_at?: string
+          status?: string
           user_id?: string | null
           vm_id?: string | null
         }
         Relationships: [
+          {
+            foreignKeyName: "sessions_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "sessions_vm_id_fkey"
             columns: ["vm_id"]
