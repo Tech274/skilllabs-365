@@ -14,16 +14,238 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      lab_templates: {
+        Row: {
+          clipboard_enabled: boolean
+          created_at: string
+          created_by: string | null
+          description: string | null
+          duration: number
+          file_transfer_enabled: boolean
+          id: string
+          idle_timeout: number
+          name: string
+          os_image: string
+          protocol: string
+          region: string
+          status: string
+          updated_at: string
+          vm_size: string
+        }
+        Insert: {
+          clipboard_enabled?: boolean
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          duration?: number
+          file_transfer_enabled?: boolean
+          id?: string
+          idle_timeout?: number
+          name: string
+          os_image?: string
+          protocol: string
+          region?: string
+          status?: string
+          updated_at?: string
+          vm_size?: string
+        }
+        Update: {
+          clipboard_enabled?: boolean
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          duration?: number
+          file_transfer_enabled?: boolean
+          id?: string
+          idle_timeout?: number
+          name?: string
+          os_image?: string
+          protocol?: string
+          region?: string
+          status?: string
+          updated_at?: string
+          vm_size?: string
+        }
+        Relationships: []
+      }
+      platform_settings: {
+        Row: {
+          id: string
+          key: string
+          updated_at: string
+          updated_by: string | null
+          value: Json
+        }
+        Insert: {
+          id?: string
+          key: string
+          updated_at?: string
+          updated_by?: string | null
+          value?: Json
+        }
+        Update: {
+          id?: string
+          key?: string
+          updated_at?: string
+          updated_by?: string | null
+          value?: Json
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          avatar_url: string | null
+          created_at: string
+          display_name: string
+          email: string | null
+          id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          avatar_url?: string | null
+          created_at?: string
+          display_name?: string
+          email?: string | null
+          id?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          avatar_url?: string | null
+          created_at?: string
+          display_name?: string
+          email?: string | null
+          id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      sessions: {
+        Row: {
+          ended_at: string | null
+          id: string
+          idle_minutes: number
+          region: string
+          started_at: string
+          user_id: string | null
+          vm_id: string | null
+        }
+        Insert: {
+          ended_at?: string | null
+          id?: string
+          idle_minutes?: number
+          region?: string
+          started_at?: string
+          user_id?: string | null
+          vm_id?: string | null
+        }
+        Update: {
+          ended_at?: string | null
+          id?: string
+          idle_minutes?: number
+          region?: string
+          started_at?: string
+          user_id?: string | null
+          vm_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "sessions_vm_id_fkey"
+            columns: ["vm_id"]
+            isOneToOne: false
+            referencedRelation: "virtual_machines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      user_roles: {
+        Row: {
+          id: string
+          role: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Insert: {
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id: string
+        }
+        Update: {
+          id?: string
+          role?: Database["public"]["Enums"]["app_role"]
+          user_id?: string
+        }
+        Relationships: []
+      }
+      virtual_machines: {
+        Row: {
+          azure_vm_id: string | null
+          created_at: string
+          expires_at: string | null
+          id: string
+          idle_minutes: number
+          lab_template_id: string | null
+          private_ip: string | null
+          region: string
+          status: string
+          updated_at: string
+          user_id: string | null
+          vm_size: string
+        }
+        Insert: {
+          azure_vm_id?: string | null
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          idle_minutes?: number
+          lab_template_id?: string | null
+          private_ip?: string | null
+          region?: string
+          status?: string
+          updated_at?: string
+          user_id?: string | null
+          vm_size?: string
+        }
+        Update: {
+          azure_vm_id?: string | null
+          created_at?: string
+          expires_at?: string | null
+          id?: string
+          idle_minutes?: number
+          lab_template_id?: string | null
+          private_ip?: string | null
+          region?: string
+          status?: string
+          updated_at?: string
+          user_id?: string | null
+          vm_size?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "virtual_machines_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      has_role: {
+        Args: {
+          _role: Database["public"]["Enums"]["app_role"]
+          _user_id: string
+        }
+        Returns: boolean
+      }
     }
     Enums: {
-      [_ in never]: never
+      app_role: "admin" | "instructor" | "student"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +372,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      app_role: ["admin", "instructor", "student"],
+    },
   },
 } as const
