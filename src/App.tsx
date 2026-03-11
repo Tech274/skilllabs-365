@@ -17,6 +17,7 @@ import LabManagement from "./pages/LabManagement.tsx";
 import UserManagement from "./pages/UserManagement.tsx";
 import Settings from "./pages/Settings.tsx";
 import LabSession from "./pages/LabSession.tsx";
+import SessionAuditLog from "./pages/SessionAuditLog.tsx";
 
 const queryClient = new QueryClient();
 
