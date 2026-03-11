@@ -14,6 +14,8 @@ import Health from "./pages/Health.tsx";
 import Security from "./pages/Security.tsx";
 import VMDetail from "./pages/VMDetail.tsx";
 import LabManagement from "./pages/LabManagement.tsx";
+import UserManagement from "./pages/UserManagement.tsx";
+import Settings from "./pages/Settings.tsx";
 
 const queryClient = new QueryClient();
 
@@ -34,6 +36,8 @@ const App = () => (
             <Route path="/health" element={<Health />} />
             <Route path="/security" element={<Security />} />
             <Route path="/labs" element={<LabManagement />} />
+            <Route path="/users" element={<UserManagement />} />
+            <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>

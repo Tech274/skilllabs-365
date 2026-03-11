@@ -33,6 +33,7 @@ const mainItems = [
   { title: "Regions", url: "/regions", icon: Globe },
   { title: "Cost Analytics", url: "/costs", icon: DollarSign },
   { title: "Lab Management", url: "/labs", icon: BookOpen },
+  { title: "User Management", url: "/users", icon: Users },
 ];
 
 const systemItems = [
