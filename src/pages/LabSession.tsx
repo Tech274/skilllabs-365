@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 
@@ -36,13 +37,12 @@ interface SessionInfo {
   duration: number;
 }
 
-// Mock session data — will be replaced by real Guacamole integration
-const mockSession: SessionInfo = {
-  labName: "Azure Fundamentals",
+const defaultSession: SessionInfo = {
+  labName: "Lab Session",
   protocol: "RDP",
   vmSize: "Standard_B2s",
   region: "East US",
-  privateIp: "10.1.0.12",
+  privateIp: "—",
   expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
   duration: 120,
 };
@@ -57,23 +57,51 @@ export default function LabSession() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showToolbar, setShowToolbar] = useState(true);
   const [timeRemaining, setTimeRemaining] = useState("");
-  const [session] = useState<SessionInfo>(mockSession);
+  const [session, setSession] = useState<SessionInfo>(defaultSession);
+  const [guacIframeUrl, setGuacIframeUrl] = useState("");
+  const [guacConnectionId, setGuacConnectionId] = useState<string | null>(null);
+  const [dbSessionId, setDbSessionId] = useState<string | null>(null);
 
-  // Guacamole URL — will be constructed from secrets later
-  const guacamoleUrl = searchParams.get("guac_url") || "";
+  // Guacamole URL from search params (legacy) or from edge function
+  const guacamoleUrl = guacIframeUrl || searchParams.get("guac_url") || "";
 
-  // Simulate connection lifecycle
+  // Check for vm_id param to create a real Guacamole session
+  const vmId = searchParams.get("vm_id");
+
+  const createGuacSession = useCallback(async (targetVmId: string) => {
+    try {
+      const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
+        body: { action: "create-session", vm_id: targetVmId },
+      });
+
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+
+      setGuacIframeUrl(data.iframe_url);
+      setGuacConnectionId(data.connection_id);
+      setDbSessionId(data.session_id);
+      setSession((prev) => ({
+        ...prev,
+        protocol: data.protocol || prev.protocol,
+        privateIp: data.vm_ip || prev.privateIp,
+      }));
+      setConnectionState("connected");
+    } catch (err) {
+      console.error("Failed to create Guacamole session:", err);
+      setConnectionState("error");
+    }
+  }, []);
+
+  // Init: create real session if vm_id is provided, otherwise demo mode
   useEffect(() => {
-    const timer = setTimeout(() => {
-      if (guacamoleUrl) {
-        setConnectionState("connected");
-      } else {
-        // No URL = demo mode, simulate connection
-        setConnectionState("connected");
-      }
-    }, 2500);
-    return () => clearTimeout(timer);
-  }, [guacamoleUrl]);
+    if (vmId) {
+      createGuacSession(vmId);
+    } else {
+      // Demo mode — simulate connection
+      const timer = setTimeout(() => setConnectionState("connected"), 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [vmId, createGuacSession]);
 
   // Countdown timer
   useEffect(() => {
@@ -105,7 +133,11 @@ export default function LabSession() {
 
   const handleReconnect = () => {
     setConnectionState("connecting");
-    setTimeout(() => setConnectionState("connected"), 2000);
+    if (vmId) {
+      createGuacSession(vmId);
+    } else {
+      setTimeout(() => setConnectionState("connected"), 2000);
+    }
     toast({ title: "Reconnecting", description: "Attempting to reconnect to the lab session..." });
   };
 
@@ -113,7 +145,20 @@ export default function LabSession() {
     toast({ title: "Clipboard synced", description: "Clipboard content sent to remote session." });
   };
 
-  const handleEndSession = () => {
+  const handleEndSession = async () => {
+    if (dbSessionId) {
+      try {
+        await supabase.functions.invoke("guacamole-proxy", {
+          body: {
+            action: "end-session",
+            session_id: dbSessionId,
+            connection_id: guacConnectionId,
+          },
+        });
+      } catch (err) {
+        console.error("Failed to end session cleanly:", err);
+      }
+    }
     toast({ title: "Session ended", description: "Your lab session has been terminated.", variant: "destructive" });
     navigate("/labs");
   };
