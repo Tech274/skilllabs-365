@@ -13,6 +13,7 @@ import CostAnalytics from "./pages/CostAnalytics.tsx";
 import Health from "./pages/Health.tsx";
 import Security from "./pages/Security.tsx";
 import VMDetail from "./pages/VMDetail.tsx";
+import LabManagement from "./pages/LabManagement.tsx";
 
 const queryClient = new QueryClient();
 
@@ -32,6 +33,7 @@ const App = () => (
             <Route path="/costs" element={<CostAnalytics />} />
             <Route path="/health" element={<Health />} />
             <Route path="/security" element={<Security />} />
+            <Route path="/labs" element={<LabManagement />} />
             <Route path="*" element={<NotFound />} />
           </Routes>
         </BrowserRouter>

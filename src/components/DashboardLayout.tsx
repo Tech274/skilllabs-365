@@ -1,9 +1,9 @@
 import { SidebarProvider, SidebarTrigger } from "@/components/ui/sidebar";
 import { AppSidebar } from "@/components/AppSidebar";
-import { Bell, Sun, Moon } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { Sun, Moon } from "lucide-react";
 import { useTheme } from "@/hooks/use-theme";
 import { Button } from "@/components/ui/button";
+import { NotificationsDropdown } from "@/components/NotificationsDropdown";
 
 export function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { theme, toggle } = useTheme();
@@ -26,12 +26,7 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
               <Button variant="ghost" size="icon" onClick={toggle} className="h-8 w-8">
                 {theme === 'dark' ? <Sun className="h-4 w-4 text-muted-foreground" /> : <Moon className="h-4 w-4 text-muted-foreground" />}
               </Button>
-              <button className="relative p-2 rounded-md hover:bg-secondary transition-colors">
-                <Bell className="h-4 w-4 text-muted-foreground" />
-                <Badge className="absolute -top-0.5 -right-0.5 h-4 w-4 p-0 flex items-center justify-center text-[10px] bg-destructive text-destructive-foreground border-0">
-                  3
-                </Badge>
-              </button>
+              <NotificationsDropdown />
             </div>
           </header>
           <main className="flex-1 overflow-auto p-3 sm:p-6">
