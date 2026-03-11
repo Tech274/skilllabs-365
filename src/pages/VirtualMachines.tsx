@@ -67,7 +67,7 @@ export default function VirtualMachines() {
               <tbody>
                 {filtered.map(vm => (
                   <tr key={vm.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                    <td className="px-5 py-3 font-mono text-xs text-primary">{vm.id}</td>
+                    <td className="px-5 py-3 font-mono text-xs text-primary"><Link to={`/vms/${vm.id}`} className="hover:underline flex items-center gap-1">{vm.id}<ExternalLink className="h-3 w-3" /></Link></td>
                     <td className="px-5 py-3 text-foreground">{vm.userName}</td>
                     <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
                     <td className="px-5 py-3 text-muted-foreground">{vm.region}</td>
