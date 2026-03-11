@@ -16,6 +16,7 @@ import VMDetail from "./pages/VMDetail.tsx";
 import LabManagement from "./pages/LabManagement.tsx";
 import UserManagement from "./pages/UserManagement.tsx";
 import Settings from "./pages/Settings.tsx";
+import LabSession from "./pages/LabSession.tsx";
 
 const queryClient = new QueryClient();
 
