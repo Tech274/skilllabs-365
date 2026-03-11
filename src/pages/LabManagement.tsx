@@ -1,6 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { Plus, Pencil, Trash2, Monitor, Terminal, Clock, Users, Copy, MoreVertical } from "lucide-react";
+import { Plus, Pencil, Trash2, Monitor, Terminal, Clock, Users, Copy, MoreVertical, Play } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
