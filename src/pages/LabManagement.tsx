@@ -77,6 +77,7 @@ const statusStyle = {
 };
 
 export default function LabManagement() {
+  const navigate = useNavigate();
   const [labs, setLabs] = useState(initialLabs);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingLab, setEditingLab] = useState<LabTemplate | null>(null);
