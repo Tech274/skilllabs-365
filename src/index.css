@@ -61,6 +61,60 @@
     --font-display: 'Inter', sans-serif;
     --font-mono: 'JetBrains Mono', monospace;
   }
+
+  .light {
+    --background: 210 20% 98%;
+    --foreground: 220 20% 10%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 10%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 10%;
+
+    --primary: 187 80% 38%;
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 20% 94%;
+    --secondary-foreground: 220 16% 30%;
+
+    --muted: 210 16% 93%;
+    --muted-foreground: 215 12% 45%;
+
+    --accent: 187 60% 32%;
+    --accent-foreground: 0 0% 100%;
+
+    --destructive: 0 72% 50%;
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 20% 88%;
+    --input: 214 20% 88%;
+    --ring: 187 80% 38%;
+
+    --sidebar-background: 210 20% 96%;
+    --sidebar-foreground: 215 12% 40%;
+    --sidebar-primary: 187 80% 38%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 210 16% 92%;
+    --sidebar-accent-foreground: 220 16% 20%;
+    --sidebar-border: 214 20% 90%;
+    --sidebar-ring: 187 80% 38%;
+
+    --success: 152 60% 38%;
+    --success-foreground: 152 60% 10%;
+    --warning: 38 90% 45%;
+    --warning-foreground: 38 90% 10%;
+    --info: 210 80% 45%;
+    --info-foreground: 210 80% 10%;
+
+    --glow-primary: 0 0 20px hsl(187 80% 38% / 0.1);
+    --glow-success: 0 0 20px hsl(152 60% 38% / 0.1);
+    --glow-warning: 0 0 20px hsl(38 90% 45% / 0.1);
+    --glow-destructive: 0 0 20px hsl(0 72% 50% / 0.1);
+
+    --font-display: 'Inter', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
 }
 
 @layer base {
