@@ -4,7 +4,8 @@ import { labVMs } from "@/lib/mock-data";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState } from "react";
-import { Search, RotateCcw, StopCircle, Trash2 } from "lucide-react";
+import { Search, RotateCcw, StopCircle, Trash2, ExternalLink } from "lucide-react";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/mock-data";
 import { motion } from "framer-motion";
@@ -66,7 +67,7 @@ export default function VirtualMachines() {
               <tbody>
                 {filtered.map(vm => (
                   <tr key={vm.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                    <td className="px-5 py-3 font-mono text-xs text-primary">{vm.id}</td>
+                    <td className="px-5 py-3 font-mono text-xs text-primary"><Link to={`/vms/${vm.id}`} className="hover:underline flex items-center gap-1">{vm.id}<ExternalLink className="h-3 w-3" /></Link></td>
                     <td className="px-5 py-3 text-foreground">{vm.userName}</td>
                     <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
                     <td className="px-5 py-3 text-muted-foreground">{vm.region}</td>
