@@ -37,6 +37,7 @@ const App = () => (
             <Route path="/health" element={<Health />} />
             <Route path="/security" element={<Security />} />
             <Route path="/labs" element={<LabManagement />} />
+            <Route path="/labs/session/:sessionId" element={<LabSession />} />
             <Route path="/users" element={<UserManagement />} />
             <Route path="/settings" element={<Settings />} />
             <Route path="*" element={<NotFound />} />
