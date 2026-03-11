@@ -133,7 +133,11 @@ export default function LabSession() {
 
   const handleReconnect = () => {
     setConnectionState("connecting");
-    setTimeout(() => setConnectionState("connected"), 2000);
+    if (vmId) {
+      createGuacSession(vmId);
+    } else {
+      setTimeout(() => setConnectionState("connected"), 2000);
+    }
     toast({ title: "Reconnecting", description: "Attempting to reconnect to the lab session..." });
   };
 
@@ -141,7 +145,20 @@ export default function LabSession() {
     toast({ title: "Clipboard synced", description: "Clipboard content sent to remote session." });
   };
 
-  const handleEndSession = () => {
+  const handleEndSession = async () => {
+    if (dbSessionId) {
+      try {
+        await supabase.functions.invoke("guacamole-proxy", {
+          body: {
+            action: "end-session",
+            session_id: dbSessionId,
+            connection_id: guacConnectionId,
+          },
+        });
+      } catch (err) {
+        console.error("Failed to end session cleanly:", err);
+      }
+    }
     toast({ title: "Session ended", description: "Your lab session has been terminated.", variant: "destructive" });
     navigate("/labs");
   };
