@@ -1,6 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { Plus, Pencil, Trash2, Monitor, Terminal, Clock, Users, Copy, MoreVertical } from "lucide-react";
+import { Plus, Pencil, Trash2, Monitor, Terminal, Clock, Users, Copy, MoreVertical, Play } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger, DialogFooter } from "@/components/ui/dialog";
@@ -76,6 +77,7 @@ const statusStyle = {
 };
 
 export default function LabManagement() {
+  const navigate = useNavigate();
   const [labs, setLabs] = useState(initialLabs);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingLab, setEditingLab] = useState<LabTemplate | null>(null);
@@ -196,6 +198,16 @@ export default function LabManagement() {
                 <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
                 {!lab.clipboardEnabled && <Badge variant="outline" className="text-[10px] text-warning border-warning/30">No Clipboard</Badge>}
               </div>
+
+              {lab.status === 'active' && (
+                <Button
+                  size="sm"
+                  className="w-full gap-2"
+                  onClick={() => navigate(`/labs/session/${lab.id}`)}
+                >
+                  <Play className="h-3.5 w-3.5" /> Launch Lab
+                </Button>
+              )}
             </motion.div>
           ))}
         </div>
