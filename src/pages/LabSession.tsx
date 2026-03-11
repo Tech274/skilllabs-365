@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate, useSearchParams } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -23,6 +23,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/integrations/supabase/client";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 
@@ -36,13 +37,12 @@ interface SessionInfo {
   duration: number;
 }
 
-// Mock session data — will be replaced by real Guacamole integration
-const mockSession: SessionInfo = {
-  labName: "Azure Fundamentals",
+const defaultSession: SessionInfo = {
+  labName: "Lab Session",
   protocol: "RDP",
   vmSize: "Standard_B2s",
   region: "East US",
-  privateIp: "10.1.0.12",
+  privateIp: "—",
   expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
   duration: 120,
 };
