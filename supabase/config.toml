@@ -1,1 +1,7 @@
 project_id = "ubitkkcukilxzybodwcc"
+
+[functions.guacamole-proxy]
+verify_jwt = false
+
+[functions.provision-lab]
+verify_jwt = false
