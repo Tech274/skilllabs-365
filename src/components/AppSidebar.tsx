@@ -47,6 +47,16 @@ const systemItems = [
   { title: "Settings", url: "/settings", icon: Settings },
 ];
 
+const SignOutButton = ({ collapsed }: { collapsed?: boolean }) => {
+  const { signOut } = useAuth();
+  return (
+    <Button variant="ghost" size={collapsed ? "icon" : "sm"} className="w-full text-muted-foreground hover:text-foreground" onClick={signOut}>
+      <LogOut className="h-4 w-4" />
+      {!collapsed && <span className="ml-2">Sign Out</span>}
+    </Button>
+  );
+};
+
 export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
