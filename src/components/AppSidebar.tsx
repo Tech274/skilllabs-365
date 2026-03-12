@@ -28,6 +28,10 @@ const instructorItems = [
   { title: "Sessions", url: "/sessions", icon: Users },
 ];
 
+const studentItems = [
+  { title: "Dashboard", url: "/student", icon: LayoutDashboard },
+];
+
 const systemItems = [
   { title: "Health", url: "/health", icon: Activity },
   { title: "Security", url: "/security", icon: Shield },

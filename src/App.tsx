@@ -6,6 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/hooks/use-theme";
 import { AuthProvider } from "@/hooks/use-auth";
 import ProtectedRoute from "@/components/ProtectedRoute";
+import RoleProtectedRoute from "@/components/RoleProtectedRoute";
 import Index from "./pages/Index";
 import NotFound from "./pages/NotFound";
 import VirtualMachines from "./pages/VirtualMachines";
@@ -21,6 +22,7 @@ import Settings from "./pages/Settings";
 import LabSession from "./pages/LabSession";
 import SessionAuditLog from "./pages/SessionAuditLog";
 import InstructorDashboard from "./pages/InstructorDashboard";
+import StudentDashboard from "./pages/StudentDashboard";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 
@@ -37,20 +39,24 @@ const App = () => (
             <Routes>
               <Route path="/login" element={<Login />} />
               <Route path="/signup" element={<Signup />} />
-              <Route path="/" element={<ProtectedRoute><Index /></ProtectedRoute>} />
-              <Route path="/vms" element={<ProtectedRoute><VirtualMachines /></ProtectedRoute>} />
-              <Route path="/vms/:vmId" element={<ProtectedRoute><VMDetail /></ProtectedRoute>} />
-              <Route path="/sessions" element={<ProtectedRoute><Sessions /></ProtectedRoute>} />
-              <Route path="/regions" element={<ProtectedRoute><Regions /></ProtectedRoute>} />
-              <Route path="/costs" element={<ProtectedRoute><CostAnalytics /></ProtectedRoute>} />
-              <Route path="/health" element={<ProtectedRoute><Health /></ProtectedRoute>} />
-              <Route path="/security" element={<ProtectedRoute><Security /></ProtectedRoute>} />
-              <Route path="/labs" element={<ProtectedRoute><LabManagement /></ProtectedRoute>} />
+              {/* Admin-only routes */}
+              <Route path="/" element={<RoleProtectedRoute allowedRoles={["admin"]}><Index /></RoleProtectedRoute>} />
+              <Route path="/vms" element={<RoleProtectedRoute allowedRoles={["admin"]}><VirtualMachines /></RoleProtectedRoute>} />
+              <Route path="/vms/:vmId" element={<RoleProtectedRoute allowedRoles={["admin"]}><VMDetail /></RoleProtectedRoute>} />
+              <Route path="/regions" element={<RoleProtectedRoute allowedRoles={["admin"]}><Regions /></RoleProtectedRoute>} />
+              <Route path="/costs" element={<RoleProtectedRoute allowedRoles={["admin"]}><CostAnalytics /></RoleProtectedRoute>} />
+              <Route path="/health" element={<RoleProtectedRoute allowedRoles={["admin"]}><Health /></RoleProtectedRoute>} />
+              <Route path="/security" element={<RoleProtectedRoute allowedRoles={["admin"]}><Security /></RoleProtectedRoute>} />
+              <Route path="/labs" element={<RoleProtectedRoute allowedRoles={["admin"]}><LabManagement /></RoleProtectedRoute>} />
+              <Route path="/audit-log" element={<RoleProtectedRoute allowedRoles={["admin"]}><SessionAuditLog /></RoleProtectedRoute>} />
+              <Route path="/users" element={<RoleProtectedRoute allowedRoles={["admin"]}><UserManagement /></RoleProtectedRoute>} />
+              <Route path="/settings" element={<RoleProtectedRoute allowedRoles={["admin"]}><Settings /></RoleProtectedRoute>} />
+              {/* Shared routes */}
+              <Route path="/sessions" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><Sessions /></RoleProtectedRoute>} />
               <Route path="/labs/session/:sessionId" element={<ProtectedRoute><LabSession /></ProtectedRoute>} />
-              <Route path="/audit-log" element={<ProtectedRoute><SessionAuditLog /></ProtectedRoute>} />
-              <Route path="/instructor" element={<ProtectedRoute><InstructorDashboard /></ProtectedRoute>} />
-              <Route path="/users" element={<ProtectedRoute><UserManagement /></ProtectedRoute>} />
-              <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
+              {/* Role-specific dashboards */}
+              <Route path="/instructor" element={<RoleProtectedRoute allowedRoles={["instructor"]}><InstructorDashboard /></RoleProtectedRoute>} />
+              <Route path="/student" element={<RoleProtectedRoute allowedRoles={["student"]}><StudentDashboard /></RoleProtectedRoute>} />
               <Route path="*" element={<NotFound />} />
             </Routes>
           </AuthProvider>
