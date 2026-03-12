@@ -23,6 +23,7 @@ import LabSession from "./pages/LabSession";
 import SessionAuditLog from "./pages/SessionAuditLog";
 import InstructorDashboard from "./pages/InstructorDashboard";
 import StudentDashboard from "./pages/StudentDashboard";
+import SessionPlayback from "./pages/SessionPlayback";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 
