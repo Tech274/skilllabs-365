@@ -14,7 +14,7 @@ interface SessionEvent {
   id: string;
   session_id: string;
   event_type: string;
-  event_data: Record<string, unknown>;
+  event_data: Record<string, unknown> | unknown;
   created_at: string;
 }
 
