@@ -67,6 +67,10 @@ export default function LabManagement() {
   const [assignedInstructorIds, setAssignedInstructorIds] = useState<string[]>([]);
   const [assignLoading, setAssignLoading] = useState(false);
 
+  // Delete confirmation state
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletingLab, setDeletingLab] = useState<LabTemplate | null>(null);
+
   const fetchLabs = async () => {
     const { data, error } = await supabase.from("lab_templates").select("*").order("created_at", { ascending: false });
     if (error) {
