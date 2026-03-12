@@ -55,7 +55,7 @@ export function AppSidebar() {
   const { role, isAdmin, isInstructor } = useAuth();
   const isActive = (path: string) => location.pathname === path;
 
-  const navItems = isAdmin ? adminItems : isInstructor ? instructorItems : instructorItems;
+  const navItems = isAdmin ? adminItems : isInstructor ? instructorItems : studentItems;
   const roleLabel = isAdmin ? "Platform Admin" : isInstructor ? "Instructor" : "Student";
 
   return (
