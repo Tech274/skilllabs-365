@@ -186,9 +186,15 @@ export default function InstructorDashboard() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Instructor Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">Your assigned labs and student activity</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground">Instructor Dashboard</h1>
+            <p className="text-sm text-muted-foreground mt-1">Your assigned labs and student activity</p>
+          </div>
+          <div className="flex items-center gap-2 rounded-full bg-success/10 px-3 py-1.5">
+            <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
+            <span className="text-xs font-medium text-success">Live</span>
+          </div>
         </div>
 
         {/* KPI Cards */}
