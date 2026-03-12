@@ -391,6 +391,7 @@ export default function InstructorDashboard() {
                         <th className="text-center p-3 text-xs font-medium text-muted-foreground">Active</th>
                         <th className="text-center p-3 text-xs font-medium text-muted-foreground">Avg Duration</th>
                         <th className="text-right p-3 text-xs font-medium text-muted-foreground">Last Active</th>
+                        <th className="text-center p-3 text-xs font-medium text-muted-foreground">Playback</th>
                       </tr>
                     </thead>
                     <tbody>
