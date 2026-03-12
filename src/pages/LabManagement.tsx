@@ -112,12 +112,19 @@ export default function LabManagement() {
     fetchLabs();
   };
 
-  const handleDelete = async (id: string) => {
-    const lab = labs.find(l => l.id === id);
-    const { error } = await supabase.from("lab_templates").delete().eq("id", id);
+  const confirmDelete = (lab: LabTemplate) => {
+    setDeletingLab(lab);
+    setDeleteDialogOpen(true);
+  };
+
+  const handleDelete = async () => {
+    if (!deletingLab) return;
+    const { error } = await supabase.from("lab_templates").delete().eq("id", deletingLab.id);
     if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
-    setLabs(prev => prev.filter(l => l.id !== id));
-    toast({ title: "Lab deleted", description: `${lab?.name} has been removed.` });
+    setLabs(prev => prev.filter(l => l.id !== deletingLab.id));
+    toast({ title: "Lab deleted", description: `${deletingLab.name} has been removed.` });
+    setDeleteDialogOpen(false);
+    setDeletingLab(null);
   };
 
   const handleDuplicate = async (lab: LabTemplate) => {
