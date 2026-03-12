@@ -1,6 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { Plus, Pencil, Trash2, Monitor, Terminal, Clock, Users, Copy, MoreVertical, Play, Loader2 } from "lucide-react";
+import { Plus, Pencil, Trash2, Monitor, Terminal, Copy, MoreVertical, Play, Loader2, UserPlus, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -44,6 +44,12 @@ const statusStyle: Record<string, string> = {
   archived: 'bg-muted text-muted-foreground',
 };
 
+interface InstructorProfile {
+  user_id: string;
+  display_name: string;
+  email: string | null;
+}
+
 export default function LabManagement() {
   const navigate = useNavigate();
   const [labs, setLabs] = useState<LabTemplate[]>([]);
@@ -53,10 +59,16 @@ export default function LabManagement() {
   const [form, setForm] = useState<LabForm>(emptyForm);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
 
+  // Assignment state
+  const [assignDialogOpen, setAssignDialogOpen] = useState(false);
+  const [assigningLab, setAssigningLab] = useState<LabTemplate | null>(null);
+  const [instructors, setInstructors] = useState<InstructorProfile[]>([]);
+  const [assignedInstructorIds, setAssignedInstructorIds] = useState<string[]>([]);
+  const [assignLoading, setAssignLoading] = useState(false);
+
   const fetchLabs = async () => {
     const { data, error } = await supabase.from("lab_templates").select("*").order("created_at", { ascending: false });
     if (error) {
-      console.error("Failed to fetch labs:", error);
       toast({ title: "Error", description: "Failed to load lab templates.", variant: "destructive" });
     } else {
       setLabs(data || []);
@@ -66,11 +78,7 @@ export default function LabManagement() {
 
   useEffect(() => { fetchLabs(); }, []);
 
-  const openCreate = () => {
-    setEditingLab(null);
-    setForm(emptyForm);
-    setDialogOpen(true);
-  };
+  const openCreate = () => { setEditingLab(null); setForm(emptyForm); setDialogOpen(true); };
 
   const openEdit = (lab: LabTemplate) => {
     setEditingLab(lab);
@@ -87,18 +95,12 @@ export default function LabManagement() {
     if (!form.name.trim()) return;
     if (editingLab) {
       const { error } = await supabase.from("lab_templates").update(form).eq("id", editingLab.id);
-      if (error) {
-        toast({ title: "Error", description: error.message, variant: "destructive" });
-        return;
-      }
+      if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
       toast({ title: "Lab updated", description: `${form.name} has been updated.` });
     } else {
       const insert: TablesInsert<"lab_templates"> = { ...form };
       const { error } = await supabase.from("lab_templates").insert(insert);
-      if (error) {
-        toast({ title: "Error", description: error.message, variant: "destructive" });
-        return;
-      }
+      if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
       toast({ title: "Lab created", description: `${form.name} has been created.` });
     }
     setDialogOpen(false);
@@ -108,10 +110,7 @@ export default function LabManagement() {
   const handleDelete = async (id: string) => {
     const lab = labs.find(l => l.id === id);
     const { error } = await supabase.from("lab_templates").delete().eq("id", id);
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-      return;
-    }
+    if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
     setLabs(prev => prev.filter(l => l.id !== id));
     toast({ title: "Lab deleted", description: `${lab?.name} has been removed.` });
   };
@@ -124,36 +123,59 @@ export default function LabManagement() {
       file_transfer_enabled: lab.file_transfer_enabled, region: lab.region, status: 'draft',
     };
     const { error } = await supabase.from("lab_templates").insert(insert);
-    if (error) {
-      toast({ title: "Error", description: error.message, variant: "destructive" });
-      return;
-    }
+    if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
     toast({ title: "Lab duplicated", description: `${lab.name} (Copy) created as draft.` });
     fetchLabs();
   };
 
   const handleLaunchLab = async (lab: LabTemplate) => {
     setLaunchingId(lab.id);
-    toast({ title: "Provisioning VM", description: `Starting ${lab.name}... This may take a minute.` });
-
     try {
-      const { data, error } = await supabase.functions.invoke("provision-lab", {
-        body: { lab_template_id: lab.id },
-      });
-
+      const { data, error } = await supabase.functions.invoke("provision-lab", { body: { lab_template_id: lab.id } });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-
       toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
-
-      // Navigate to session page with the vm_id so it creates a Guacamole session
       navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
     } catch (err: any) {
-      console.error("Launch lab failed:", err);
       toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
     } finally {
       setLaunchingId(null);
     }
+  };
+
+  const openAssignDialog = async (lab: LabTemplate) => {
+    setAssigningLab(lab);
+    setAssignLoading(true);
+    setAssignDialogOpen(true);
+    const [roleRes, assignRes] = await Promise.all([
+      supabase.from("user_roles").select("user_id").eq("role", "instructor"),
+      supabase.from("lab_assignments").select("instructor_id").eq("lab_template_id", lab.id),
+    ]);
+    const instructorUserIds = roleRes.data?.map(r => r.user_id) ?? [];
+    setAssignedInstructorIds(assignRes.data?.map(a => a.instructor_id) ?? []);
+    if (instructorUserIds.length > 0) {
+      const { data: profiles } = await supabase.from("profiles").select("user_id, display_name, email").in("user_id", instructorUserIds);
+      setInstructors(profiles ?? []);
+    } else {
+      setInstructors([]);
+    }
+    setAssignLoading(false);
+  };
+
+  const handleAssign = async (instructorId: string) => {
+    if (!assigningLab) return;
+    const { error } = await supabase.from("lab_assignments").insert({ lab_template_id: assigningLab.id, instructor_id: instructorId });
+    if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
+    setAssignedInstructorIds(prev => [...prev, instructorId]);
+    toast({ title: "Assigned", description: "Instructor assigned to lab." });
+  };
+
+  const handleUnassign = async (instructorId: string) => {
+    if (!assigningLab) return;
+    const { error } = await supabase.from("lab_assignments").delete().eq("lab_template_id", assigningLab.id).eq("instructor_id", instructorId);
+    if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
+    setAssignedInstructorIds(prev => prev.filter(id => id !== instructorId));
+    toast({ title: "Removed", description: "Instructor removed from lab." });
   };
 
   return (
@@ -164,61 +186,39 @@ export default function LabManagement() {
             <h1 className="text-2xl font-semibold text-foreground">Lab Management</h1>
             <p className="text-sm text-muted-foreground mt-1">{labs.length} lab templates configured</p>
           </div>
-          <Button onClick={openCreate} className="gap-2">
-            <Plus className="h-4 w-4" /> Create Lab Template
-          </Button>
+          <Button onClick={openCreate} className="gap-2"><Plus className="h-4 w-4" /> Create Lab Template</Button>
         </div>
 
         {loading ? (
-          <div className="flex items-center justify-center py-20">
-            <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-          </div>
+          <div className="flex items-center justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
         ) : labs.length === 0 ? (
-          <div className="text-center py-20 text-muted-foreground">
-            <p className="text-sm">No lab templates yet. Create one to get started.</p>
-          </div>
+          <div className="text-center py-20 text-muted-foreground"><p className="text-sm">No lab templates yet. Create one to get started.</p></div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
             {labs.map((lab, i) => (
-              <motion.div
-                key={lab.id}
-                initial={{ opacity: 0, y: 12 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: i * 0.04 }}
-                className="rounded-xl border border-border bg-card p-5 space-y-4 hover:border-primary/30 transition-colors"
-              >
+              <motion.div key={lab.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.04 }}
+                className="rounded-xl border border-border bg-card p-5 space-y-4 hover:border-primary/30 transition-colors">
                 <div className="flex items-start justify-between">
                   <div className="flex items-center gap-2">
                     {lab.protocol.toUpperCase() === 'RDP' ? <Monitor className="h-4 w-4 text-primary" /> : <Terminal className="h-4 w-4 text-success" />}
                     <h3 className="text-sm font-semibold text-foreground">{lab.name}</h3>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase", statusStyle[lab.status] || statusStyle.draft)}>
-                      {lab.status}
-                    </span>
+                    <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase", statusStyle[lab.status] || statusStyle.draft)}>{lab.status}</span>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
-                        <button className="p-1 rounded hover:bg-muted transition-colors">
-                          <MoreVertical className="h-3.5 w-3.5 text-muted-foreground" />
-                        </button>
+                        <button className="p-1 rounded hover:bg-muted transition-colors"><MoreVertical className="h-3.5 w-3.5 text-muted-foreground" /></button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end">
-                        <DropdownMenuItem onClick={() => openEdit(lab)}>
-                          <Pencil className="h-3.5 w-3.5 mr-2" /> Edit
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleDuplicate(lab)}>
-                          <Copy className="h-3.5 w-3.5 mr-2" /> Duplicate
-                        </DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleDelete(lab.id)} className="text-destructive focus:text-destructive">
-                          <Trash2 className="h-3.5 w-3.5 mr-2" /> Delete
-                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openEdit(lab)}><Pencil className="h-3.5 w-3.5 mr-2" /> Edit</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleDuplicate(lab)}><Copy className="h-3.5 w-3.5 mr-2" /> Duplicate</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => openAssignDialog(lab)}><UserPlus className="h-3.5 w-3.5 mr-2" /> Assign Instructors</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => handleDelete(lab.id)} className="text-destructive focus:text-destructive"><Trash2 className="h-3.5 w-3.5 mr-2" /> Delete</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
                 </div>
-
                 <p className="text-xs text-muted-foreground line-clamp-2">{lab.description}</p>
-
                 <div className="grid grid-cols-2 gap-2 text-center">
                   <div className="rounded-lg bg-muted/50 p-2">
                     <p className="text-sm font-mono font-semibold text-foreground">{lab.duration}m</p>
@@ -229,30 +229,15 @@ export default function LabManagement() {
                     <p className="text-[9px] text-muted-foreground uppercase">Idle Timeout</p>
                   </div>
                 </div>
-
                 <div className="flex flex-wrap gap-1.5">
                   <Badge variant="outline" className="text-[10px] font-mono">{lab.vm_size}</Badge>
                   <Badge variant="outline" className="text-[10px]">{lab.protocol}</Badge>
                   <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
                   {!lab.clipboard_enabled && <Badge variant="outline" className="text-[10px] text-warning border-warning/30">No Clipboard</Badge>}
                 </div>
-
                 {lab.status === 'active' && (
-                  <Button
-                    size="sm"
-                    className="w-full gap-2"
-                    disabled={launchingId === lab.id}
-                    onClick={() => handleLaunchLab(lab)}
-                  >
-                    {launchingId === lab.id ? (
-                      <>
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...
-                      </>
-                    ) : (
-                      <>
-                        <Play className="h-3.5 w-3.5" /> Launch Lab
-                      </>
-                    )}
+                  <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
+                    {launchingId === lab.id ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</> : <><Play className="h-3.5 w-3.5" /> Launch Lab</>}
                   </Button>
                 )}
               </motion.div>
@@ -263,9 +248,7 @@ export default function LabManagement() {
         {/* Create/Edit Dialog */}
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogContent className="max-w-lg max-h-[85vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>{editingLab ? 'Edit Lab Template' : 'Create Lab Template'}</DialogTitle>
-            </DialogHeader>
+            <DialogHeader><DialogTitle>{editingLab ? 'Edit Lab Template' : 'Create Lab Template'}</DialogTitle></DialogHeader>
             <div className="space-y-4 py-2">
               <div className="space-y-2">
                 <Label>Lab Name</Label>
@@ -348,10 +331,43 @@ export default function LabManagement() {
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-              <Button onClick={handleSave} disabled={!form.name.trim()}>
-                {editingLab ? 'Save Changes' : 'Create Lab'}
-              </Button>
+              <Button onClick={handleSave} disabled={!form.name.trim()}>{editingLab ? 'Save Changes' : 'Create Lab'}</Button>
             </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* Assign Instructors Dialog */}
+        <Dialog open={assignDialogOpen} onOpenChange={setAssignDialogOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader><DialogTitle>Assign Instructors — {assigningLab?.name}</DialogTitle></DialogHeader>
+            {assignLoading ? (
+              <div className="flex items-center justify-center py-8"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
+            ) : instructors.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-6 text-center">No instructors found. Promote a user to instructor role first.</p>
+            ) : (
+              <div className="space-y-2 max-h-64 overflow-y-auto">
+                {instructors.map(inst => {
+                  const isAssigned = assignedInstructorIds.includes(inst.user_id);
+                  return (
+                    <div key={inst.user_id} className="flex items-center justify-between rounded-lg border border-border p-3">
+                      <div>
+                        <p className="text-sm font-medium text-foreground">{inst.display_name}</p>
+                        <p className="text-xs text-muted-foreground">{inst.email}</p>
+                      </div>
+                      {isAssigned ? (
+                        <Button size="sm" variant="outline" className="gap-1 text-destructive hover:text-destructive" onClick={() => handleUnassign(inst.user_id)}>
+                          <X className="h-3 w-3" /> Remove
+                        </Button>
+                      ) : (
+                        <Button size="sm" variant="outline" className="gap-1" onClick={() => handleAssign(inst.user_id)}>
+                          <UserPlus className="h-3 w-3" /> Assign
+                        </Button>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </DialogContent>
         </Dialog>
       </div>

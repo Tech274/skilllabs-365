@@ -28,6 +28,10 @@ const instructorItems = [
   { title: "Sessions", url: "/sessions", icon: Users },
 ];
 
+const studentItems = [
+  { title: "Dashboard", url: "/student", icon: LayoutDashboard },
+];
+
 const systemItems = [
   { title: "Health", url: "/health", icon: Activity },
   { title: "Security", url: "/security", icon: Shield },
@@ -51,7 +55,7 @@ export function AppSidebar() {
   const { role, isAdmin, isInstructor } = useAuth();
   const isActive = (path: string) => location.pathname === path;
 
-  const navItems = isAdmin ? adminItems : isInstructor ? instructorItems : instructorItems;
+  const navItems = isAdmin ? adminItems : isInstructor ? instructorItems : studentItems;
   const roleLabel = isAdmin ? "Platform Admin" : isInstructor ? "Instructor" : "Student";
 
   return (
