@@ -225,7 +225,7 @@ export default function LabManagement() {
                         <DropdownMenuItem onClick={() => openEdit(lab)}><Pencil className="h-3.5 w-3.5 mr-2" /> Edit</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => handleDuplicate(lab)}><Copy className="h-3.5 w-3.5 mr-2" /> Duplicate</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => openAssignDialog(lab)}><UserPlus className="h-3.5 w-3.5 mr-2" /> Assign Instructors</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleDelete(lab.id)} className="text-destructive focus:text-destructive"><Trash2 className="h-3.5 w-3.5 mr-2" /> Delete</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => confirmDelete(lab)} className="text-destructive focus:text-destructive"><Trash2 className="h-3.5 w-3.5 mr-2" /> Delete</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
