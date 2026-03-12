@@ -23,6 +23,7 @@ import LabSession from "./pages/LabSession";
 import SessionAuditLog from "./pages/SessionAuditLog";
 import InstructorDashboard from "./pages/InstructorDashboard";
 import StudentDashboard from "./pages/StudentDashboard";
+import SessionPlayback from "./pages/SessionPlayback";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 
@@ -53,6 +54,7 @@ const App = () => (
               <Route path="/settings" element={<RoleProtectedRoute allowedRoles={["admin"]}><Settings /></RoleProtectedRoute>} />
               {/* Shared routes */}
               <Route path="/sessions" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><Sessions /></RoleProtectedRoute>} />
+              <Route path="/sessions/:sessionId/playback" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><SessionPlayback /></RoleProtectedRoute>} />
               <Route path="/labs/session/:sessionId" element={<ProtectedRoute><LabSession /></ProtectedRoute>} />
               {/* Role-specific dashboards */}
               <Route path="/instructor" element={<RoleProtectedRoute allowedRoles={["instructor"]}><InstructorDashboard /></RoleProtectedRoute>} />

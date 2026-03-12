@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -66,6 +67,10 @@ export default function LabManagement() {
   const [assignedInstructorIds, setAssignedInstructorIds] = useState<string[]>([]);
   const [assignLoading, setAssignLoading] = useState(false);
 
+  // Delete confirmation state
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deletingLab, setDeletingLab] = useState<LabTemplate | null>(null);
+
   const fetchLabs = async () => {
     const { data, error } = await supabase.from("lab_templates").select("*").order("created_at", { ascending: false });
     if (error) {
@@ -107,12 +112,19 @@ export default function LabManagement() {
     fetchLabs();
   };
 
-  const handleDelete = async (id: string) => {
-    const lab = labs.find(l => l.id === id);
-    const { error } = await supabase.from("lab_templates").delete().eq("id", id);
+  const confirmDelete = (lab: LabTemplate) => {
+    setDeletingLab(lab);
+    setDeleteDialogOpen(true);
+  };
+
+  const handleDelete = async () => {
+    if (!deletingLab) return;
+    const { error } = await supabase.from("lab_templates").delete().eq("id", deletingLab.id);
     if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
-    setLabs(prev => prev.filter(l => l.id !== id));
-    toast({ title: "Lab deleted", description: `${lab?.name} has been removed.` });
+    setLabs(prev => prev.filter(l => l.id !== deletingLab.id));
+    toast({ title: "Lab deleted", description: `${deletingLab.name} has been removed.` });
+    setDeleteDialogOpen(false);
+    setDeletingLab(null);
   };
 
   const handleDuplicate = async (lab: LabTemplate) => {
@@ -213,7 +225,7 @@ export default function LabManagement() {
                         <DropdownMenuItem onClick={() => openEdit(lab)}><Pencil className="h-3.5 w-3.5 mr-2" /> Edit</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => handleDuplicate(lab)}><Copy className="h-3.5 w-3.5 mr-2" /> Duplicate</DropdownMenuItem>
                         <DropdownMenuItem onClick={() => openAssignDialog(lab)}><UserPlus className="h-3.5 w-3.5 mr-2" /> Assign Instructors</DropdownMenuItem>
-                        <DropdownMenuItem onClick={() => handleDelete(lab.id)} className="text-destructive focus:text-destructive"><Trash2 className="h-3.5 w-3.5 mr-2" /> Delete</DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => confirmDelete(lab)} className="text-destructive focus:text-destructive"><Trash2 className="h-3.5 w-3.5 mr-2" /> Delete</DropdownMenuItem>
                       </DropdownMenuContent>
                     </DropdownMenu>
                   </div>
@@ -370,6 +382,24 @@ export default function LabManagement() {
             )}
           </DialogContent>
         </Dialog>
+
+        {/* Delete Confirmation Dialog */}
+        <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Delete Lab Template</AlertDialogTitle>
+              <AlertDialogDescription>
+                Are you sure you want to delete <strong>{deletingLab?.name}</strong>? This action cannot be undone. All associated assignments will also be removed.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleDelete} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                Delete
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </DashboardLayout>
   );
