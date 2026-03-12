@@ -413,6 +413,21 @@ export default function InstructorDashboard() {
                           <td className="text-right p-3 text-xs text-muted-foreground">
                             {s.lastActive ? new Date(s.lastActive).toLocaleDateString() : "—"}
                           </td>
+                          <td className="text-center p-3">
+                            {s.totalSessions > 0 && (
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                className="text-xs gap-1 h-7"
+                                onClick={() => {
+                                  const latestSession = sessions.find(sess => sess.user_id === s.userId);
+                                  if (latestSession) navigate(`/sessions/${latestSession.id}/playback`);
+                                }}
+                              >
+                                <Play className="h-3 w-3" /> Review
+                              </Button>
+                            )}
+                          </td>
                         </tr>
                       ))}
                     </tbody>
