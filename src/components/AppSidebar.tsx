@@ -104,15 +104,19 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className="p-4">
+      <SidebarFooter className="p-4 space-y-2">
         {!collapsed && (
-          <div className="rounded-lg border border-border bg-muted/50 p-3">
-            <div className="flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
-              <span className="text-xs text-muted-foreground">All systems operational</span>
+          <>
+            <div className="rounded-lg border border-border bg-muted/50 p-3">
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
+                <span className="text-xs text-muted-foreground">All systems operational</span>
+              </div>
             </div>
-          </div>
+            <SignOutButton />
+          </>
         )}
+        {collapsed && <SignOutButton collapsed />}
       </SidebarFooter>
     </Sidebar>
   );
