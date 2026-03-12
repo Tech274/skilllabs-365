@@ -10,9 +10,12 @@ import {
   Cloud,
   BookOpen,
   History,
+  LogOut,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
+import { useAuth } from "@/hooks/use-auth";
+import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarContent,
@@ -43,6 +46,16 @@ const systemItems = [
   { title: "Security", url: "/security", icon: Shield },
   { title: "Settings", url: "/settings", icon: Settings },
 ];
+
+const SignOutButton = ({ collapsed }: { collapsed?: boolean }) => {
+  const { signOut } = useAuth();
+  return (
+    <Button variant="ghost" size={collapsed ? "icon" : "sm"} className="w-full text-muted-foreground hover:text-foreground" onClick={signOut}>
+      <LogOut className="h-4 w-4" />
+      {!collapsed && <span className="ml-2">Sign Out</span>}
+    </Button>
+  );
+};
 
 export function AppSidebar() {
   const { state } = useSidebar();
@@ -101,15 +114,19 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter className="p-4">
+      <SidebarFooter className="p-4 space-y-2">
         {!collapsed && (
-          <div className="rounded-lg border border-border bg-muted/50 p-3">
-            <div className="flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
-              <span className="text-xs text-muted-foreground">All systems operational</span>
+          <>
+            <div className="rounded-lg border border-border bg-muted/50 p-3">
+              <div className="flex items-center gap-2">
+                <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
+                <span className="text-xs text-muted-foreground">All systems operational</span>
+              </div>
             </div>
-          </div>
+            <SignOutButton />
+          </>
         )}
+        {collapsed && <SignOutButton collapsed />}
       </SidebarFooter>
     </Sidebar>
   );
