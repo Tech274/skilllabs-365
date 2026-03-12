@@ -51,85 +51,84 @@ export default function InstructorDashboard() {
   const [loading, setLoading] = useState(true);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
 
+  // Store labIds at component level for realtime filtering
+  const [labIds, setLabIds] = useState<string[]>([]);
+
+  const buildStudentProgress = async (sessionData: SessionRow[]) => {
+    const studentMap = new Map<string, StudentProgress>();
+    for (const s of sessionData) {
+      if (!s.user_id) continue;
+      if (!studentMap.has(s.user_id)) {
+        studentMap.set(s.user_id, {
+          userId: s.user_id, email: "", displayName: "",
+          totalSessions: 0, activeSessions: 0, avgDuration: 0, lastActive: null,
+        });
+      }
+      const sp = studentMap.get(s.user_id)!;
+      sp.totalSessions++;
+      if (s.status === "active") sp.activeSessions++;
+      if (!sp.lastActive || s.started_at > sp.lastActive) sp.lastActive = s.started_at;
+      if (s.ended_at && s.started_at) {
+        const dur = (new Date(s.ended_at).getTime() - new Date(s.started_at).getTime()) / 60000;
+        sp.avgDuration = ((sp.avgDuration * (sp.totalSessions - 1)) + dur) / sp.totalSessions;
+      }
+    }
+    const userIds = Array.from(studentMap.keys());
+    if (userIds.length > 0) {
+      const { data: profiles } = await supabase
+        .from("profiles").select("user_id, display_name, email").in("user_id", userIds);
+      for (const p of profiles ?? []) {
+        const sp = studentMap.get(p.user_id);
+        if (sp) { sp.displayName = p.display_name; sp.email = p.email ?? ""; }
+      }
+    }
+    return Array.from(studentMap.values());
+  };
+
   useEffect(() => {
     if (!user) return;
     const load = async () => {
-      // Fetch assigned lab IDs
       const { data: assignments } = await supabase
-        .from("lab_assignments")
-        .select("lab_template_id")
-        .eq("instructor_id", user.id);
+        .from("lab_assignments").select("lab_template_id").eq("instructor_id", user.id);
+      const ids = assignments?.map(a => a.lab_template_id) ?? [];
+      setLabIds(ids);
 
-      const labIds = assignments?.map(a => a.lab_template_id) ?? [];
-
-      if (labIds.length === 0) {
-        setLabs([]);
-        setSessions([]);
-        setStudents([]);
-        setLoading(false);
-        return;
+      if (ids.length === 0) {
+        setLabs([]); setSessions([]); setStudents([]); setLoading(false); return;
       }
 
-      // Fetch lab templates
-      const { data: labData } = await supabase
-        .from("lab_templates")
-        .select("*")
-        .in("id", labIds);
+      const { data: labData } = await supabase.from("lab_templates").select("*").in("id", ids);
       setLabs(labData ?? []);
 
-      // Fetch sessions for these labs
-      const { data: sessionData } = await supabase
-        .from("sessions")
-        .select("*")
-        .in("lab_template_id", labIds);
+      const { data: sessionData } = await supabase.from("sessions").select("*").in("lab_template_id", ids);
       setSessions(sessionData ?? []);
-
-      // Build student progress from sessions
-      const studentMap = new Map<string, StudentProgress>();
-      for (const s of sessionData ?? []) {
-        if (!s.user_id) continue;
-        if (!studentMap.has(s.user_id)) {
-          studentMap.set(s.user_id, {
-            userId: s.user_id,
-            email: "",
-            displayName: "",
-            totalSessions: 0,
-            activeSessions: 0,
-            avgDuration: 0,
-            lastActive: null,
-          });
-        }
-        const sp = studentMap.get(s.user_id)!;
-        sp.totalSessions++;
-        if (s.status === "active") sp.activeSessions++;
-        if (!sp.lastActive || s.started_at > sp.lastActive) sp.lastActive = s.started_at;
-        if (s.ended_at && s.started_at) {
-          const dur = (new Date(s.ended_at).getTime() - new Date(s.started_at).getTime()) / 60000;
-          sp.avgDuration = ((sp.avgDuration * (sp.totalSessions - 1)) + dur) / sp.totalSessions;
-        }
-      }
-
-      // Fetch profile info for students
-      const userIds = Array.from(studentMap.keys());
-      if (userIds.length > 0) {
-        const { data: profiles } = await supabase
-          .from("profiles")
-          .select("user_id, display_name, email")
-          .in("user_id", userIds);
-        for (const p of profiles ?? []) {
-          const sp = studentMap.get(p.user_id);
-          if (sp) {
-            sp.displayName = p.display_name;
-            sp.email = p.email ?? "";
-          }
-        }
-      }
-
-      setStudents(Array.from(studentMap.values()));
+      setStudents(await buildStudentProgress(sessionData ?? []));
       setLoading(false);
     };
     load();
   }, [user]);
+
+  // Realtime subscription for live session updates
+  useEffect(() => {
+    if (labIds.length === 0) return;
+
+    const channel = supabase
+      .channel('instructor-sessions')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sessions' }, async (payload) => {
+        const record = (payload.new as SessionRow) || (payload.old as SessionRow);
+        // Only process sessions for assigned labs
+        if (record?.lab_template_id && !labIds.includes(record.lab_template_id)) return;
+
+        // Re-fetch sessions for accuracy
+        const { data: sessionData } = await supabase.from("sessions").select("*").in("lab_template_id", labIds);
+        const newSessions = sessionData ?? [];
+        setSessions(newSessions);
+        setStudents(await buildStudentProgress(newSessions));
+      })
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [labIds]);
 
   const handleLaunchLab = async (lab: LabTemplate) => {
     setLaunchingId(lab.id);
@@ -187,9 +186,15 @@ export default function InstructorDashboard() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Instructor Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">Your assigned labs and student activity</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground">Instructor Dashboard</h1>
+            <p className="text-sm text-muted-foreground mt-1">Your assigned labs and student activity</p>
+          </div>
+          <div className="flex items-center gap-2 rounded-full bg-success/10 px-3 py-1.5">
+            <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
+            <span className="text-xs font-medium text-success">Live</span>
+          </div>
         </div>
 
         {/* KPI Cards */}
