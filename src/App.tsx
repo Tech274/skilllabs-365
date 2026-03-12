@@ -20,6 +20,7 @@ import UserManagement from "./pages/UserManagement";
 import Settings from "./pages/Settings";
 import LabSession from "./pages/LabSession";
 import SessionAuditLog from "./pages/SessionAuditLog";
+import InstructorDashboard from "./pages/InstructorDashboard";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 

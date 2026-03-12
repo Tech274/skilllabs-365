@@ -1,36 +1,18 @@
 import {
-  LayoutDashboard,
-  Server,
-  Users,
-  Globe,
-  DollarSign,
-  Activity,
-  Shield,
-  Settings,
-  Cloud,
-  BookOpen,
-  History,
-  LogOut,
+  LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
+  Settings, Cloud, BookOpen, History, LogOut, GraduationCap,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import {
-  Sidebar,
-  SidebarContent,
-  SidebarGroup,
-  SidebarGroupContent,
-  SidebarGroupLabel,
-  SidebarMenu,
-  SidebarMenuButton,
-  SidebarMenuItem,
-  SidebarHeader,
-  SidebarFooter,
-  useSidebar,
+  Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent,
+  SidebarGroupLabel, SidebarMenu, SidebarMenuButton, SidebarMenuItem,
+  SidebarHeader, SidebarFooter, useSidebar,
 } from "@/components/ui/sidebar";
 
-const mainItems = [
+const adminItems = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
   { title: "Virtual Machines", url: "/vms", icon: Server },
   { title: "Sessions", url: "/sessions", icon: Users },
@@ -39,6 +21,11 @@ const mainItems = [
   { title: "Lab Management", url: "/labs", icon: BookOpen },
   { title: "Audit Log", url: "/audit-log", icon: History },
   { title: "User Management", url: "/users", icon: Users },
+];
+
+const instructorItems = [
+  { title: "Dashboard", url: "/instructor", icon: GraduationCap },
+  { title: "Sessions", url: "/sessions", icon: Users },
 ];
 
 const systemItems = [
@@ -61,7 +48,11 @@ export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
   const location = useLocation();
+  const { role, isAdmin, isInstructor } = useAuth();
   const isActive = (path: string) => location.pathname === path;
+
+  const navItems = isAdmin ? adminItems : isInstructor ? instructorItems : instructorItems;
+  const roleLabel = isAdmin ? "Platform Admin" : isInstructor ? "Instructor" : "Student";
 
   return (
     <Sidebar collapsible="icon">
@@ -73,17 +64,17 @@ export function AppSidebar() {
           {!collapsed && (
             <div>
               <h2 className="text-sm font-semibold text-foreground">CloudLab</h2>
-              <p className="text-xs text-muted-foreground">Platform Admin</p>
+              <p className="text-xs text-muted-foreground">{roleLabel}</p>
             </div>
           )}
         </div>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>Operations</SidebarGroupLabel>
+          <SidebarGroupLabel>{isAdmin ? "Operations" : "Navigation"}</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {mainItems.map((item) => (
+              {navItems.map((item) => (
                 <SidebarMenuItem key={item.title}>
                   <SidebarMenuButton asChild isActive={isActive(item.url)}>
                     <NavLink to={item.url} end>
@@ -96,23 +87,25 @@ export function AppSidebar() {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
-        <SidebarGroup>
-          <SidebarGroupLabel>System</SidebarGroupLabel>
-          <SidebarGroupContent>
-            <SidebarMenu>
-              {systemItems.map((item) => (
-                <SidebarMenuItem key={item.title}>
-                  <SidebarMenuButton asChild isActive={isActive(item.url)}>
-                    <NavLink to={item.url} end>
-                      <item.icon className="h-4 w-4" />
-                      {!collapsed && <span>{item.title}</span>}
-                    </NavLink>
-                  </SidebarMenuButton>
-                </SidebarMenuItem>
-              ))}
-            </SidebarMenu>
-          </SidebarGroupContent>
-        </SidebarGroup>
+        {isAdmin && (
+          <SidebarGroup>
+            <SidebarGroupLabel>System</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {systemItems.map((item) => (
+                  <SidebarMenuItem key={item.title}>
+                    <SidebarMenuButton asChild isActive={isActive(item.url)}>
+                      <NavLink to={item.url} end>
+                        <item.icon className="h-4 w-4" />
+                        {!collapsed && <span>{item.title}</span>}
+                      </NavLink>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
       </SidebarContent>
       <SidebarFooter className="p-4 space-y-2">
         {!collapsed && (
