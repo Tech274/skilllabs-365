@@ -20,6 +20,7 @@ import UserManagement from "./pages/UserManagement";
 import Settings from "./pages/Settings";
 import LabSession from "./pages/LabSession";
 import SessionAuditLog from "./pages/SessionAuditLog";
+import InstructorDashboard from "./pages/InstructorDashboard";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 
@@ -47,6 +48,7 @@ const App = () => (
               <Route path="/labs" element={<ProtectedRoute><LabManagement /></ProtectedRoute>} />
               <Route path="/labs/session/:sessionId" element={<ProtectedRoute><LabSession /></ProtectedRoute>} />
               <Route path="/audit-log" element={<ProtectedRoute><SessionAuditLog /></ProtectedRoute>} />
+              <Route path="/instructor" element={<ProtectedRoute><InstructorDashboard /></ProtectedRoute>} />
               <Route path="/users" element={<ProtectedRoute><UserManagement /></ProtectedRoute>} />
               <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
               <Route path="*" element={<NotFound />} />

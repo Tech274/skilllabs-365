@@ -14,6 +14,38 @@ export type Database = {
   }
   public: {
     Tables: {
+      lab_assignments: {
+        Row: {
+          assigned_at: string
+          assigned_by: string | null
+          id: string
+          instructor_id: string
+          lab_template_id: string
+        }
+        Insert: {
+          assigned_at?: string
+          assigned_by?: string | null
+          id?: string
+          instructor_id: string
+          lab_template_id: string
+        }
+        Update: {
+          assigned_at?: string
+          assigned_by?: string | null
+          id?: string
+          instructor_id?: string
+          lab_template_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lab_assignments_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       lab_templates: {
         Row: {
           clipboard_enabled: boolean
