@@ -12,6 +12,7 @@ import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import type { Tables } from "@/integrations/supabase/types";
 import { AiInsightCard } from "@/components/AiInsightCard";
+import { AiChatPanel } from "@/components/AiChatPanel";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -258,6 +259,17 @@ export default function StudentDashboard() {
           )}
         </div>
       </div>
+
+      {/* Floating AI Chat */}
+      <AiChatPanel
+        context={{
+          available_labs: labs.map(l => ({ name: l.name, protocol: l.protocol, duration: l.duration, vm_size: l.vm_size, region: l.region })),
+          session_history: sessions.slice(0, 10).map(s => ({ status: s.status, region: s.region, started_at: s.started_at, connection_quality: s.connection_quality, disconnects: s.disconnects })),
+          completed_sessions: completedSessions,
+          active_sessions: activeSessions,
+          total_time_minutes: Math.round(totalTime),
+        }}
+      />
     </DashboardLayout>
   );
 }

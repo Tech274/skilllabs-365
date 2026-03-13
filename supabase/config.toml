@@ -14,3 +14,9 @@ verify_jwt = false
 
 [functions.daily-report]
 verify_jwt = false
+
+[functions.ai-assistant]
+verify_jwt = false
+
+[functions.ai-chat]
+verify_jwt = false
