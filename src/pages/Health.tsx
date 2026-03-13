@@ -2,6 +2,7 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 interface ServiceStatus {
   name: string;
