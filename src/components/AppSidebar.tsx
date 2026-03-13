@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
-  Settings, Cloud, BookOpen, History, LogOut, GraduationCap,
+  Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
