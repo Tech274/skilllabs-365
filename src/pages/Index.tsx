@@ -267,6 +267,39 @@ const Index = () => {
           buttonLabel="Analyze"
         />
 
+        {/* Quick Launch */}
+        {labs.length > 0 && (
+          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-border bg-card p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Play className="h-4 w-4 text-primary" />
+              <h3 className="text-sm font-medium text-foreground">Quick Launch</h3>
+              <span className="text-[10px] text-muted-foreground ml-1">Test lab provisioning directly</span>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {labs.map((lab) => (
+                <Button
+                  key={lab.id}
+                  variant="outline"
+                  size="sm"
+                  className="gap-2"
+                  disabled={launchingId === lab.id}
+                  onClick={() => handleLaunchLab(lab)}
+                >
+                  {launchingId === lab.id ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : lab.protocol.toUpperCase() === "RDP" ? (
+                    <Monitor className="h-3.5 w-3.5" />
+                  ) : (
+                    <Terminal className="h-3.5 w-3.5" />
+                  )}
+                  {lab.name}
+                  <Badge variant="outline" className="text-[9px] font-mono ml-1">{lab.vm_size}</Badge>
+                </Button>
+              ))}
+            </div>
+          </motion.div>
+        )}
+
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           <MetricCard title="Active VMs" value={totalRunning + totalIdle} icon={Server} variant="primary" />
