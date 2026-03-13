@@ -3,11 +3,24 @@ import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
 import { sessionHistory, regionHealthData } from "@/lib/mock-data";
 import type { VMStatus } from "@/lib/mock-data";
-import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu } from "lucide-react";
-import { motion } from "framer-motion";
-import { useEffect, useState, useCallback } from "react";
+import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu, Trash2 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
+import { toast } from "@/hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import {
   AreaChart,
   Area,
@@ -45,6 +58,8 @@ const Index = () => {
   const [quotas, setQuotas] = useState<Record<string, QuotaItem[]>>({});
   const [quotaLoading, setQuotaLoading] = useState(true);
   const [vmStatusCounts, setVmStatusCounts] = useState<Record<string, number>>({});
+  const [purging, setPurging] = useState(false);
+  const quotaAlertShown = useRef(false);
 
   const fetchVMs = useCallback(async () => {
     const { data, error } = await supabase
@@ -72,10 +87,54 @@ const Index = () => {
       if (!error && data && !data.error) {
         setQuotas(data.quotas || {});
         setVmStatusCounts(data.vm_status_counts || {});
+
+        // Fire in-app quota alerts (once per page load)
+        if (!quotaAlertShown.current) {
+          quotaAlertShown.current = true;
+          const allQuotas = data.quotas || {};
+          for (const [region, items] of Object.entries(allQuotas)) {
+            for (const q of items as QuotaItem[]) {
+              const pct = q.limit > 0 ? Math.round((q.currentUsage / q.limit) * 100) : 0;
+              if (pct >= 95) {
+                toast({
+                  title: `⚠️ Quota Critical: ${q.name}`,
+                  description: `${region} — ${q.currentUsage}/${q.limit} cores used (${pct}%). Students cannot launch new labs. Free up VMs or request a quota increase.`,
+                  variant: "destructive",
+                });
+              } else if (pct >= 80) {
+                toast({
+                  title: `Quota Warning: ${q.name}`,
+                  description: `${region} — ${q.currentUsage}/${q.limit} cores used (${pct}%). Consider cleaning up unused VMs.`,
+                });
+              }
+            }
+          }
+        }
       }
     } catch { /* silent */ }
     setQuotaLoading(false);
   }, []);
+
+  const handlePurgeFailedVMs = async () => {
+    setPurging(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+        body: { action: "purge-failed" },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({
+        title: "Purge Complete",
+        description: `${data.count} failed/terminated VM records removed from the database.`,
+      });
+      fetchVMs();
+      fetchQuotas();
+    } catch (err: any) {
+      toast({ title: "Purge Failed", description: err.message, variant: "destructive" });
+    } finally {
+      setPurging(false);
+    }
+  };
 
   useEffect(() => {
     fetchVMs();
@@ -94,6 +153,13 @@ const Index = () => {
   const totalProvisioning = vmStatusCounts["provisioning"] || 0;
   const totalFailed = vmStatusCounts["failed"] || 0;
   const totalDeallocated = vmStatusCounts["deallocated"] || 0;
+  const totalTerminated = vmStatusCounts["terminated"] || 0;
+  const purgeableCount = totalFailed + totalTerminated;
+
+  // Check if any quota exceeds 80%
+  const hasQuotaAlert = !quotaLoading && Object.values(quotas).some((items) =>
+    (items as QuotaItem[]).some((q) => q.limit > 0 && (q.currentUsage / q.limit) * 100 >= 80)
+  );
 
   const statusDistribution = [
     { name: 'Running', value: totalRunning, fill: 'hsl(152 60% 45%)' },
@@ -106,10 +172,59 @@ const Index = () => {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">Real-time platform overview</p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground">Dashboard</h1>
+            <p className="text-sm text-muted-foreground mt-1">Real-time platform overview</p>
+          </div>
+          {purgeableCount > 0 && (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-2 text-destructive border-destructive/30 hover:bg-destructive/10" disabled={purging}>
+                  {purging ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                  Purge Failed VMs ({purgeableCount})
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Purge Failed & Terminated VMs</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will permanently delete {purgeableCount} failed/terminated VM records from the database and clean up any remaining Azure resources. This frees up quota for new lab launches.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={handlePurgeFailedVMs} className="bg-destructive text-destructive-foreground hover:bg-destructive/90">
+                    Purge {purgeableCount} VMs
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          )}
         </div>
+
+        {/* Quota Alert Banner */}
+        <AnimatePresence>
+          {hasQuotaAlert && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-3 flex items-center gap-3"
+            >
+              <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
+              <div className="flex-1">
+                <p className="text-sm font-medium text-warning">Azure compute quota is above 80%</p>
+                <p className="text-xs text-warning/80 mt-0.5">Students may be unable to launch new labs. Clean up unused VMs or request a quota increase from Azure.</p>
+              </div>
+              <Link to="/vms">
+                <Button variant="outline" size="sm" className="text-warning border-warning/30 hover:bg-warning/10 text-xs">
+                  Manage VMs →
+                </Button>
+              </Link>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">

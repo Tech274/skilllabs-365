@@ -124,7 +124,6 @@ Deno.serve(async (req) => {
         });
       }
 
-      // End any active sessions for this VM
       await supabase
         .from("sessions")
         .update({ ended_at: new Date().toISOString(), status: "completed" })
@@ -152,6 +151,34 @@ Deno.serve(async (req) => {
           status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+    }
+
+    // Handle purge: delete all failed/terminated VM records from database
+    if (action === "purge-failed") {
+      const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+
+      // First clean up any Azure resources that might still exist
+      const { data: purgeVMs } = await supabase
+        .from("virtual_machines")
+        .select("id, azure_vm_id, status")
+        .in("status", ["failed", "terminated"]);
+
+      let purged = 0;
+      if (purgeVMs?.length) {
+        for (const vm of purgeVMs) {
+          if (vm.azure_vm_id) {
+            const vmName = extractVmName(vm.azure_vm_id);
+            await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+          }
+          // Delete the DB record entirely
+          await supabase.from("virtual_machines").delete().eq("id", vm.id);
+          purged++;
+        }
+      }
+
+      return new Response(JSON.stringify({ success: true, action: "purged", count: purged }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     const now = new Date();
