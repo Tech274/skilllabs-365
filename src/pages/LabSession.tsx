@@ -169,7 +169,17 @@ export default function LabSession() {
         console.error("Failed to end session cleanly:", err);
       }
     }
-    toast({ title: "Session ended", description: "Your lab session has been terminated.", variant: "destructive" });
+    // Trigger VM cleanup/deallocation
+    if (vmId) {
+      try {
+        await supabase.functions.invoke("cleanup-idle-labs", {
+          body: { action: "manual-stop" },
+        });
+      } catch (err) {
+        console.error("Failed to trigger VM cleanup:", err);
+      }
+    }
+    toast({ title: "Session ended", description: "Your lab session has been terminated and VM is being deallocated.", variant: "destructive" });
     navigate("/labs");
   };
 
@@ -449,6 +459,7 @@ export default function LabSession() {
                   ref={iframeRef}
                   src={guacamoleUrl}
                   className="h-full w-full border-0"
+                  style={{ objectFit: "contain" }}
                   allow="clipboard-read; clipboard-write"
                   title="Lab Session"
                   onLoad={() => {
