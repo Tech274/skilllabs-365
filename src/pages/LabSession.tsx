@@ -26,6 +26,11 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
+const isMixedContent = (url: string) => {
+  try {
+    return window.location.protocol === "https:" && new URL(url).protocol === "http:";
+  } catch { return false; }
+};
 
 interface SessionInfo {
   labName: string;
