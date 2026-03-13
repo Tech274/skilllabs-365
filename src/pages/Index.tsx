@@ -1,8 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
-import { sessionHistory, regionHealthData } from "@/lib/mock-data";
-import type { VMStatus } from "@/lib/mock-data";
+import type { VMStatus } from "@/lib/types";
 import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu, Trash2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState, useCallback, useRef } from "react";
@@ -318,52 +317,35 @@ const Index = () => {
           </motion.div>
         </div>
 
-        {/* Sessions Chart */}
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }} className="rounded-xl border border-border bg-card p-5">
-          <h3 className="text-sm font-medium text-foreground mb-4">Sessions (24h)</h3>
-          <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={sessionHistory}>
-              <defs>
-                <linearGradient id="sessionGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(187 80% 48%)" stopOpacity={0.3} />
-                  <stop offset="100%" stopColor="hsl(187 80% 48%)" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 14% 18%)" />
-              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
-              <YAxis tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
-              <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} />
-              <Area type="monotone" dataKey="sessions" stroke="hsl(187 80% 48%)" fill="url(#sessionGrad)" strokeWidth={2} />
-            </AreaChart>
-          </ResponsiveContainer>
-        </motion.div>
-
-        {/* Region Status */}
+        {/* Region Status — from live VM data */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {regionHealthData.map((r) => (
-            <motion.div key={r.region} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-border bg-card p-5">
-              <div className="flex items-center justify-between mb-4">
-                <div className="flex items-center gap-2">
-                  <Globe className="h-4 w-4 text-primary" />
-                  <h3 className="text-sm font-medium text-foreground">{r.region}</h3>
-                </div>
-                <StatusBadge status="running" />
-              </div>
-              <div className="grid grid-cols-4 gap-3 text-center">
-                {[
-                  { label: 'VMs', value: r.activeVMs },
-                  { label: 'Warm Pool', value: r.warmPoolVMs },
-                  { label: 'AKS Pods', value: r.aksPodsRunning },
-                  { label: 'Cache Hit', value: `${r.redisCacheHitRate}%` },
-                ].map((m) => (
-                  <div key={m.label} className="rounded-lg bg-muted/50 p-2">
-                    <p className="text-lg font-mono font-semibold text-foreground">{m.value}</p>
-                    <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{m.label}</p>
+          {['East US', 'Central India'].map((region) => {
+            const regionVMs = vms.filter(v => v.region === region);
+            const activeCount = regionVMs.filter(v => ['running', 'idle'].includes(v.status)).length;
+            return (
+              <motion.div key={region} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-border bg-card p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Globe className="h-4 w-4 text-primary" />
+                    <h3 className="text-sm font-medium text-foreground">{region}</h3>
                   </div>
-                ))}
-              </div>
-            </motion.div>
-          ))}
+                  <StatusBadge status={activeCount > 0 ? "running" : "stopped"} />
+                </div>
+                <div className="grid grid-cols-3 gap-3 text-center">
+                  {[
+                    { label: 'Active VMs', value: activeCount },
+                    { label: 'Total VMs', value: regionVMs.length },
+                    { label: 'Status', value: activeCount > 0 ? 'Healthy' : 'Idle' },
+                  ].map((m) => (
+                    <div key={m.label} className="rounded-lg bg-muted/50 p-2">
+                      <p className="text-lg font-mono font-semibold text-foreground">{m.value}</p>
+                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{m.label}</p>
+                    </div>
+                  ))}
+                </div>
+              </motion.div>
+            );
+          })}
         </div>
 
         {/* Recent VMs Table — Live Data */}

@@ -1,5 +1,5 @@
 import { cn } from "@/lib/utils";
-import type { VMStatus } from "@/lib/mock-data";
+import type { VMStatus } from "@/lib/types";
 
 const statusConfig: Record<VMStatus, { label: string; dotClass: string; bgClass: string }> = {
   running: { label: 'Running', dotClass: 'bg-success', bgClass: 'bg-success/10 text-success' },

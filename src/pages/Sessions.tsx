@@ -1,12 +1,70 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
-import { sessionHistory, labVMs } from "@/lib/mock-data";
-import { Users, Clock, TrendingUp, Timer } from "lucide-react";
+import { Users, Clock, TrendingUp, Timer, Loader2 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { motion } from "framer-motion";
+import { useEffect, useState, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
+
+interface SessionRow {
+  id: string;
+  user_id: string | null;
+  status: string;
+  region: string;
+  idle_minutes: number;
+  started_at: string;
+  ended_at: string | null;
+  vm_id: string | null;
+  userName?: string;
+  labName?: string;
+}
 
 export default function Sessions() {
-  const activeSessions = labVMs.filter(v => v.status === 'running').length;
+  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchSessions = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("sessions")
+      .select("*, profiles!sessions_user_id_fkey(display_name), lab_templates(name)")
+      .order("started_at", { ascending: false });
+
+    if (error) {
+      const { data: fallback } = await supabase.from("sessions").select("*").order("started_at", { ascending: false });
+      if (fallback) setSessions(fallback.map((s: any) => ({ ...s, userName: "—", labName: "—" })));
+    } else if (data) {
+      setSessions(data.map((s: any) => ({
+        ...s,
+        userName: s.profiles?.display_name || "—",
+        labName: s.lab_templates?.name || "—",
+      })));
+    }
+    setLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchSessions();
+    const channel = supabase
+      .channel("sessions-live")
+      .on("postgres_changes", { event: "*", schema: "public", table: "sessions" }, () => fetchSessions())
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchSessions]);
+
+  const activeSessions = sessions.filter(s => s.status === 'active');
+  const avgIdleMinutes = activeSessions.length > 0
+    ? (activeSessions.reduce((sum, s) => sum + s.idle_minutes, 0) / activeSessions.length).toFixed(1)
+    : "0";
+
+  // Build 24h histogram from real session data
+  const sessionHistory = Array.from({ length: 24 }, (_, i) => {
+    const hour = `${String(i).padStart(2, '0')}:00`;
+    const count = sessions.filter(s => {
+      const h = new Date(s.started_at).getHours();
+      return h === i;
+    }).length;
+    return { hour, sessions: count };
+  });
 
   return (
     <DashboardLayout>
@@ -17,10 +75,10 @@ export default function Sessions() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <MetricCard title="Active Sessions" value="483" icon={Users} variant="success" />
-          <MetricCard title="Peak Today" value="612" icon={TrendingUp} variant="primary" subtitle="at 14:00 UTC" />
-          <MetricCard title="Avg Duration" value="42m" icon={Clock} variant="default" />
-          <MetricCard title="Avg Idle" value="6.2m" icon={Timer} variant="warning" subtitle="before auto-stop" />
+          <MetricCard title="Active Sessions" value={activeSessions.length} icon={Users} variant="success" />
+          <MetricCard title="Total Sessions" value={sessions.length} icon={TrendingUp} variant="primary" />
+          <MetricCard title="Avg Idle" value={`${avgIdleMinutes}m`} icon={Timer} variant="warning" subtitle="before auto-stop" />
+          <MetricCard title="Completed" value={sessions.filter(s => s.status === 'completed').length} icon={Clock} variant="default" />
         </div>
 
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card p-5">
@@ -32,17 +90,12 @@ export default function Sessions() {
                   <stop offset="0%" stopColor="hsl(187 80% 48%)" stopOpacity={0.3} />
                   <stop offset="100%" stopColor="hsl(187 80% 48%)" stopOpacity={0} />
                 </linearGradient>
-                <linearGradient id="vmGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="0%" stopColor="hsl(152 60% 45%)" stopOpacity={0.3} />
-                  <stop offset="100%" stopColor="hsl(152 60% 45%)" stopOpacity={0} />
-                </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 14% 18%)" />
               <XAxis dataKey="hour" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
               <YAxis tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
               <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} />
               <Area type="monotone" dataKey="sessions" stroke="hsl(187 80% 48%)" fill="url(#sGrad)" strokeWidth={2} name="Sessions" />
-              <Area type="monotone" dataKey="vms" stroke="hsl(152 60% 45%)" fill="url(#vmGrad)" strokeWidth={2} name="Active VMs" />
             </AreaChart>
           </ResponsiveContainer>
         </motion.div>
@@ -51,29 +104,39 @@ export default function Sessions() {
           <div className="p-5 border-b border-border">
             <h3 className="text-sm font-medium text-foreground">Active Sessions</h3>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border text-left">
-                  {['User', 'Lab', 'VM', 'Region', 'Duration', 'Idle'].map(h => (
-                    <th key={h} className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {labVMs.filter(v => v.status === 'running').slice(0, 10).map(vm => (
-                  <tr key={vm.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                    <td className="px-5 py-3 text-foreground">{vm.userName}</td>
-                    <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
-                    <td className="px-5 py-3 font-mono text-xs text-primary">{vm.id}</td>
-                    <td className="px-5 py-3 text-muted-foreground">{vm.region}</td>
-                    <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{Math.floor(Math.random() * 60 + 5)}m</td>
-                    <td className="px-5 py-3 font-mono text-xs text-muted-foreground">0m</td>
+          {loading ? (
+            <div className="p-8 flex items-center justify-center text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading sessions...
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left">
+                    {['User', 'Lab', 'Region', 'Status', 'Idle', 'Started'].map(h => (
+                      <th key={h} className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {activeSessions.length === 0 ? (
+                    <tr><td colSpan={6} className="px-5 py-8 text-center text-muted-foreground text-sm">No active sessions.</td></tr>
+                  ) : (
+                    activeSessions.map(s => (
+                      <tr key={s.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                        <td className="px-5 py-3 text-foreground">{s.userName}</td>
+                        <td className="px-5 py-3 text-muted-foreground">{s.labName}</td>
+                        <td className="px-5 py-3 text-muted-foreground">{s.region}</td>
+                        <td className="px-5 py-3 text-success text-xs font-medium">{s.status}</td>
+                        <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{s.idle_minutes}m</td>
+                        <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{new Date(s.started_at).toLocaleTimeString()}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </motion.div>
       </div>
     </DashboardLayout>
