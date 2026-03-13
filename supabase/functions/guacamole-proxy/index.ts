@@ -57,7 +57,7 @@ async function getGuacToken(
   const candidates = buildGuacBaseCandidates(guacUrl);
 
   for (const baseUrl of candidates) {
-    const res = await fetch(`${baseUrl}/api/tokens`, {
+    const res = await guacFetch(`${baseUrl}/api/tokens`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
