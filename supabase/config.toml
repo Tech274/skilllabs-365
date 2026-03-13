@@ -5,3 +5,6 @@ verify_jwt = false
 
 [functions.provision-lab]
 verify_jwt = false
+
+[functions.cleanup-idle-labs]
+verify_jwt = false

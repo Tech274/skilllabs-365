@@ -108,13 +108,13 @@ Deno.serve(async (req) => {
     const idleCutoff = new Date(now.getTime() - IDLE_TIMEOUT_MINUTES * 60 * 1000).toISOString();
     const results: string[] = [];
 
-    // 1. Find sessions that are active but idle for 15+ minutes (no recent activity)
+    // 1. Find sessions that are active but idle for 15+ minutes based on last_activity_at
     const { data: idleSessions } = await supabase
       .from("sessions")
-      .select("id, vm_id, started_at, idle_minutes")
+      .select("id, vm_id, started_at, idle_minutes, last_activity_at")
       .eq("status", "active")
       .is("ended_at", null)
-      .lt("started_at", idleCutoff);
+      .lt("last_activity_at", idleCutoff);
 
     // 2. Find VMs that are running but their session was ended (stopped labs)
     const { data: orphanVMs } = await supabase

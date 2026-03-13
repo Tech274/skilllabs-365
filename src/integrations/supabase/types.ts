@@ -194,6 +194,7 @@ export type Database = {
           id: string
           idle_minutes: number
           lab_template_id: string | null
+          last_activity_at: string | null
           region: string
           started_at: string
           status: string
@@ -207,6 +208,7 @@ export type Database = {
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null
+          last_activity_at?: string | null
           region?: string
           started_at?: string
           status?: string
@@ -220,6 +222,7 @@ export type Database = {
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null
+          last_activity_at?: string | null
           region?: string
           started_at?: string
           status?: string
