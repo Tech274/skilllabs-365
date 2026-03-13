@@ -296,7 +296,7 @@ Deno.serve(async (req) => {
 
       // Delete Guacamole connection if provided
       if (connection_id) {
-        await deleteGuacConnection(GUACAMOLE_URL, token, dataSource, connection_id);
+        await deleteGuacConnection(guacBaseUrl, token, dataSource, connection_id);
       }
 
       return new Response(
