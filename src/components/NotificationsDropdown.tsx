@@ -1,39 +1,61 @@
-import { useState, useRef, useEffect } from "react";
-import { Bell, Shield, Server, Activity, AlertTriangle, CheckCircle2, X } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Bell, Shield, Server, Activity, AlertTriangle, CheckCircle2, X, Cpu } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
+import { supabase } from "@/integrations/supabase/client";
 
 interface Notification {
   id: string;
-  type: 'waf' | 'idle' | 'health' | 'info';
+  type: string;
   title: string;
   message: string;
-  time: string;
+  created_at: string;
   read: boolean;
 }
 
-const initialNotifications: Notification[] = [
-  { id: '1', type: 'waf', title: 'SQL Injection Blocked', message: 'WAF blocked suspicious request from 203.45.xx.xx targeting /api/sessions', time: '2m ago', read: false },
-  { id: '2', type: 'idle', title: 'VM Idle Warning', message: 'vm-018 has been idle for 18 minutes. Auto-stop in 2 minutes.', time: '5m ago', read: false },
-  { id: '3', type: 'health', title: 'MySQL Latency Elevated', message: 'Central India MySQL latency increased to 42ms (threshold: 30ms)', time: '12m ago', read: false },
-  { id: '4', type: 'waf', title: 'XSS Attempt Blocked', message: 'WAF blocked XSS attempt from 198.12.xx.xx on /api/labs', time: '28m ago', read: true },
-  { id: '5', type: 'info', title: 'TLS Certificate Renewed', message: 'Front Door SSL certificate auto-renewed successfully', time: '45m ago', read: true },
-  { id: '6', type: 'idle', title: 'VM Auto-Stopped', message: 'vm-012 auto-stopped after 20 minutes idle. Resources released.', time: '1h ago', read: true },
-  { id: '7', type: 'health', title: 'AKS Node Scaled Up', message: 'East US cluster auto-scaled from 11 to 12 nodes due to load', time: '1.5h ago', read: true },
-];
-
-const typeConfig = {
+const typeConfig: Record<string, { icon: any; color: string; bg: string }> = {
+  quota_critical: { icon: AlertTriangle, color: 'text-destructive', bg: 'bg-destructive/10' },
+  quota_warning: { icon: Cpu, color: 'text-warning', bg: 'bg-warning/10' },
   waf: { icon: Shield, color: 'text-destructive', bg: 'bg-destructive/10' },
   idle: { icon: Server, color: 'text-warning', bg: 'bg-warning/10' },
   health: { icon: Activity, color: 'text-info', bg: 'bg-info/10' },
   info: { icon: CheckCircle2, color: 'text-success', bg: 'bg-success/10' },
 };
 
+function timeAgo(dateStr: string): string {
+  const diff = Date.now() - new Date(dateStr).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.floor(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
+
 export function NotificationsDropdown() {
   const [open, setOpen] = useState(false);
-  const [notifications, setNotifications] = useState(initialNotifications);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
   const ref = useRef<HTMLDivElement>(null);
+
+  const fetchNotifications = useCallback(async () => {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+    const { data } = await supabase
+      .from("notifications")
+      .select("*")
+      .eq("user_id", user.id)
+      .order("created_at", { ascending: false })
+      .limit(20);
+    if (data) setNotifications(data as Notification[]);
+  }, []);
+
+  useEffect(() => {
+    fetchNotifications();
+    // Poll every 30s for new notifications
+    const interval = setInterval(fetchNotifications, 30000);
+    return () => clearInterval(interval);
+  }, [fetchNotifications]);
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
@@ -45,12 +67,18 @@ export function NotificationsDropdown() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const markAllRead = () => {
+  const markAllRead = async () => {
+    const unreadIds = notifications.filter(n => !n.read).map(n => n.id);
+    if (unreadIds.length === 0) return;
     setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+    for (const id of unreadIds) {
+      await supabase.from("notifications").update({ read: true }).eq("id", id);
+    }
   };
 
-  const dismiss = (id: string) => {
+  const dismiss = async (id: string) => {
     setNotifications(prev => prev.filter(n => n.id !== id));
+    await supabase.from("notifications").update({ read: true }).eq("id", id);
   };
 
   return (
@@ -90,7 +118,7 @@ export function NotificationsDropdown() {
                 <div className="p-8 text-center text-muted-foreground text-sm">No notifications</div>
               ) : (
                 notifications.map(n => {
-                  const config = typeConfig[n.type];
+                  const config = typeConfig[n.type] || typeConfig.info;
                   const Icon = config.icon;
                   return (
                     <div key={n.id} className={cn("flex gap-3 px-4 py-3 hover:bg-muted/30 transition-colors", !n.read && "bg-primary/5")}>
@@ -107,7 +135,7 @@ export function NotificationsDropdown() {
                           </button>
                         </div>
                         <p className="text-[11px] text-muted-foreground mt-0.5 line-clamp-2">{n.message}</p>
-                        <p className="text-[10px] text-muted-foreground mt-1">{n.time}</p>
+                        <p className="text-[10px] text-muted-foreground mt-1">{timeAgo(n.created_at)}</p>
                       </div>
                       {!n.read && <div className="h-2 w-2 rounded-full bg-primary shrink-0 mt-1" />}
                     </div>
