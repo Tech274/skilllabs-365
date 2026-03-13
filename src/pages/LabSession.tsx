@@ -420,12 +420,48 @@ export default function LabSession() {
                     </span>
                   </div>
                 )}
+                {iframeLoadFailed && (
+                  <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-background">
+                    <div className="rounded-full bg-destructive/10 p-4 mb-4">
+                      <AlertTriangle className="h-8 w-8 text-destructive" />
+                    </div>
+                    <h2 className="text-lg font-semibold text-foreground mb-2">Failed to Load Session</h2>
+                    <p className="text-sm text-muted-foreground mb-1 max-w-md text-center">
+                      The remote desktop iframe could not be loaded. This may be caused by network issues, 
+                      mixed content restrictions, or the Guacamole server being unreachable.
+                    </p>
+                    <p className="text-xs text-muted-foreground font-mono mb-6">{guacamoleUrl}</p>
+                    <div className="flex gap-3">
+                      <Button variant="outline" onClick={() => navigate("/labs")}>
+                        Back to Labs
+                      </Button>
+                      <Button onClick={() => { setIframeLoadFailed(false); handleReconnect(); }}>
+                        <RefreshCw className="h-4 w-4 mr-2" />
+                        Retry Connection
+                      </Button>
+                    </div>
+                  </div>
+                )}
                 <iframe
                   ref={iframeRef}
                   src={guacamoleUrl}
                   className="h-full w-full border-0"
                   allow="clipboard-read; clipboard-write"
                   title="Lab Session"
+                  onLoad={() => {
+                    if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
+                    // Try to detect blank iframe (cross-origin will throw)
+                    try {
+                      const doc = iframeRef.current?.contentDocument;
+                      if (doc && (doc.body?.innerHTML === "" || doc.body?.childElementCount === 0)) {
+                        setIframeLoadFailed(true);
+                      }
+                    } catch {
+                      // Cross-origin — iframe loaded successfully from remote server
+                      setIframeLoadFailed(false);
+                    }
+                  }}
+                  onError={() => setIframeLoadFailed(true)}
                 />
               </>
             ) : (
