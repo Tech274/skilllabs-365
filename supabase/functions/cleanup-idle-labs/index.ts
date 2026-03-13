@@ -315,6 +315,43 @@ Deno.serve(async (req) => {
       }
     }
 
+    // 5. Check Azure quota and send notifications to admins if > 80%
+    try {
+      const quotaRes = await fetch(
+        `https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/providers/Microsoft.Compute/locations/eastus/usages?api-version=2024-03-01`,
+        { headers: { Authorization: `Bearer ${azureToken}` } }
+      );
+      if (quotaRes.ok) {
+        const quotaData = await quotaRes.json();
+        const relevant = quotaData.value?.filter((u: any) =>
+          ["cores", "standardBSFamily"].includes(u.name?.value)
+        ) || [];
+
+        const { data: adminRoles } = await supabase
+          .from("user_roles")
+          .select("user_id")
+          .eq("role", "admin");
+        const adminIds = adminRoles?.map((r: any) => r.user_id) || [];
+
+        for (const q of relevant) {
+          const pct = q.limit > 0 ? Math.round((q.currentValue / q.limit) * 100) : 0;
+          if (pct >= 80 && adminIds.length > 0) {
+            const severity = pct >= 95 ? "critical" : "warning";
+            const notifications = adminIds.map((uid: string) => ({
+              user_id: uid,
+              type: severity === "critical" ? "quota_critical" : "quota_warning",
+              title: `${severity === "critical" ? "⚠️ Quota Critical" : "Quota Warning"}: ${q.name?.localizedValue || q.name?.value}`,
+              message: `East US — ${q.currentValue}/${q.limit} cores used (${pct}%).${severity === "critical" ? " Students cannot launch new labs." : " Consider cleaning up unused VMs."}`,
+            }));
+            await supabase.from("notifications").insert(notifications);
+            results.push(`Quota alert (${severity}): ${q.name?.value} at ${pct}%`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Quota check for notifications failed:", e);
+    }
+
     console.log(`Cleanup completed: ${results.length} actions taken`, results);
 
     return new Response(
