@@ -4,6 +4,7 @@ import { Shield, AlertTriangle, CheckCircle2, XCircle, FileText, Globe, Users, L
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 const auditLogs = [
   { id: 1, timestamp: '2026-03-11 14:32:01', user: 'admin@cloudlab.io', action: 'VM Provisioned', resource: 'vm-041', severity: 'info' as const, region: 'East US' },
@@ -70,6 +71,13 @@ export default function Security() {
             </motion.div>
           ))}
         </div>
+
+        <AiInsightCard
+          type="security_summary"
+          data={{ audit_logs: auditLogs, waf_events: wafEvents }}
+          title="AI Threat Summary"
+          buttonLabel="Analyze Threats"
+        />
 
         <Tabs defaultValue="audit" className="space-y-4">
           <TabsList className="bg-muted/50 border border-border">

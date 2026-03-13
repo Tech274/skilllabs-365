@@ -1,6 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { Plus, Pencil, Trash2, Monitor, Terminal, Copy, MoreVertical, Play, Loader2, UserPlus, X } from "lucide-react";
+import { Plus, Pencil, Trash2, Monitor, Terminal, Copy, MoreVertical, Play, Loader2, UserPlus, X, Sparkles } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -70,6 +70,7 @@ export default function LabManagement() {
   // Delete confirmation state
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deletingLab, setDeletingLab] = useState<LabTemplate | null>(null);
+  const [genLoading, setGenLoading] = useState(false);
 
   const fetchLabs = async () => {
     const { data, error } = await supabase.from("lab_templates").select("*").order("created_at", { ascending: false });
@@ -267,7 +268,28 @@ export default function LabManagement() {
                 <Input value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="e.g. Azure Fundamentals" />
               </div>
               <div className="space-y-2">
-                <Label>Description</Label>
+                <div className="flex items-center justify-between">
+                  <Label>Description</Label>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="gap-1.5 text-primary hover:bg-primary/10 h-7 text-xs"
+                    disabled={!form.name.trim() || genLoading}
+                    onClick={async () => {
+                      setGenLoading(true);
+                      try {
+                        const { data: result, error } = await supabase.functions.invoke("ai-assistant", {
+                          body: { type: "lab_description", data: { name: form.name, protocol: form.protocol, vm_size: form.vm_size, os_image: form.os_image, duration: form.duration } },
+                        });
+                        if (!error && result?.insight) setForm(f => ({ ...f, description: result.insight }));
+                      } catch {} finally { setGenLoading(false); }
+                    }}
+                  >
+                    {genLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />}
+                    Generate with AI
+                  </Button>
+                </div>
                 <Textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Lab description..." rows={2} />
               </div>
               <div className="grid grid-cols-2 gap-4">

@@ -10,6 +10,7 @@ import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 interface AuditEntry {
   id: string;
@@ -216,6 +217,16 @@ export default function SessionAuditLog() {
             </SelectContent>
           </Select>
         </div>
+
+        {/* AI Anomaly Detection */}
+        {entries.length > 0 && (
+          <AiInsightCard
+            type="audit_anomaly"
+            data={entries.slice(0, 50)}
+            title="AI Anomaly Detection"
+            buttonLabel="Detect Anomalies"
+          />
+        )}
 
         {/* Audit Table */}
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="rounded-xl border border-border bg-card overflow-hidden">

@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import type { Tables } from "@/integrations/supabase/types";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -108,6 +109,19 @@ export default function StudentDashboard() {
             </motion.div>
           ))}
         </div>
+
+        {/* AI Student Guidance */}
+        <AiInsightCard
+          type="student_guidance"
+          data={{
+            available_labs: labs.map(l => ({ name: l.name, protocol: l.protocol, duration: l.duration })),
+            session_history: sessions.slice(0, 10).map(s => ({ status: s.status, region: s.region, started_at: s.started_at, connection_quality: s.connection_quality })),
+            completed_count: completedSessions,
+            total_time_minutes: Math.round(totalTime),
+          }}
+          title="AI Lab Assistant"
+          buttonLabel="What should I do next?"
+        />
 
         {/* Available Labs */}
         <div>

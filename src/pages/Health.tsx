@@ -2,6 +2,7 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
 import { cn } from "@/lib/utils";
 import { CheckCircle2, AlertTriangle, XCircle } from "lucide-react";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 interface ServiceStatus {
   name: string;
@@ -49,6 +50,13 @@ export default function Health() {
             {degradedCount === 0 ? 'All systems operational' : `${degradedCount} service(s) degraded`}
           </p>
         </div>
+
+        <AiInsightCard
+          type="health_diagnosis"
+          data={services}
+          title="AI Health Diagnosis"
+          buttonLabel="Diagnose"
+        />
 
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card divide-y divide-border">
           {services.map((s, i) => (

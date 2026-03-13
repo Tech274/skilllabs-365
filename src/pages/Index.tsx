@@ -32,6 +32,7 @@ import {
   Bar,
 } from "recharts";
 import { Progress } from "@/components/ui/progress";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 interface QuotaItem {
   name: string;
@@ -224,6 +225,20 @@ const Index = () => {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* AI Insights */}
+        <AiInsightCard
+          type="cost_insight"
+          data={{
+            vm_counts: vmStatusCounts,
+            total_running: totalRunning,
+            total_idle: totalIdle,
+            total_failed: totalFailed,
+            quotas,
+          }}
+          title="AI Platform Insights"
+          buttonLabel="Analyze"
+        />
 
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
