@@ -3,11 +3,24 @@ import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
 import { sessionHistory, regionHealthData } from "@/lib/mock-data";
 import type { VMStatus } from "@/lib/mock-data";
-import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu } from "lucide-react";
-import { motion } from "framer-motion";
-import { useEffect, useState, useCallback } from "react";
+import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu, Trash2 } from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { Link } from "react-router-dom";
+import { Button } from "@/components/ui/button";
+import { toast } from "@/hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import {
   AreaChart,
   Area,
@@ -45,6 +58,8 @@ const Index = () => {
   const [quotas, setQuotas] = useState<Record<string, QuotaItem[]>>({});
   const [quotaLoading, setQuotaLoading] = useState(true);
   const [vmStatusCounts, setVmStatusCounts] = useState<Record<string, number>>({});
+  const [purging, setPurging] = useState(false);
+  const quotaAlertShown = useRef(false);
 
   const fetchVMs = useCallback(async () => {
     const { data, error } = await supabase
