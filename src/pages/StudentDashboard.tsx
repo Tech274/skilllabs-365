@@ -22,6 +22,7 @@ export default function StudentDashboard() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!user) return;
@@ -39,6 +40,7 @@ export default function StudentDashboard() {
 
   const handleLaunchLab = async (lab: LabTemplate) => {
     setLaunchingId(lab.id);
+    setLaunchErrors((prev) => ({ ...prev, [lab.id]: "" }));
     try {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
@@ -48,7 +50,9 @@ export default function StudentDashboard() {
       toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
       navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
     } catch (err: any) {
-      toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
+      const message = err.message || "Failed to provision VM. Please try again.";
+      setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
+      toast({ title: "Launch Failed", description: message, variant: "destructive" });
     } finally {
       setLaunchingId(null);
     }
@@ -143,9 +147,20 @@ export default function StudentDashboard() {
                     <Badge variant="outline" className="text-[10px] font-mono">{lab.vm_size}</Badge>
                     <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
                   </div>
+                  {launchErrors[lab.id] && (
+                    <div className="flex items-start gap-2 rounded-lg bg-destructive/10 border border-destructive/20 p-2.5">
+                      <AlertCircle className="h-3.5 w-3.5 text-destructive mt-0.5 shrink-0" />
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-destructive font-medium">Launch failed</p>
+                        <p className="text-[10px] text-destructive/80 leading-tight">{launchErrors[lab.id]}</p>
+                      </div>
+                    </div>
+                  )}
                   <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
                     {launchingId === lab.id ? (
                       <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</>
+                    ) : launchErrors[lab.id] ? (
+                      <><AlertCircle className="h-3.5 w-3.5" /> Retry Launch</>
                     ) : (
                       <><Play className="h-3.5 w-3.5" /> Launch Lab</>
                     )}
