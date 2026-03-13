@@ -154,8 +154,8 @@ export default function CostAnalytics() {
               </div>
             </motion.div>
           </>
+          )
         )}
-      </div>
     </DashboardLayout>
   );
 }
