@@ -67,9 +67,11 @@ export default function LabSession() {
   const [guacConnectionId, setGuacConnectionId] = useState<string | null>(null);
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
   const [iframeLoadFailed, setIframeLoadFailed] = useState(false);
+  const [idleWarningMinutes, setIdleWarningMinutes] = useState(0);
   const iframeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActivityRef = useRef<number>(Date.now());
   const idleUpdateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const idleWarningIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Guacamole URL from search params (legacy) or from edge function
   const guacamoleUrl = guacIframeUrl || searchParams.get("guac_url") || "";
