@@ -153,6 +153,91 @@ Deno.serve(async (req) => {
       }
     }
 
+    // Handle clear-guacamole: remove all connections from Guacamole gateway
+    if (action === "clear-guacamole") {
+      const GUACAMOLE_URL = Deno.env.get("GUACAMOLE_URL");
+      const GUACAMOLE_ADMIN_USERNAME = Deno.env.get("GUACAMOLE_ADMIN_USERNAME");
+      const GUACAMOLE_ADMIN_PASSWORD = Deno.env.get("GUACAMOLE_ADMIN_PASSWORD");
+      if (!GUACAMOLE_URL || !GUACAMOLE_ADMIN_USERNAME || !GUACAMOLE_ADMIN_PASSWORD) {
+        return new Response(JSON.stringify({ error: "Guacamole secrets not configured" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // Auth with Guacamole (try with and without /guacamole suffix)
+      let guacToken = "";
+      let guacBase = "";
+      const candidates = [GUACAMOLE_URL.replace(/\/+$/, "")];
+      if (!candidates[0].endsWith("/guacamole")) candidates.push(candidates[0] + "/guacamole");
+      else candidates.push(candidates[0].replace(/\/guacamole$/, ""));
+
+      for (const base of candidates) {
+        const res = await fetch(`${base}/api/tokens`, {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: `username=${encodeURIComponent(GUACAMOLE_ADMIN_USERNAME)}&password=${encodeURIComponent(GUACAMOLE_ADMIN_PASSWORD)}`,
+        });
+        if (res.ok) {
+          const data = await res.json();
+          guacToken = data.authToken;
+          guacBase = base;
+          break;
+        }
+        await res.text();
+      }
+
+      if (!guacToken) {
+        return new Response(JSON.stringify({ error: "Failed to authenticate with Guacamole" }), {
+          status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // Get data source
+      const dsRes = await fetch(`${guacBase}/api/session/data?token=${guacToken}`);
+      const rawSources = dsRes.ok ? await dsRes.json() : {};
+      const sources: string[] = Array.isArray(rawSources) ? rawSources : Object.keys(rawSources || {});
+      const dataSource = sources.find(s => s === "postgresql") || sources[0] || "postgresql";
+
+      // List all connections
+      const connRes = await fetch(`${guacBase}/api/session/data/${dataSource}/connections?token=${guacToken}`);
+      const connections = connRes.ok ? await connRes.json() : {};
+      const connIds = Object.keys(connections);
+
+      let deleted = 0;
+      for (const connId of connIds) {
+        const delRes = await fetch(
+          `${guacBase}/api/session/data/${dataSource}/connections/${connId}?token=${guacToken}`,
+          { method: "DELETE" }
+        );
+        if (delRes.ok || delRes.status === 204) deleted++;
+        else await delRes.text();
+      }
+
+      // Also list active sessions
+      const activeRes = await fetch(`${guacBase}/api/session/data/${dataSource}/activeConnections?token=${guacToken}`);
+      const activeSessions = activeRes.ok ? await activeRes.json() : {};
+      const activeIds = Object.keys(activeSessions);
+
+      // Kill active sessions
+      for (const activeId of activeIds) {
+        await fetch(
+          `${guacBase}/api/session/data/${dataSource}/activeConnections/${activeId}?token=${guacToken}`,
+          { method: "DELETE" }
+        );
+      }
+
+      return new Response(JSON.stringify({
+        success: true,
+        action: "clear-guacamole",
+        connections_found: connIds.length,
+        connections_deleted: deleted,
+        active_sessions_found: activeIds.length,
+        active_sessions_killed: activeIds.length,
+      }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     // Handle purge: delete all failed/terminated VM records from database
     if (action === "purge-failed") {
       const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
