@@ -67,9 +67,11 @@ export default function LabSession() {
   const [guacConnectionId, setGuacConnectionId] = useState<string | null>(null);
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
   const [iframeLoadFailed, setIframeLoadFailed] = useState(false);
+  const [idleWarningMinutes, setIdleWarningMinutes] = useState(0);
   const iframeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActivityRef = useRef<number>(Date.now());
   const idleUpdateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const idleWarningIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // Guacamole URL from search params (legacy) or from edge function
   const guacamoleUrl = guacIframeUrl || searchParams.get("guac_url") || "";
@@ -151,6 +153,19 @@ export default function LabSession() {
       if (idleUpdateIntervalRef.current) clearInterval(idleUpdateIntervalRef.current);
     };
   }, [dbSessionId, connectionState]);
+
+  // Idle warning: update displayed idle time every 10s
+  useEffect(() => {
+    idleWarningIntervalRef.current = setInterval(() => {
+      const idleMs = Date.now() - lastActivityRef.current;
+      const mins = Math.floor(idleMs / 60000);
+      setIdleWarningMinutes(mins);
+    }, 10000);
+
+    return () => {
+      if (idleWarningIntervalRef.current) clearInterval(idleWarningIntervalRef.current);
+    };
+  }, []);
 
   // Countdown timer
   useEffect(() => {
@@ -243,6 +258,26 @@ export default function LabSession() {
 
   return (
     <div className="flex flex-col h-screen bg-background">
+      {/* Idle Warning Banner */}
+      <AnimatePresence>
+        {idleWarningMinutes >= 10 && connectionState === "connected" && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            className="bg-warning/15 border-b border-warning/30 px-4 py-2.5 flex items-center justify-center gap-2 z-50"
+          >
+            <AlertTriangle className="h-4 w-4 text-warning shrink-0" />
+            <span className="text-sm font-medium text-warning">
+              You have been idle for {idleWarningMinutes} minutes. Session will auto-terminate at 15 minutes of inactivity.
+            </span>
+            <span className="text-xs text-warning/70 font-mono ml-2">
+              ({15 - idleWarningMinutes}m remaining)
+            </span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Top Toolbar */}
       <AnimatePresence>
         {showToolbar && (
