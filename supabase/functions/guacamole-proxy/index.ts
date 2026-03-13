@@ -255,12 +255,18 @@ Deno.serve(async (req) => {
         }
       }
 
+      // Get VM admin credentials
+      const VM_ADMIN_USERNAME = Deno.env.get("AZURE_VM_ADMIN_USERNAME") || "labadmin";
+      const VM_ADMIN_PASSWORD = Deno.env.get("AZURE_VM_ADMIN_PASSWORD") || "";
+
       const connectionName = `session-${vm_id}-${Date.now()}`;
       const connectionId = await createGuacConnection(guacBaseUrl, token, dataSource, {
         name: connectionName,
         protocol,
         hostname: vm.private_ip,
         port,
+        username: VM_ADMIN_USERNAME,
+        password: VM_ADMIN_PASSWORD,
         parameters: connParams,
       });
 
