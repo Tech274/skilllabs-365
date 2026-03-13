@@ -14,6 +14,27 @@ export type Database = {
   }
   public: {
     Tables: {
+      daily_reports: {
+        Row: {
+          created_at: string
+          data: Json
+          id: string
+          report_date: string
+        }
+        Insert: {
+          created_at?: string
+          data?: Json
+          id?: string
+          report_date?: string
+        }
+        Update: {
+          created_at?: string
+          data?: Json
+          id?: string
+          report_date?: string
+        }
+        Relationships: []
+      }
       lab_assignments: {
         Row: {
           assigned_at: string
@@ -97,6 +118,36 @@ export type Database = {
           status?: string
           updated_at?: string
           vm_size?: string
+        }
+        Relationships: []
+      }
+      notifications: {
+        Row: {
+          created_at: string
+          id: string
+          message: string
+          read: boolean
+          title: string
+          type: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          message: string
+          read?: boolean
+          title: string
+          type?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          message?: string
+          read?: boolean
+          title?: string
+          type?: string
+          user_id?: string
         }
         Relationships: []
       }
