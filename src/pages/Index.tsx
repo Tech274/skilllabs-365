@@ -151,12 +151,42 @@ const Index = () => {
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-      toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
-      navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
+
+      if (data.status === "running") {
+        toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
+        navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
+      } else {
+        // VM still provisioning — poll for readiness
+        toast({ title: "VM Provisioning", description: "Azure VM is starting up. Waiting for it to be ready..." });
+        const vmId = data.vm_id;
+        const pollInterval = setInterval(async () => {
+          const { data: vm } = await supabase
+            .from("virtual_machines")
+            .select("status")
+            .eq("id", vmId)
+            .maybeSingle();
+          if (vm?.status === "running") {
+            clearInterval(pollInterval);
+            toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
+            setLaunchingId(null);
+            navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
+          } else if (vm?.status === "failed" || vm?.status === "terminated" || vm?.status === "deallocated") {
+            clearInterval(pollInterval);
+            setLaunchingId(null);
+            toast({ title: "Launch Failed", description: `VM entered ${vm.status} state. Please try again.`, variant: "destructive" });
+          }
+        }, 5000);
+        // Safety timeout after 3 minutes
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          setLaunchingId(null);
+        }, 180000);
+        return; // Don't clear launchingId yet
+      }
     } catch (err: any) {
       toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
     } finally {
-      setLaunchingId(null);
+      if (launchingId === lab.id) setLaunchingId(null);
     }
   };
 

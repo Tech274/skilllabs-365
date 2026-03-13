@@ -49,14 +49,43 @@ export default function StudentDashboard() {
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
-      toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
-      navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
+
+      if (data.status === "running") {
+        toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
+        navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
+      } else {
+        toast({ title: "VM Provisioning", description: "Azure VM is starting up. Waiting for it to be ready..." });
+        const vmId = data.vm_id;
+        const pollInterval = setInterval(async () => {
+          const { data: vm } = await supabase
+            .from("virtual_machines")
+            .select("status")
+            .eq("id", vmId)
+            .maybeSingle();
+          if (vm?.status === "running") {
+            clearInterval(pollInterval);
+            toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
+            setLaunchingId(null);
+            navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
+          } else if (vm?.status === "failed" || vm?.status === "terminated" || vm?.status === "deallocated") {
+            clearInterval(pollInterval);
+            setLaunchingId(null);
+            setLaunchErrors((prev) => ({ ...prev, [lab.id]: `VM entered ${vm.status} state. Please try again.` }));
+            toast({ title: "Launch Failed", description: `VM entered ${vm.status} state.`, variant: "destructive" });
+          }
+        }, 5000);
+        setTimeout(() => {
+          clearInterval(pollInterval);
+          setLaunchingId(null);
+        }, 180000);
+        return;
+      }
     } catch (err: any) {
       const message = err.message || "Failed to provision VM. Please try again.";
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
       toast({ title: "Launch Failed", description: message, variant: "destructive" });
     } finally {
-      setLaunchingId(null);
+      if (launchingId === lab.id) setLaunchingId(null);
     }
   };
 
