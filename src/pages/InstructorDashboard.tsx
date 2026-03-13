@@ -222,6 +222,27 @@ export default function InstructorDashboard() {
           ))}
         </div>
 
+        {/* AI Student Insights */}
+        {students.length > 0 && (
+          <AiInsightCard
+            type="instructor_insight"
+            data={{
+              students: students.map(s => ({
+                name: s.displayName,
+                sessions: s.totalSessions,
+                active: s.activeSessions,
+                avg_duration: Math.round(s.avgDuration),
+                last_active: s.lastActive,
+              })),
+              total_sessions: sessions.length,
+              active_sessions: activeSessions,
+              total_disconnects: totalDisconnects,
+            }}
+            title="AI Student Insights"
+            buttonLabel="Analyze Progress"
+          />
+        )}
+
         {/* Charts Row */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <Card>

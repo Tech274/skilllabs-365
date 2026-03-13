@@ -72,6 +72,13 @@ export default function Security() {
           ))}
         </div>
 
+        <AiInsightCard
+          type="security_summary"
+          data={{ audit_logs: auditLogs, waf_events: wafEvents }}
+          title="AI Threat Summary"
+          buttonLabel="Analyze Threats"
+        />
+
         <Tabs defaultValue="audit" className="space-y-4">
           <TabsList className="bg-muted/50 border border-border">
             <TabsTrigger value="audit" className="gap-1.5 data-[state=active]:bg-card"><FileText className="h-3.5 w-3.5" />Audit Logs</TabsTrigger>

@@ -110,6 +110,19 @@ export default function StudentDashboard() {
           ))}
         </div>
 
+        {/* AI Student Guidance */}
+        <AiInsightCard
+          type="student_guidance"
+          data={{
+            available_labs: labs.map(l => ({ name: l.name, protocol: l.protocol, duration: l.duration })),
+            session_history: sessions.slice(0, 10).map(s => ({ status: s.status, region: s.region, started_at: s.started_at, connection_quality: s.connection_quality })),
+            completed_count: completedSessions,
+            total_time_minutes: Math.round(totalTime),
+          }}
+          title="AI Lab Assistant"
+          buttonLabel="What should I do next?"
+        />
+
         {/* Available Labs */}
         <div>
           <h2 className="text-lg font-semibold text-foreground mb-3">Available Labs</h2>

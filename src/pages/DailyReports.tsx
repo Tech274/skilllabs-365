@@ -147,6 +147,16 @@ const DailyReports = () => {
                   animate={{ opacity: 1, x: 0 }}
                   className="lg:col-span-2 space-y-4"
                 >
+                  {/* AI Summary */}
+                  {d && (
+                    <AiInsightCard
+                      type="daily_report_summary"
+                      data={d}
+                      title="AI Report Summary"
+                      buttonLabel="Summarize"
+                    />
+                  )}
+
                   {/* Summary Cards */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                     {[

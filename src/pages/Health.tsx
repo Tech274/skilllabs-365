@@ -51,6 +51,13 @@ export default function Health() {
           </p>
         </div>
 
+        <AiInsightCard
+          type="health_diagnosis"
+          data={services}
+          title="AI Health Diagnosis"
+          buttonLabel="Diagnose"
+        />
+
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card divide-y divide-border">
           {services.map((s, i) => (
             <motion.div

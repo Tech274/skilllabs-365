@@ -135,6 +135,14 @@ export default function CostAnalytics() {
               </motion.div>
             </div>
 
+            {/* AI Cost Advisor */}
+            <AiInsightCard
+              type="cost_insight"
+              data={{ cost_breakdown: costBreakdown, total_monthly: totalMonthly }}
+              title="AI Cost Advisor"
+              buttonLabel="Get Recommendations"
+            />
+
             <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="rounded-xl border border-border bg-card p-5">
               <h3 className="text-sm font-medium text-foreground mb-4">Cost Optimization Recommendations</h3>
               <div className="space-y-3">

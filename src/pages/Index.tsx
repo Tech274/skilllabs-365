@@ -226,6 +226,20 @@ const Index = () => {
           )}
         </AnimatePresence>
 
+        {/* AI Insights */}
+        <AiInsightCard
+          type="cost_insight"
+          data={{
+            vm_counts: vmStatusCounts,
+            total_running: totalRunning,
+            total_idle: totalIdle,
+            total_failed: totalFailed,
+            quotas,
+          }}
+          title="AI Platform Insights"
+          buttonLabel="Analyze"
+        />
+
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
           <MetricCard title="Active VMs" value={totalRunning + totalIdle} icon={Server} variant="primary" />
