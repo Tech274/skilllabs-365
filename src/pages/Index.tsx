@@ -143,9 +143,29 @@ const Index = () => {
     }
   };
 
+  const handleLaunchLab = async (lab: LabTemplate) => {
+    setLaunchingId(lab.id);
+    try {
+      const { data, error } = await supabase.functions.invoke("provision-lab", {
+        body: { lab_template_id: lab.id },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
+      navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
+    } catch (err: any) {
+      toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
+    } finally {
+      setLaunchingId(null);
+    }
+  };
+
   useEffect(() => {
     fetchVMs();
     fetchQuotas();
+    supabase.from("lab_templates").select("*").eq("status", "active").order("name").then(({ data }) => {
+      if (data) setLabs(data);
+    });
 
     const channel = supabase
       .channel("dashboard-vm-changes")
