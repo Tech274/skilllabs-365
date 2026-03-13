@@ -317,20 +317,36 @@ Deno.serve(async (req) => {
       })
       .eq("id", vmRecord.id);
 
-    // 5. Poll until VM is running — but respond within 25s to avoid client timeout
-    const vmStatus = await Promise.race([
-      waitForVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName),
-      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 20000)),
-    ]);
+    // 5. Return immediately — client will poll virtual_machines table for status
+    // Background: kick off polling but don't await it (fire-and-forget via EdgeRuntime.waitUntil pattern)
+    const bgPoll = (async () => {
+      try {
+        const status = await waitForVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+        if (status === "running") {
+          // Re-fetch private IP now that VM is fully up
+          const nicName = `${vmName}-nic`;
+          const nicRes = await fetch(
+            `https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Network/networkInterfaces/${nicName}?api-version=2024-03-01`,
+            { headers: { Authorization: `Bearer ${azureToken}` } }
+          );
+          let finalIp = vmResult.privateIp;
+          if (nicRes.ok) {
+            const nicData = await nicRes.json();
+            finalIp = nicData?.properties?.ipConfigurations?.[0]?.properties?.privateIPAddress || finalIp;
+          }
+          await supabase.from("virtual_machines").update({ status: "running", private_ip: finalIp }).eq("id", vmRecord.id);
+        } else {
+          await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vmRecord.id);
+        }
+      } catch (e) {
+        console.error("Background VM poll failed:", e);
+        await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vmRecord.id);
+      }
+    })();
 
-    if (vmStatus === "running") {
-      await supabase
-        .from("virtual_machines")
-        .update({
-          status: "running",
-          private_ip: vmResult.privateIp,
-        })
-        .eq("id", vmRecord.id);
+    // Use waitUntil if available (Deno Deploy), otherwise just let it run
+    if (typeof (globalThis as any).EdgeRuntime?.waitUntil === "function") {
+      (globalThis as any).EdgeRuntime.waitUntil(bgPoll);
     }
 
     return new Response(
@@ -338,7 +354,7 @@ Deno.serve(async (req) => {
         vm_id: vmRecord.id,
         azure_vm_id: vmResult.vmId,
         private_ip: vmResult.privateIp,
-        status: vmStatus === "running" ? "running" : "provisioning",
+        status: "provisioning",
         vm_name: vmName,
       }),
       {
