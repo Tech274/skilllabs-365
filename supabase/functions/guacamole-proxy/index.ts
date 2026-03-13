@@ -140,14 +140,39 @@ async function deleteGuacConnection(
 
 /** Get available data sources */
 async function getDataSource(guacBaseUrl: string, token: string): Promise<string> {
-  const res = await fetch(`${guacBaseUrl}/api/session/data?token=${token}`);
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Failed to get data sources [${res.status}]: ${body}`);
+  const listRes = await fetch(`${guacBaseUrl}/api/session/data?token=${token}`);
+
+  if (listRes.ok) {
+    const rawSources = await listRes.json();
+    const sources: string[] = Array.isArray(rawSources)
+      ? rawSources
+      : Object.keys(rawSources || {});
+
+    return sources.find((s) => s === "postgresql") || sources[0] || "postgresql";
   }
-  const sources: string[] = await res.json();
-  // Prefer "postgresql" data source, fall back to first
-  return sources.find((s) => s === "postgresql") || sources[0] || "postgresql";
+
+  const listBody = await listRes.text();
+  if (listRes.status !== 404) {
+    throw new Error(`Failed to get data sources [${listRes.status}]: ${listBody}`);
+  }
+
+  // Fallback for deployments where /api/session/data is not exposed
+  const fallbackSources = ["postgresql", "mysql", "postgresql-shared"];
+
+  for (const source of fallbackSources) {
+    const checkRes = await fetch(
+      `${guacBaseUrl}/api/session/data/${source}/connections?token=${token}`
+    );
+    await checkRes.text(); // consume body
+
+    if (checkRes.status !== 404) {
+      return source;
+    }
+  }
+
+  throw new Error(
+    `Failed to get data sources [404] at base URL ${guacBaseUrl}. Check GUACAMOLE_URL path and reverse-proxy routing. Original response: ${listBody}`
+  );
 }
 
 Deno.serve(async (req) => {
