@@ -2,13 +2,15 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { VMStatus } from "@/lib/types";
-import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu, Trash2 } from "lucide-react";
+import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu, Trash2, Play, Monitor, Terminal } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/hooks/use-toast";
+import { Badge } from "@/components/ui/badge";
+import type { Tables } from "@/integrations/supabase/types";
 import {
   AlertDialog,
   AlertDialogAction,
