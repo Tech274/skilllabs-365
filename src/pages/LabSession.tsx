@@ -93,6 +93,9 @@ export default function LabSession() {
         privateIp: data.vm_ip || prev.privateIp,
       }));
       setConnectionState("connected");
+      setIframeLoadFailed(false);
+      // Start a 15s timeout — if iframe doesn't load, show error
+      iframeTimerRef.current = setTimeout(() => setIframeLoadFailed(true), 15000);
     } catch (err) {
       console.error("Failed to create Guacamole session:", err);
       setConnectionState("error");
