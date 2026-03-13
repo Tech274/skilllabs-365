@@ -87,10 +87,54 @@ const Index = () => {
       if (!error && data && !data.error) {
         setQuotas(data.quotas || {});
         setVmStatusCounts(data.vm_status_counts || {});
+
+        // Fire in-app quota alerts (once per page load)
+        if (!quotaAlertShown.current) {
+          quotaAlertShown.current = true;
+          const allQuotas = data.quotas || {};
+          for (const [region, items] of Object.entries(allQuotas)) {
+            for (const q of items as QuotaItem[]) {
+              const pct = q.limit > 0 ? Math.round((q.currentUsage / q.limit) * 100) : 0;
+              if (pct >= 95) {
+                toast({
+                  title: `⚠️ Quota Critical: ${q.name}`,
+                  description: `${region} — ${q.currentUsage}/${q.limit} cores used (${pct}%). Students cannot launch new labs. Free up VMs or request a quota increase.`,
+                  variant: "destructive",
+                });
+              } else if (pct >= 80) {
+                toast({
+                  title: `Quota Warning: ${q.name}`,
+                  description: `${region} — ${q.currentUsage}/${q.limit} cores used (${pct}%). Consider cleaning up unused VMs.`,
+                });
+              }
+            }
+          }
+        }
       }
     } catch { /* silent */ }
     setQuotaLoading(false);
   }, []);
+
+  const handlePurgeFailedVMs = async () => {
+    setPurging(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+        body: { action: "purge-failed" },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({
+        title: "Purge Complete",
+        description: `${data.count} failed/terminated VM records removed from the database.`,
+      });
+      fetchVMs();
+      fetchQuotas();
+    } catch (err: any) {
+      toast({ title: "Purge Failed", description: err.message, variant: "destructive" });
+    } finally {
+      setPurging(false);
+    }
+  };
 
   useEffect(() => {
     fetchVMs();
