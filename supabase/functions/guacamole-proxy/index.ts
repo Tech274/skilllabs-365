@@ -226,7 +226,7 @@ Deno.serve(async (req) => {
       }
 
       const connectionName = `session-${vm_id}-${Date.now()}`;
-      const connectionId = await createGuacConnection(GUACAMOLE_URL, token, dataSource, {
+      const connectionId = await createGuacConnection(guacBaseUrl, token, dataSource, {
         name: connectionName,
         protocol,
         hostname: vm.private_ip,
@@ -235,9 +235,9 @@ Deno.serve(async (req) => {
       });
 
       // Build the iframe URL with client token
-      // Guacamole client URL format: /guacamole/#/client/{base64(connectionId + \0 + c + \0 + dataSource)}
+      // Guacamole client URL format: /#/client/{base64(connectionId + \0 + c + \0 + dataSource)}
       const clientId = btoa(`${connectionId}\0c\0${dataSource}`);
-      const iframeUrl = `${GUACAMOLE_URL}/#/client/${encodeURIComponent(clientId)}?token=${token}`;
+      const iframeUrl = `${guacBaseUrl}/#/client/${encodeURIComponent(clientId)}?token=${token}`;
 
       // Create session record in database
       const { data: session, error: sessionError } = await supabase
