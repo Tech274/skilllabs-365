@@ -276,7 +276,7 @@ Deno.serve(async (req) => {
     const { data: vmRecord, error: vmInsertError } = await supabase
       .from("virtual_machines")
       .insert({
-        user_id: user.id,
+        user_id: userId,
         lab_template_id: template.id,
         region: template.region === "All Regions" ? "East US" : template.region,
         vm_size: template.vm_size,
