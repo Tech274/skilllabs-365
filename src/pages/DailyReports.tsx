@@ -9,6 +9,7 @@ import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line, AreaChart, Area,
 } from "recharts";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 interface Report {
   id: string;
