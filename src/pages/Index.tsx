@@ -32,6 +32,7 @@ import {
   Bar,
 } from "recharts";
 import { Progress } from "@/components/ui/progress";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 interface QuotaItem {
   name: string;
