@@ -234,6 +234,11 @@ Deno.serve(async (req) => {
 
       const connParams: Record<string, string> = {};
       if (protocol === "rdp") {
+        // Resolution: 1920x1080, auto-fit to client display
+        connParams["width"] = "1920";
+        connParams["height"] = "1080";
+        connParams["dpi"] = "96";
+        connParams["resize-method"] = "display-update";
         connParams["enable-wallpaper"] = "false";
         connParams["enable-theming"] = "false";
         connParams["enable-font-smoothing"] = "true";

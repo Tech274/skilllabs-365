@@ -449,6 +449,7 @@ export default function LabSession() {
                   ref={iframeRef}
                   src={guacamoleUrl}
                   className="h-full w-full border-0"
+                  style={{ objectFit: "contain" }}
                   allow="clipboard-read; clipboard-write"
                   title="Lab Session"
                   onLoad={() => {
