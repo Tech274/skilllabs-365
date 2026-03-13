@@ -147,9 +147,20 @@ export default function StudentDashboard() {
                     <Badge variant="outline" className="text-[10px] font-mono">{lab.vm_size}</Badge>
                     <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
                   </div>
+                  {launchErrors[lab.id] && (
+                    <div className="flex items-start gap-2 rounded-lg bg-destructive/10 border border-destructive/20 p-2.5">
+                      <AlertCircle className="h-3.5 w-3.5 text-destructive mt-0.5 shrink-0" />
+                      <div className="space-y-1">
+                        <p className="text-[11px] text-destructive font-medium">Launch failed</p>
+                        <p className="text-[10px] text-destructive/80 leading-tight">{launchErrors[lab.id]}</p>
+                      </div>
+                    </div>
+                  )}
                   <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
                     {launchingId === lab.id ? (
                       <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</>
+                    ) : launchErrors[lab.id] ? (
+                      <><AlertCircle className="h-3.5 w-3.5" /> Retry Launch</>
                     ) : (
                       <><Play className="h-3.5 w-3.5" /> Launch Lab</>
                     )}
