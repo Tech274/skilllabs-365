@@ -230,17 +230,19 @@ Deno.serve(async (req) => {
     if (!SUPABASE_URL) throw new Error("SUPABASE_URL is not configured");
     if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
 
-    // Validate user auth
     const authHeader = req.headers.get("authorization");
-    if (!authHeader) throw new Error("Missing authorization header");
+    if (!authHeader?.startsWith("Bearer ")) throw new Error("Missing authorization header");
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
     const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
     const userClient = createClient(SUPABASE_URL, anonKey, {
       global: { headers: { Authorization: authHeader } },
     });
-    const { data: { user }, error: userError } = await userClient.auth.getUser();
-    if (userError || !user) throw new Error("Unauthorized");
+
+    const token = authHeader.replace("Bearer ", "");
+    const { data: claimsData, error: claimsError } = await userClient.auth.getClaims(token);
+    if (claimsError || !claimsData?.claims) throw new Error("Unauthorized");
+    const userId = claimsData.claims.sub as string;
 
     const body = await req.json();
     const { lab_template_id } = body;
@@ -274,7 +276,7 @@ Deno.serve(async (req) => {
     const { data: vmRecord, error: vmInsertError } = await supabase
       .from("virtual_machines")
       .insert({
-        user_id: user.id,
+        user_id: userId,
         lab_template_id: template.id,
         region: template.region === "All Regions" ? "East US" : template.region,
         vm_size: template.vm_size,
