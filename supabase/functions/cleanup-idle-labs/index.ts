@@ -280,10 +280,12 @@ Deno.serve(async (req) => {
       .lt("last_activity_at", idleCutoff);
 
     // 2. Find VMs that are running but their session was ended (stopped labs)
+    // NOTE: Exclude "provisioning" VMs — they don't have sessions yet and are handled
+    // separately by the stuck-provisioning check (10min timeout)
     const { data: orphanVMs } = await supabase
       .from("virtual_machines")
       .select("id, azure_vm_id, status")
-      .in("status", ["running", "provisioning"])
+      .eq("status", "running")
       .not("azure_vm_id", "is", null);
 
     // Check which running VMs have no active session
