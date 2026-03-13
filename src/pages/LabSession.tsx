@@ -26,6 +26,11 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
+const isMixedContent = (url: string) => {
+  try {
+    return window.location.protocol === "https:" && new URL(url).protocol === "http:";
+  } catch { return false; }
+};
 
 interface SessionInfo {
   labName: string;
@@ -403,13 +408,24 @@ export default function LabSession() {
             className="h-full w-full"
           >
             {guacamoleUrl ? (
-              <iframe
-                ref={iframeRef}
-                src={guacamoleUrl}
-                className="h-full w-full border-0"
-                allow="clipboard-read; clipboard-write"
-                title="Lab Session"
-              />
+              <>
+                {isMixedContent(guacamoleUrl) && (
+                  <div className="flex items-center gap-2 px-4 py-2 bg-warning/10 border-b border-warning/30 text-warning text-xs">
+                    <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                    <span>
+                      <strong>Mixed content blocked:</strong> The Guacamole server is using HTTP but this page is HTTPS. 
+                      The browser will block the iframe. Please enable SSL/TLS on your Guacamole server to fix this.
+                    </span>
+                  </div>
+                )}
+                <iframe
+                  ref={iframeRef}
+                  src={guacamoleUrl}
+                  className="h-full w-full border-0"
+                  allow="clipboard-read; clipboard-write"
+                  title="Lab Session"
+                />
+              </>
             ) : (
               /* Demo placeholder when no Guacamole URL */
               <div className="h-full w-full flex flex-col items-center justify-center bg-background">
