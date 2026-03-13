@@ -255,7 +255,7 @@ Deno.serve(async (req) => {
 
       if (sessionError) {
         // Clean up Guacamole connection on failure
-        await deleteGuacConnection(GUACAMOLE_URL, token, dataSource, connectionId);
+        await deleteGuacConnection(guacBaseUrl, token, dataSource, connectionId);
         throw new Error(`Failed to create session record: ${sessionError.message}`);
       }
 
