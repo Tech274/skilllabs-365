@@ -6,6 +6,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieCha
 import { motion } from "framer-motion";
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 const COLORS = [
   'hsl(187 80% 48%)', 'hsl(210 80% 55%)', 'hsl(152 60% 45%)',
