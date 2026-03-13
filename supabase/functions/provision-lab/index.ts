@@ -317,15 +317,13 @@ Deno.serve(async (req) => {
       })
       .eq("id", vmRecord.id);
 
-    // 5. Poll until VM is running (async — don't block response too long)
-    // We'll do a quick check and let the frontend poll for status
+    // 5. Poll until VM is running — but respond within 25s to avoid client timeout
     const vmStatus = await Promise.race([
       waitForVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName),
-      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 60000)),
+      new Promise<string>((resolve) => setTimeout(() => resolve("pending"), 20000)),
     ]);
 
     if (vmStatus === "running") {
-      // Re-fetch NIC to get final private IP
       await supabase
         .from("virtual_machines")
         .update({
