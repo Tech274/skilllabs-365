@@ -11,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import type { Tables } from "@/integrations/supabase/types";
+import { AiInsightCard } from "@/components/AiInsightCard";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
