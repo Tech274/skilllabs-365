@@ -262,6 +262,32 @@ Deno.serve(async (req) => {
       }
     }
 
+    // 4. Mark VMs stuck in 'provisioning' for 10+ minutes as 'failed'
+    const { data: stuckVMs } = await supabase
+      .from("virtual_machines")
+      .select("id, azure_vm_id, created_at")
+      .eq("status", "provisioning")
+      .lt("created_at", stuckCutoff);
+
+    if (stuckVMs?.length) {
+      for (const vm of stuckVMs) {
+        // If it has an Azure VM, try to clean it up
+        if (vm.azure_vm_id) {
+          const vmName = extractVmName(vm.azure_vm_id);
+          await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+        }
+        // End any sessions tied to this VM
+        await supabase
+          .from("sessions")
+          .update({ ended_at: now.toISOString(), status: "completed" })
+          .eq("vm_id", vm.id)
+          .eq("status", "active");
+
+        await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm.id);
+        results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: marked failed (created ${vm.created_at})`);
+      }
+    }
+
     console.log(`Cleanup completed: ${results.length} actions taken`, results);
 
     return new Response(
