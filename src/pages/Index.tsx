@@ -1,9 +1,13 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
-import { labVMs, vmStatusCounts, sessionHistory, regionHealthData } from "@/lib/mock-data";
-import { Server, Users, Activity, Clock, Globe, Zap } from "lucide-react";
+import { sessionHistory, regionHealthData } from "@/lib/mock-data";
+import type { VMStatus } from "@/lib/mock-data";
+import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu } from "lucide-react";
 import { motion } from "framer-motion";
+import { useEffect, useState, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
+import { Link } from "react-router-dom";
 import {
   AreaChart,
   Area,
@@ -15,18 +19,89 @@ import {
   BarChart,
   Bar,
 } from "recharts";
+import { Progress } from "@/components/ui/progress";
 
-const statusDistribution = [
-  { name: 'Running', value: vmStatusCounts.running, fill: 'hsl(152 60% 45%)' },
-  { name: 'Idle', value: vmStatusCounts.idle, fill: 'hsl(38 90% 55%)' },
-  { name: 'Provisioning', value: vmStatusCounts.provisioning, fill: 'hsl(210 80% 55%)' },
-  { name: 'Starting', value: vmStatusCounts.starting, fill: 'hsl(187 80% 48%)' },
-  { name: 'Expired', value: vmStatusCounts.expired, fill: 'hsl(0 72% 55%)' },
-  { name: 'Stopped', value: vmStatusCounts.stopped, fill: 'hsl(215 12% 52%)' },
-];
+interface QuotaItem {
+  name: string;
+  currentUsage: number;
+  limit: number;
+  unit: string;
+}
+
+interface VMRow {
+  id: string;
+  status: string;
+  region: string;
+  vm_size: string;
+  private_ip: string | null;
+  idle_minutes: number;
+  userName?: string;
+  labName?: string;
+}
 
 const Index = () => {
-  const recentVMs = labVMs.slice(0, 8);
+  const [vms, setVms] = useState<VMRow[]>([]);
+  const [vmLoading, setVmLoading] = useState(true);
+  const [quotas, setQuotas] = useState<Record<string, QuotaItem[]>>({});
+  const [quotaLoading, setQuotaLoading] = useState(true);
+  const [vmStatusCounts, setVmStatusCounts] = useState<Record<string, number>>({});
+
+  const fetchVMs = useCallback(async () => {
+    const { data, error } = await supabase
+      .from("virtual_machines")
+      .select("*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name)")
+      .order("created_at", { ascending: false })
+      .limit(8);
+
+    if (error) {
+      const { data: fallback } = await supabase.from("virtual_machines").select("*").order("created_at", { ascending: false }).limit(8);
+      if (fallback) setVms(fallback.map((vm: any) => ({ ...vm, userName: "—", labName: "—" })));
+    } else if (data) {
+      setVms(data.map((vm: any) => ({
+        ...vm,
+        userName: vm.profiles?.display_name || "—",
+        labName: vm.lab_templates?.name || "—",
+      })));
+    }
+    setVmLoading(false);
+  }, []);
+
+  const fetchQuotas = useCallback(async () => {
+    try {
+      const { data, error } = await supabase.functions.invoke("azure-quota");
+      if (!error && data && !data.error) {
+        setQuotas(data.quotas || {});
+        setVmStatusCounts(data.vm_status_counts || {});
+      }
+    } catch { /* silent */ }
+    setQuotaLoading(false);
+  }, []);
+
+  useEffect(() => {
+    fetchVMs();
+    fetchQuotas();
+
+    const channel = supabase
+      .channel("dashboard-vm-changes")
+      .on("postgres_changes", { event: "*", schema: "public", table: "virtual_machines" }, () => fetchVMs())
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, [fetchVMs, fetchQuotas]);
+
+  const totalRunning = vmStatusCounts["running"] || 0;
+  const totalIdle = vmStatusCounts["idle"] || 0;
+  const totalProvisioning = vmStatusCounts["provisioning"] || 0;
+  const totalFailed = vmStatusCounts["failed"] || 0;
+  const totalDeallocated = vmStatusCounts["deallocated"] || 0;
+
+  const statusDistribution = [
+    { name: 'Running', value: totalRunning, fill: 'hsl(152 60% 45%)' },
+    { name: 'Idle', value: totalIdle, fill: 'hsl(38 90% 55%)' },
+    { name: 'Provisioning', value: totalProvisioning, fill: 'hsl(210 80% 55%)' },
+    { name: 'Failed', value: totalFailed, fill: 'hsl(0 72% 55%)' },
+    { name: 'Deallocated', value: totalDeallocated, fill: 'hsl(215 12% 52%)' },
+  ].filter(s => s.value > 0);
 
   return (
     <DashboardLayout>
@@ -38,47 +113,115 @@ const Index = () => {
 
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          <MetricCard title="Active VMs" value={vmStatusCounts.running + vmStatusCounts.idle} icon={Server} variant="primary" trend={{ value: 12, label: 'vs last hour' }} />
-          <MetricCard title="Active Sessions" value="483" icon={Users} variant="success" subtitle="312 East US · 171 India" />
-          <MetricCard title="Avg Provision" value="47s" icon={Clock} variant="default" trend={{ value: -8, label: 'improvement' }} />
-          <MetricCard title="Idle VMs" value={vmStatusCounts.idle} icon={Activity} variant="warning" subtitle="Auto-stop in ≤20min" />
+          <MetricCard title="Active VMs" value={totalRunning + totalIdle} icon={Server} variant="primary" />
+          <MetricCard title="Provisioning" value={totalProvisioning} icon={Clock} variant="default" />
+          <MetricCard title="Idle VMs" value={totalIdle} icon={Activity} variant="warning" subtitle="Auto-stop in ≤15min" />
+          <MetricCard title="Failed" value={totalFailed} icon={AlertTriangle} variant={totalFailed > 0 ? "warning" : "default"} />
+          <MetricCard title="Deallocated" value={totalDeallocated} icon={Server} variant="default" />
           <MetricCard title="Regions" value="2/2" icon={Globe} variant="success" subtitle="All healthy" />
-          <MetricCard title="AKS Pods" value="80" icon={Zap} variant="primary" subtitle="20 nodes" />
         </div>
 
-        {/* Charts */}
+        {/* Azure Quota Widget + VM Status Chart */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }} className="lg:col-span-2 rounded-xl border border-border bg-card p-5">
-            <h3 className="text-sm font-medium text-foreground mb-4">Sessions (24h)</h3>
-            <ResponsiveContainer width="100%" height={240}>
-              <AreaChart data={sessionHistory}>
-                <defs>
-                  <linearGradient id="sessionGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor="hsl(187 80% 48%)" stopOpacity={0.3} />
-                    <stop offset="100%" stopColor="hsl(187 80% 48%)" stopOpacity={0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 14% 18%)" />
-                <XAxis dataKey="hour" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
-                <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} />
-                <Area type="monotone" dataKey="sessions" stroke="hsl(187 80% 48%)" fill="url(#sessionGrad)" strokeWidth={2} />
-              </AreaChart>
-            </ResponsiveContainer>
+          {/* Quota Widget */}
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.05 }} className="lg:col-span-2 rounded-xl border border-border bg-card p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Cpu className="h-4 w-4 text-primary" />
+              <h3 className="text-sm font-medium text-foreground">Azure Compute Quota</h3>
+              {quotaLoading && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+            </div>
+            {quotaLoading ? (
+              <div className="flex items-center justify-center py-8 text-muted-foreground text-sm">
+                <Loader2 className="h-4 w-4 animate-spin mr-2" /> Fetching Azure quotas...
+              </div>
+            ) : Object.keys(quotas).length === 0 ? (
+              <div className="py-8 text-center text-muted-foreground text-sm">
+                Unable to fetch Azure quotas. Check credentials.
+              </div>
+            ) : (
+              <div className="space-y-5">
+                {Object.entries(quotas).map(([region, items]) => (
+                  <div key={region}>
+                    <div className="flex items-center gap-2 mb-3">
+                      <Globe className="h-3 w-3 text-muted-foreground" />
+                      <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{region}</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      {items.map((q) => {
+                        const pct = q.limit > 0 ? Math.round((q.currentUsage / q.limit) * 100) : 0;
+                        const isHigh = pct >= 80;
+                        const isCritical = pct >= 95;
+                        return (
+                          <div key={`${region}-${q.name}`} className="rounded-lg border border-border/50 bg-muted/30 p-3 space-y-2">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-medium text-foreground">{q.name}</span>
+                              <span className={`text-xs font-mono font-semibold ${isCritical ? "text-destructive" : isHigh ? "text-warning" : "text-foreground"}`}>
+                                {q.currentUsage}/{q.limit}
+                              </span>
+                            </div>
+                            <Progress
+                              value={pct}
+                              className="h-2"
+                            />
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-muted-foreground">{pct}% used</span>
+                              {isCritical && (
+                                <span className="text-[10px] text-destructive font-medium flex items-center gap-1">
+                                  <AlertTriangle className="h-2.5 w-2.5" /> Quota critical
+                                </span>
+                              )}
+                              {isHigh && !isCritical && (
+                                <span className="text-[10px] text-warning font-medium">Nearing limit</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </motion.div>
 
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="rounded-xl border border-border bg-card p-5">
             <h3 className="text-sm font-medium text-foreground mb-4">VM Status</h3>
-            <ResponsiveContainer width="100%" height={240}>
-              <BarChart data={statusDistribution} layout="vertical">
-                <XAxis type="number" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
-                <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} width={80} />
-                <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} />
-                <Bar dataKey="value" radius={[0, 4, 4, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
+            {statusDistribution.length > 0 ? (
+              <ResponsiveContainer width="100%" height={240}>
+                <BarChart data={statusDistribution} layout="vertical">
+                  <XAxis type="number" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
+                  <YAxis dataKey="name" type="category" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} width={80} />
+                  <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} />
+                  <Bar dataKey="value" radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex items-center justify-center h-[240px] text-muted-foreground text-sm">
+                {quotaLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "No VMs"}
+              </div>
+            )}
           </motion.div>
         </div>
+
+        {/* Sessions Chart */}
+        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }} className="rounded-xl border border-border bg-card p-5">
+          <h3 className="text-sm font-medium text-foreground mb-4">Sessions (24h)</h3>
+          <ResponsiveContainer width="100%" height={200}>
+            <AreaChart data={sessionHistory}>
+              <defs>
+                <linearGradient id="sessionGrad" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor="hsl(187 80% 48%)" stopOpacity={0.3} />
+                  <stop offset="100%" stopColor="hsl(187 80% 48%)" stopOpacity={0} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 14% 18%)" />
+              <XAxis dataKey="hour" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
+              <YAxis tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} />
+              <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} />
+              <Area type="monotone" dataKey="sessions" stroke="hsl(187 80% 48%)" fill="url(#sessionGrad)" strokeWidth={2} />
+            </AreaChart>
+          </ResponsiveContainer>
+        </motion.div>
 
         {/* Region Status */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -108,36 +251,50 @@ const Index = () => {
           ))}
         </div>
 
-        {/* Recent VMs Table */}
+        {/* Recent VMs Table — Live Data */}
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }} className="rounded-xl border border-border bg-card">
-          <div className="p-5 border-b border-border">
+          <div className="p-5 border-b border-border flex items-center justify-between">
             <h3 className="text-sm font-medium text-foreground">Recent Virtual Machines</h3>
+            <Link to="/vms" className="text-xs text-primary hover:underline">View All →</Link>
           </div>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border text-left">
-                  {['VM ID', 'User', 'Lab', 'Region', 'IP', 'Size', 'Status', 'Idle'].map((h) => (
-                    <th key={h} className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {recentVMs.map((vm) => (
-                  <tr key={vm.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                    <td className="px-5 py-3 font-mono text-xs text-primary">{vm.id}</td>
-                    <td className="px-5 py-3 text-foreground">{vm.userName}</td>
-                    <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
-                    <td className="px-5 py-3 text-muted-foreground">{vm.region}</td>
-                    <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.privateIp}</td>
-                    <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.vmSize}</td>
-                    <td className="px-5 py-3"><StatusBadge status={vm.status} /></td>
-                    <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.idleMinutes > 0 ? `${vm.idleMinutes}m` : '—'}</td>
+          {vmLoading ? (
+            <div className="p-8 flex items-center justify-center text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin mr-2" /> Loading...
+            </div>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-border text-left">
+                    {['VM ID', 'User', 'Lab', 'Region', 'IP', 'Size', 'Status', 'Idle'].map((h) => (
+                      <th key={h} className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
+                    ))}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {vms.map((vm) => (
+                    <tr key={vm.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                      <td className="px-5 py-3 font-mono text-xs text-primary">
+                        <Link to={`/vms/${vm.id}`} className="hover:underline">{vm.id.slice(0, 8)}…</Link>
+                      </td>
+                      <td className="px-5 py-3 text-foreground">{vm.userName}</td>
+                      <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
+                      <td className="px-5 py-3 text-muted-foreground">{vm.region}</td>
+                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.private_ip || "—"}</td>
+                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.vm_size}</td>
+                      <td className="px-5 py-3"><StatusBadge status={vm.status as VMStatus} /></td>
+                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.idle_minutes > 0 ? `${vm.idle_minutes}m` : '—'}</td>
+                    </tr>
+                  ))}
+                  {vms.length === 0 && (
+                    <tr>
+                      <td colSpan={8} className="px-5 py-8 text-center text-muted-foreground text-sm">No VMs found.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </motion.div>
       </div>
     </DashboardLayout>
