@@ -392,7 +392,14 @@ export default function VirtualMachines() {
               </table>
             </div>
           )}
-          {!loading && filtered.length === 0 && (
+          {!loading && vms.length === 0 && (
+            <div className="p-16 flex flex-col items-center justify-center text-center">
+              <Server className="h-10 w-10 text-muted-foreground/40 mb-3" />
+              <p className="text-sm font-medium text-foreground">No Virtual Machines</p>
+              <p className="text-xs text-muted-foreground mt-1 max-w-sm">No VMs have been provisioned yet. Launch a lab from the Student Dashboard to see VMs appear here in real-time.</p>
+            </div>
+          )}
+          {!loading && vms.length > 0 && filtered.length === 0 && (
             <div className="p-12 text-center text-muted-foreground text-sm">No VMs match your filters.</div>
           )}
         </motion.div>
