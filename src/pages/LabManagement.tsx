@@ -70,6 +70,7 @@ export default function LabManagement() {
   // Delete confirmation state
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deletingLab, setDeletingLab] = useState<LabTemplate | null>(null);
+  const [genLoading, setGenLoading] = useState(false);
 
   const fetchLabs = async () => {
     const { data, error } = await supabase.from("lab_templates").select("*").order("created_at", { ascending: false });
