@@ -140,7 +140,7 @@ async function deleteGuacConnection(
 
 /** Get available data sources */
 async function getDataSource(guacBaseUrl: string, token: string): Promise<string> {
-  const listRes = await guacFetch(`${guacBaseUrl}/api/session/data?token=${token}`);
+  const listRes = await fetch(`${guacBaseUrl}/api/session/data?token=${token}`);
 
   if (listRes.ok) {
     const rawSources = await listRes.json();
