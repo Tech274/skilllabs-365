@@ -1,43 +1,31 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
+import { EmptyState } from "@/components/EmptyState";
 import { motion } from "framer-motion";
-import { UserPlus, Shield, GraduationCap, BookOpen, MoreVertical, Search, Mail } from "lucide-react";
+import { UserPlus, Shield, GraduationCap, BookOpen, MoreVertical, Search, Mail, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
+import { useAuth } from "@/hooks/use-auth";
 
 type Role = 'admin' | 'instructor' | 'student';
 
-interface MockUser {
+interface UserRecord {
   id: string;
-  name: string;
-  email: string;
+  user_id: string;
+  display_name: string;
+  email: string | null;
   role: Role;
-  status: 'active' | 'suspended' | 'invited';
-  lastActive: string;
-  sessionsCount: number;
+  created_at: string;
 }
-
-const mockUsers: MockUser[] = [
-  { id: '1', name: 'Admin User', email: 'admin@cloudlab.io', role: 'admin', status: 'active', lastActive: '2 min ago', sessionsCount: 0 },
-  { id: '2', name: 'Dr. Sarah Chen', email: 'sarah.chen@university.edu', role: 'instructor', status: 'active', lastActive: '15 min ago', sessionsCount: 234 },
-  { id: '3', name: 'Prof. Raj Patel', email: 'raj.patel@university.edu', role: 'instructor', status: 'active', lastActive: '1 hr ago', sessionsCount: 189 },
-  { id: '4', name: 'Alice Wang', email: 'alice.w@student.edu', role: 'student', status: 'active', lastActive: '5 min ago', sessionsCount: 42 },
-  { id: '5', name: 'Bob Kumar', email: 'bob.k@student.edu', role: 'student', status: 'active', lastActive: '20 min ago', sessionsCount: 38 },
-  { id: '6', name: 'Carol Johnson', email: 'carol.j@student.edu', role: 'student', status: 'suspended', lastActive: '2 days ago', sessionsCount: 12 },
-  { id: '7', name: 'Dave Li', email: 'dave.l@student.edu', role: 'student', status: 'active', lastActive: '1 hr ago', sessionsCount: 55 },
-  { id: '8', name: 'Eve Santos', email: 'eve.s@student.edu', role: 'student', status: 'invited', lastActive: 'Never', sessionsCount: 0 },
-  { id: '9', name: 'Frank Müller', email: 'frank.m@student.edu', role: 'student', status: 'active', lastActive: '30 min ago', sessionsCount: 29 },
-  { id: '10', name: 'Dr. Grace Kim', email: 'grace.kim@university.edu', role: 'instructor', status: 'active', lastActive: '45 min ago', sessionsCount: 312 },
-];
 
 const roleConfig = {
   admin: { icon: Shield, color: 'text-destructive', bg: 'bg-destructive/10', label: 'Admin' },
@@ -45,21 +33,61 @@ const roleConfig = {
   student: { icon: GraduationCap, color: 'text-success', bg: 'bg-success/10', label: 'Student' },
 };
 
-const statusStyle = {
-  active: 'bg-success/10 text-success',
-  suspended: 'bg-destructive/10 text-destructive',
-  invited: 'bg-warning/10 text-warning',
-};
-
 export default function UserManagement() {
-  const [users, setUsers] = useState(mockUsers);
+  const { user } = useAuth();
+  const [users, setUsers] = useState<UserRecord[]>([]);
+  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [inviteForm, setInviteForm] = useState({ email: '', role: 'student' as Role });
   const [tab, setTab] = useState('all');
 
+  const fetchUsers = async () => {
+    const { data: profiles } = await supabase
+      .from("profiles")
+      .select("id, user_id, display_name, email, created_at");
+
+    const { data: roles } = await supabase
+      .from("user_roles")
+      .select("user_id, role");
+
+    if (profiles) {
+      const roleMap = new Map(roles?.map(r => [r.user_id, r.role as Role]) ?? []);
+      const merged: UserRecord[] = profiles.map(p => ({
+        id: p.id,
+        user_id: p.user_id,
+        display_name: p.display_name,
+        email: p.email,
+        role: roleMap.get(p.user_id) ?? 'student',
+        created_at: p.created_at,
+      }));
+      setUsers(merged);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => {
+    fetchUsers();
+
+    const profilesChannel = supabase
+      .channel('user-mgmt-profiles')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'profiles' }, () => fetchUsers())
+      .subscribe();
+
+    const rolesChannel = supabase
+      .channel('user-mgmt-roles')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'user_roles' }, () => fetchUsers())
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(profilesChannel);
+      supabase.removeChannel(rolesChannel);
+    };
+  }, []);
+
   const filtered = users.filter(u => {
-    const matchSearch = u.name.toLowerCase().includes(search.toLowerCase()) || u.email.toLowerCase().includes(search.toLowerCase());
+    const matchSearch = u.display_name.toLowerCase().includes(search.toLowerCase()) ||
+      (u.email?.toLowerCase().includes(search.toLowerCase()) ?? false);
     if (tab === 'all') return matchSearch;
     return matchSearch && u.role === tab;
   });
@@ -71,25 +99,28 @@ export default function UserManagement() {
     student: users.filter(u => u.role === 'student').length,
   };
 
-  const handleInvite = () => {
+  const changeRole = async (userId: string, newRole: Role) => {
+    const { error } = await supabase
+      .from("user_roles")
+      .update({ role: newRole })
+      .eq("user_id", userId);
+
+    if (error) {
+      toast({ title: "Error", description: error.message, variant: "destructive" });
+    } else {
+      toast({ title: "Role updated", description: `User role changed to ${newRole}.` });
+    }
+  };
+
+  const handleInvite = async () => {
     if (!inviteForm.email.trim()) return;
-    const newUser: MockUser = {
-      id: `u-${Date.now()}`, name: inviteForm.email.split('@')[0], email: inviteForm.email,
-      role: inviteForm.role, status: 'invited', lastActive: 'Never', sessionsCount: 0,
-    };
-    setUsers(prev => [...prev, newUser]);
-    toast({ title: "Invitation sent", description: `Invited ${inviteForm.email} as ${inviteForm.role}.` });
+    // Use edge function or admin API to invite — for now show guidance
+    toast({
+      title: "Invite flow",
+      description: `Ask the user to sign up at the login page. They'll be auto-assigned the student role, then you can change it here.`,
+    });
     setDialogOpen(false);
     setInviteForm({ email: '', role: 'student' });
-  };
-
-  const changeRole = (userId: string, newRole: Role) => {
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, role: newRole } : u));
-    toast({ title: "Role updated", description: `User role changed to ${newRole}.` });
-  };
-
-  const toggleSuspend = (userId: string) => {
-    setUsers(prev => prev.map(u => u.id === userId ? { ...u, status: u.status === 'suspended' ? 'active' : 'suspended' } : u));
   };
 
   return (
@@ -98,7 +129,9 @@ export default function UserManagement() {
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div>
             <h1 className="text-2xl font-semibold text-foreground">User Management</h1>
-            <p className="text-sm text-muted-foreground mt-1">{users.length} users across {counts.admin} admins, {counts.instructor} instructors, {counts.student} students</p>
+            <p className="text-sm text-muted-foreground mt-1">
+              {loading ? "Loading…" : `${users.length} users across ${counts.admin} admins, ${counts.instructor} instructors, ${counts.student} students`}
+            </p>
           </div>
           <Button onClick={() => setDialogOpen(true)} className="gap-2">
             <UserPlus className="h-4 w-4" /> Invite User
@@ -125,90 +158,102 @@ export default function UserManagement() {
           })}
         </div>
 
-        {/* Tabs + Search */}
-        <Tabs value={tab} onValueChange={setTab}>
-          <div className="flex flex-col sm:flex-row sm:items-center gap-3">
-            <TabsList>
-              <TabsTrigger value="all">All ({counts.all})</TabsTrigger>
-              <TabsTrigger value="admin">Admins</TabsTrigger>
-              <TabsTrigger value="instructor">Instructors</TabsTrigger>
-              <TabsTrigger value="student">Students</TabsTrigger>
-            </TabsList>
-            <div className="relative flex-1 max-w-xs">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search users..." className="pl-9" />
-            </div>
-          </div>
-
-          <TabsContent value={tab} className="mt-4">
-            <div className="rounded-xl border border-border bg-card overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-border bg-muted/30">
-                      <th className="text-left p-3 font-medium text-muted-foreground">User</th>
-                      <th className="text-left p-3 font-medium text-muted-foreground hidden sm:table-cell">Role</th>
-                      <th className="text-left p-3 font-medium text-muted-foreground hidden md:table-cell">Status</th>
-                      <th className="text-left p-3 font-medium text-muted-foreground hidden lg:table-cell">Last Active</th>
-                      <th className="text-left p-3 font-medium text-muted-foreground hidden lg:table-cell">Sessions</th>
-                      <th className="text-right p-3 font-medium text-muted-foreground">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {filtered.map((user, i) => {
-                      const cfg = roleConfig[user.role];
-                      return (
-                        <motion.tr key={user.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.02 }}
-                          className="border-b border-border last:border-0 hover:bg-muted/20 transition-colors">
-                          <td className="p-3">
-                            <div className="flex items-center gap-3">
-                              <Avatar className="h-8 w-8">
-                                <AvatarFallback className="text-xs bg-muted">{user.name.split(' ').map(n => n[0]).join('')}</AvatarFallback>
-                              </Avatar>
-                              <div>
-                                <p className="font-medium text-foreground">{user.name}</p>
-                                <p className="text-xs text-muted-foreground">{user.email}</p>
-                              </div>
-                            </div>
-                          </td>
-                          <td className="p-3 hidden sm:table-cell">
-                            <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase", cfg.bg, cfg.color)}>
-                              {cfg.label}
-                            </span>
-                          </td>
-                          <td className="p-3 hidden md:table-cell">
-                            <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium uppercase", statusStyle[user.status])}>
-                              {user.status}
-                            </span>
-                          </td>
-                          <td className="p-3 text-muted-foreground hidden lg:table-cell">{user.lastActive}</td>
-                          <td className="p-3 font-mono text-muted-foreground hidden lg:table-cell">{user.sessionsCount}</td>
-                          <td className="p-3 text-right">
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <button className="p-1 rounded hover:bg-muted transition-colors">
-                                  <MoreVertical className="h-4 w-4 text-muted-foreground" />
-                                </button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end">
-                                <DropdownMenuItem onClick={() => changeRole(user.id, 'admin')}>Set as Admin</DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => changeRole(user.id, 'instructor')}>Set as Instructor</DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => changeRole(user.id, 'student')}>Set as Student</DropdownMenuItem>
-                                <DropdownMenuItem onClick={() => toggleSuspend(user.id)} className="text-destructive focus:text-destructive">
-                                  {user.status === 'suspended' ? 'Reactivate' : 'Suspend'}
-                                </DropdownMenuItem>
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </td>
-                        </motion.tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+        {!loading && users.length === 0 ? (
+          <EmptyState
+            icon={Users}
+            title="No users yet"
+            description="Users will appear here automatically when they sign up."
+            hint="Share the login page URL with your team to get started."
+          />
+        ) : (
+          <>
+            {/* Tabs + Search */}
+            <Tabs value={tab} onValueChange={setTab}>
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3">
+                <TabsList>
+                  <TabsTrigger value="all">All ({counts.all})</TabsTrigger>
+                  <TabsTrigger value="admin">Admins</TabsTrigger>
+                  <TabsTrigger value="instructor">Instructors</TabsTrigger>
+                  <TabsTrigger value="student">Students</TabsTrigger>
+                </TabsList>
+                <div className="relative flex-1 max-w-xs">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search users..." className="pl-9" />
+                </div>
               </div>
-            </div>
-          </TabsContent>
-        </Tabs>
+
+              <TabsContent value={tab} className="mt-4">
+                <div className="rounded-xl border border-border bg-card overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="border-b border-border bg-muted/30">
+                          <th className="text-left p-3 font-medium text-muted-foreground">User</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground hidden sm:table-cell">Role</th>
+                          <th className="text-left p-3 font-medium text-muted-foreground hidden md:table-cell">Joined</th>
+                          <th className="text-right p-3 font-medium text-muted-foreground">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filtered.map((u, i) => {
+                          const cfg = roleConfig[u.role];
+                          const initials = u.display_name.split(' ').map(n => n[0]).join('').toUpperCase();
+                          return (
+                            <motion.tr key={u.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: i * 0.02 }}
+                              className="border-b border-border last:border-0 hover:bg-muted/20 transition-colors">
+                              <td className="p-3">
+                                <div className="flex items-center gap-3">
+                                  <Avatar className="h-8 w-8">
+                                    <AvatarFallback className="text-xs bg-muted">{initials}</AvatarFallback>
+                                  </Avatar>
+                                  <div>
+                                    <p className="font-medium text-foreground">{u.display_name}</p>
+                                    <p className="text-xs text-muted-foreground">{u.email}</p>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="p-3 hidden sm:table-cell">
+                                <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium uppercase", cfg.bg, cfg.color)}>
+                                  {cfg.label}
+                                </span>
+                              </td>
+                              <td className="p-3 text-muted-foreground hidden md:table-cell">
+                                {new Date(u.created_at).toLocaleDateString()}
+                              </td>
+                              <td className="p-3 text-right">
+                                {u.user_id !== user?.id && (
+                                  <DropdownMenu>
+                                    <DropdownMenuTrigger asChild>
+                                      <button className="p-1 rounded hover:bg-muted transition-colors">
+                                        <MoreVertical className="h-4 w-4 text-muted-foreground" />
+                                      </button>
+                                    </DropdownMenuTrigger>
+                                    <DropdownMenuContent align="end">
+                                      <DropdownMenuItem onClick={() => changeRole(u.user_id, 'admin')}>Set as Admin</DropdownMenuItem>
+                                      <DropdownMenuItem onClick={() => changeRole(u.user_id, 'instructor')}>Set as Instructor</DropdownMenuItem>
+                                      <DropdownMenuItem onClick={() => changeRole(u.user_id, 'student')}>Set as Student</DropdownMenuItem>
+                                    </DropdownMenuContent>
+                                  </DropdownMenu>
+                                )}
+                              </td>
+                            </motion.tr>
+                          );
+                        })}
+                        {filtered.length === 0 && (
+                          <tr>
+                            <td colSpan={4} className="p-8 text-center text-muted-foreground">
+                              No users match your search.
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </TabsContent>
+            </Tabs>
+          </>
+        )}
 
         {/* Invite Dialog */}
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
