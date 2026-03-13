@@ -1,14 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
-// Create an HTTP client that skips TLS certificate verification
-// Required for self-signed certs on the Guacamole server
-const unsafeHttpClient = Deno.createHttpClient({ caCerts: [], proxy: undefined });
-
-/** fetch wrapper that skips TLS verification for Guacamole calls */
-function guacFetch(url: string | URL, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, client: unsafeHttpClient } as RequestInit);
-}
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
