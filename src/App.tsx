@@ -53,6 +53,7 @@ const App = () => (
               <Route path="/audit-log" element={<RoleProtectedRoute allowedRoles={["admin"]}><SessionAuditLog /></RoleProtectedRoute>} />
               <Route path="/users" element={<RoleProtectedRoute allowedRoles={["admin"]}><UserManagement /></RoleProtectedRoute>} />
               <Route path="/settings" element={<RoleProtectedRoute allowedRoles={["admin"]}><Settings /></RoleProtectedRoute>} />
+              <Route path="/reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><DailyReports /></RoleProtectedRoute>} />
               {/* Shared routes */}
               <Route path="/sessions" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><Sessions /></RoleProtectedRoute>} />
               <Route path="/sessions/:sessionId/playback" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><SessionPlayback /></RoleProtectedRoute>} />

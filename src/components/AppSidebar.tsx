@@ -21,6 +21,7 @@ const adminItems = [
   { title: "Lab Management", url: "/labs", icon: BookOpen },
   { title: "Audit Log", url: "/audit-log", icon: History },
   { title: "User Management", url: "/users", icon: Users },
+  { title: "Daily Reports", url: "/reports", icon: FileText },
 ];
 
 const instructorItems = [
