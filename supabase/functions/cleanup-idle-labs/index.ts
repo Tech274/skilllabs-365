@@ -156,6 +156,7 @@ Deno.serve(async (req) => {
 
     const now = new Date();
     const idleCutoff = new Date(now.getTime() - IDLE_TIMEOUT_MINUTES * 60 * 1000).toISOString();
+    const stuckCutoff = new Date(now.getTime() - STUCK_PROVISIONING_MINUTES * 60 * 1000).toISOString();
     const results: string[] = [];
 
     // 1. Find sessions that are active but idle for 15+ minutes based on last_activity_at
