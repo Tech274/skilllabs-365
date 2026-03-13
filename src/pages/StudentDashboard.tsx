@@ -40,6 +40,7 @@ export default function StudentDashboard() {
 
   const handleLaunchLab = async (lab: LabTemplate) => {
     setLaunchingId(lab.id);
+    setLaunchErrors((prev) => ({ ...prev, [lab.id]: "" }));
     try {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
@@ -49,7 +50,9 @@ export default function StudentDashboard() {
       toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
       navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
     } catch (err: any) {
-      toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
+      const message = err.message || "Failed to provision VM. Please try again.";
+      setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
+      toast({ title: "Launch Failed", description: message, variant: "destructive" });
     } finally {
       setLaunchingId(null);
     }
