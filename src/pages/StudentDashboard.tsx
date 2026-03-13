@@ -12,6 +12,7 @@ import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import type { Tables } from "@/integrations/supabase/types";
 import { AiInsightCard } from "@/components/AiInsightCard";
+import { AiChatPanel } from "@/components/AiChatPanel";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
