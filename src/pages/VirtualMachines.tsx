@@ -3,13 +3,14 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState, useEffect, useCallback } from "react";
-import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2 } from "lucide-react";
+import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2, CheckSquare, Square, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/mock-data";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -44,6 +45,9 @@ export default function VirtualMachines() {
   const [vms, setVms] = useState<VMRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
 
   const fetchVMs = useCallback(async () => {
     setLoading(true);
@@ -103,6 +107,59 @@ export default function VirtualMachines() {
     }
   };
 
+  // Bulk actions
+  const handleBulkStop = async () => {
+    setBulkLoading(true);
+    const ids = Array.from(selectedIds);
+    let stopped = 0;
+    for (const vmId of ids) {
+      try {
+        const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+          body: { action: "stop-vm", vm_id: vmId },
+        });
+        if (!error && !data?.error) stopped++;
+      } catch { /* continue */ }
+    }
+    toast({ title: "Bulk Stop Complete", description: `${stopped} of ${ids.length} VMs deallocated.` });
+    setSelectedIds(new Set());
+    setBulkLoading(false);
+  };
+
+  const handleBulkDelete = async () => {
+    setBulkLoading(true);
+    setShowBulkDeleteConfirm(false);
+    const ids = Array.from(selectedIds);
+    let deleted = 0;
+    for (const vmId of ids) {
+      try {
+        const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+          body: { action: "delete-vm", vm_id: vmId },
+        });
+        if (!error && !data?.error) deleted++;
+      } catch { /* continue */ }
+    }
+    toast({ title: "Bulk Delete Complete", description: `${deleted} of ${ids.length} VMs terminated.`, variant: "destructive" });
+    setSelectedIds(new Set());
+    setBulkLoading(false);
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => {
+    if (selectedIds.size === filtered.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(filtered.map((vm) => vm.id)));
+    }
+  };
+
   useEffect(() => {
     fetchVMs();
 
@@ -145,6 +202,7 @@ export default function VirtualMachines() {
 
   const allStatuses: VMStatus[] = ['running', 'idle', 'provisioning', 'starting', 'expired', 'stopped', 'deallocated', 'terminated', 'failed'];
   const isActiveStatus = (s: string) => ['running', 'idle', 'provisioning', 'starting'].includes(s);
+  const hasSelection = selectedIds.size > 0;
 
   return (
     <DashboardLayout>
@@ -183,6 +241,66 @@ export default function VirtualMachines() {
           </Select>
         </div>
 
+        {/* Bulk Actions Toolbar */}
+        <AnimatePresence>
+          {hasSelection && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              className="flex items-center gap-3 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5"
+            >
+              <CheckSquare className="h-4 w-4 text-primary" />
+              <span className="text-sm font-medium text-foreground">
+                {selectedIds.size} VM{selectedIds.size > 1 ? "s" : ""} selected
+              </span>
+              <div className="flex-1" />
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 text-warning border-warning/30 hover:bg-warning/10"
+                disabled={bulkLoading}
+                onClick={handleBulkStop}
+              >
+                {bulkLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <StopCircle className="h-3.5 w-3.5" />}
+                Stop All
+              </Button>
+              <AlertDialog open={showBulkDeleteConfirm} onOpenChange={setShowBulkDeleteConfirm}>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-1.5 text-destructive border-destructive/30 hover:bg-destructive/10"
+                    disabled={bulkLoading}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" /> Delete All
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Delete {selectedIds.size} Virtual Machines</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      This will permanently terminate {selectedIds.size} VM{selectedIds.size > 1 ? "s" : ""} and delete their Azure resources. This action cannot be undone.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Cancel</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={handleBulkDelete}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                    >
+                      Delete {selectedIds.size} VMs
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => setSelectedIds(new Set())}>
+                <X className="h-3.5 w-3.5" />
+              </Button>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card overflow-hidden">
           {loading ? (
             <div className="p-12 flex items-center justify-center gap-2 text-muted-foreground">
@@ -193,6 +311,13 @@ export default function VirtualMachines() {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border text-left">
+                    <th className="px-3 py-3 w-10">
+                      <Checkbox
+                        checked={filtered.length > 0 && selectedIds.size === filtered.length}
+                        onCheckedChange={toggleSelectAll}
+                        aria-label="Select all"
+                      />
+                    </th>
                     {['VM ID', 'User', 'Lab', 'Region', 'Private IP', 'Size', 'Status', 'Idle', 'Actions'].map(h => (
                       <th key={h} className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
                     ))}
@@ -200,7 +325,14 @@ export default function VirtualMachines() {
                 </thead>
                 <tbody>
                   {filtered.map(vm => (
-                    <tr key={vm.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                    <tr key={vm.id} className={`border-b border-border/50 hover:bg-muted/30 transition-colors ${selectedIds.has(vm.id) ? "bg-primary/5" : ""}`}>
+                      <td className="px-3 py-3">
+                        <Checkbox
+                          checked={selectedIds.has(vm.id)}
+                          onCheckedChange={() => toggleSelect(vm.id)}
+                          aria-label={`Select VM ${vm.id.slice(0, 8)}`}
+                        />
+                      </td>
                       <td className="px-5 py-3 font-mono text-xs text-primary">
                         <Link to={`/vms/${vm.id}`} className="hover:underline flex items-center gap-1">
                           {vm.id.slice(0, 8)}…
