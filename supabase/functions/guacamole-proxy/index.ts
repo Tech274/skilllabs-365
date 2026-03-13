@@ -103,7 +103,7 @@ async function createGuacConnection(
     },
   };
 
-  const res = await guacFetch(
+  const res = await fetch(
     `${guacBaseUrl}/api/session/data/${dataSource}/connections?token=${token}`,
     {
       method: "POST",
