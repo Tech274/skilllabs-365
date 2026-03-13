@@ -5,8 +5,8 @@ const corsHeaders = {
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 };
-
 const IDLE_TIMEOUT_MINUTES = 15;
+const STUCK_PROVISIONING_MINUTES = 10;
 
 /** Get Azure access token */
 async function getAzureToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
