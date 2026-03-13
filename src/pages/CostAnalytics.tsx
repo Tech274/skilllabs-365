@@ -1,5 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
+import { EmptyState } from "@/components/EmptyState";
 import { DollarSign, TrendingDown, Calculator, Coins, Loader2 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie } from "recharts";
 import { motion } from "framer-motion";
@@ -69,6 +70,14 @@ export default function CostAnalytics() {
             <Loader2 className="h-4 w-4 animate-spin mr-2" /> Calculating costs...
           </div>
         ) : (
+          costBreakdown.length === 0 ? (
+            <EmptyState
+              icon={DollarSign}
+              title="No Cost Data"
+              description="Cost analytics will appear here once VMs are provisioned. Costs are estimated based on VM sizes and uptime."
+              hint="Tip: Launch a lab to start tracking infrastructure costs."
+            />
+          ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
               <MetricCard title="Estimated Spend" value={`$${totalMonthly.toLocaleString()}`} icon={DollarSign} variant="primary" />
@@ -145,6 +154,7 @@ export default function CostAnalytics() {
               </div>
             </motion.div>
           </>
+          )
         )}
       </div>
     </DashboardLayout>

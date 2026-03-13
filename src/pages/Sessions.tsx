@@ -1,5 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
+import { EmptyState } from "@/components/EmptyState";
 import { Users, Clock, TrendingUp, Timer, Loader2 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { motion } from "framer-motion";
@@ -65,6 +66,25 @@ export default function Sessions() {
     }).length;
     return { hour, sessions: count };
   });
+
+  if (!loading && sessions.length === 0) {
+    return (
+      <DashboardLayout>
+        <div className="space-y-6">
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground">Sessions</h1>
+            <p className="text-sm text-muted-foreground mt-1">Active Guacamole sessions and analytics</p>
+          </div>
+          <EmptyState
+            icon={Users}
+            title="No Sessions Yet"
+            description="No lab sessions have been recorded. Sessions appear here in real-time when students launch and connect to labs."
+            hint="Tip: Assign a lab template to an instructor, then have a student launch a session."
+          />
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>

@@ -3,7 +3,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState, useEffect, useCallback } from "react";
-import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2, CheckSquare, Square, X } from "lucide-react";
+import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2, CheckSquare, Square, X, Server } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/types";
@@ -392,7 +392,14 @@ export default function VirtualMachines() {
               </table>
             </div>
           )}
-          {!loading && filtered.length === 0 && (
+          {!loading && vms.length === 0 && (
+            <div className="p-16 flex flex-col items-center justify-center text-center">
+              <Server className="h-10 w-10 text-muted-foreground/40 mb-3" />
+              <p className="text-sm font-medium text-foreground">No Virtual Machines</p>
+              <p className="text-xs text-muted-foreground mt-1 max-w-sm">No VMs have been provisioned yet. Launch a lab from the Student Dashboard to see VMs appear here in real-time.</p>
+            </div>
+          )}
+          {!loading && vms.length > 0 && filtered.length === 0 && (
             <div className="p-12 text-center text-muted-foreground text-sm">No VMs match your filters.</div>
           )}
         </motion.div>

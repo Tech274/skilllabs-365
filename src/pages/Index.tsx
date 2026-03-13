@@ -385,7 +385,11 @@ const Index = () => {
                   ))}
                   {vms.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-5 py-8 text-center text-muted-foreground text-sm">No VMs found.</td>
+                      <td colSpan={8} className="px-5 py-12 text-center">
+                        <Server className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
+                        <p className="text-sm font-medium text-foreground">No Virtual Machines</p>
+                        <p className="text-xs text-muted-foreground mt-1">Launch a lab to see VMs appear here in real-time.</p>
+                      </td>
                     </tr>
                   )}
                 </tbody>
