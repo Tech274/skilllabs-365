@@ -11,3 +11,6 @@ verify_jwt = false
 
 [functions.azure-quota]
 verify_jwt = false
+
+[functions.daily-report]
+verify_jwt = false
