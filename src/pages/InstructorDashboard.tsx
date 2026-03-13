@@ -461,6 +461,19 @@ export default function InstructorDashboard() {
           )}
         </div>
       </div>
+
+      {/* Floating AI Chat */}
+      <AiChatPanel
+        context={{
+          role: "instructor",
+          assigned_labs: labs.map(l => ({ name: l.name, protocol: l.protocol, duration: l.duration, vm_size: l.vm_size, status: l.status })),
+          students: students.map(s => ({ name: s.displayName, sessions: s.totalSessions, active: s.activeSessions, avg_duration: Math.round(s.avgDuration), last_active: s.lastActive })),
+          total_sessions: sessions.length,
+          active_sessions: activeSessions,
+          completed_sessions: completedSessions,
+          total_disconnects: totalDisconnects,
+        }}
+      />
     </DashboardLayout>
   );
 }
