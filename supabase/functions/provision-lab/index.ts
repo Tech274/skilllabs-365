@@ -235,7 +235,7 @@ Deno.serve(async (req) => {
     if (!authHeader) throw new Error("Missing authorization header");
 
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const anonKey = Deno.env.get("SUPABASE_PUBLISHABLE_KEY") || "";
+    const anonKey = Deno.env.get("SUPABASE_ANON_KEY") || "";
     const userClient = createClient(SUPABASE_URL, anonKey, {
       global: { headers: { Authorization: authHeader } },
     });
