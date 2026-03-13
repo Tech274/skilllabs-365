@@ -5,8 +5,8 @@ const corsHeaders = {
   "Access-Control-Allow-Headers":
     "authorization, x-client-info, apikey, content-type",
 };
-
 const IDLE_TIMEOUT_MINUTES = 15;
+const STUCK_PROVISIONING_MINUTES = 10;
 
 /** Get Azure access token */
 async function getAzureToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
@@ -156,6 +156,7 @@ Deno.serve(async (req) => {
 
     const now = new Date();
     const idleCutoff = new Date(now.getTime() - IDLE_TIMEOUT_MINUTES * 60 * 1000).toISOString();
+    const stuckCutoff = new Date(now.getTime() - STUCK_PROVISIONING_MINUTES * 60 * 1000).toISOString();
     const results: string[] = [];
 
     // 1. Find sessions that are active but idle for 15+ minutes based on last_activity_at
@@ -258,6 +259,32 @@ Deno.serve(async (req) => {
           await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", vm.id);
           results.push(`Expired VM ${vmName}: deleted`);
         }
+      }
+    }
+
+    // 4. Mark VMs stuck in 'provisioning' for 10+ minutes as 'failed'
+    const { data: stuckVMs } = await supabase
+      .from("virtual_machines")
+      .select("id, azure_vm_id, created_at")
+      .eq("status", "provisioning")
+      .lt("created_at", stuckCutoff);
+
+    if (stuckVMs?.length) {
+      for (const vm of stuckVMs) {
+        // If it has an Azure VM, try to clean it up
+        if (vm.azure_vm_id) {
+          const vmName = extractVmName(vm.azure_vm_id);
+          await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+        }
+        // End any sessions tied to this VM
+        await supabase
+          .from("sessions")
+          .update({ ended_at: now.toISOString(), status: "completed" })
+          .eq("vm_id", vm.id)
+          .eq("status", "active");
+
+        await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm.id);
+        results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: marked failed (created ${vm.created_at})`);
       }
     }
 
