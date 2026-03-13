@@ -101,10 +101,58 @@ Deno.serve(async (req) => {
 
     // Parse optional body for manual trigger
     let action = "auto-cleanup";
+    let targetVmId: string | null = null;
     try {
       const body = await req.json();
       action = body.action || action;
+      targetVmId = body.vm_id || null;
     } catch { /* no body = scheduled run */ }
+
+    // Handle targeted stop/delete actions
+    if ((action === "stop-vm" || action === "delete-vm") && targetVmId) {
+      const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+
+      const { data: vm } = await supabase
+        .from("virtual_machines")
+        .select("id, azure_vm_id, status")
+        .eq("id", targetVmId)
+        .maybeSingle();
+
+      if (!vm) {
+        return new Response(JSON.stringify({ error: "VM not found" }), {
+          status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // End any active sessions for this VM
+      await supabase
+        .from("sessions")
+        .update({ ended_at: new Date().toISOString(), status: "completed" })
+        .eq("vm_id", targetVmId)
+        .eq("status", "active");
+
+      if (action === "stop-vm") {
+        if (vm.azure_vm_id) {
+          const vmName = extractVmName(vm.azure_vm_id);
+          await deallocateAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+        }
+        await supabase.from("virtual_machines").update({ status: "deallocated" }).eq("id", targetVmId);
+        return new Response(JSON.stringify({ success: true, action: "stopped", vm_id: targetVmId }), {
+          status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (action === "delete-vm") {
+        if (vm.azure_vm_id) {
+          const vmName = extractVmName(vm.azure_vm_id);
+          await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+        }
+        await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", targetVmId);
+        return new Response(JSON.stringify({ success: true, action: "deleted", vm_id: targetVmId }), {
+          status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
 
     const now = new Date();
     const idleCutoff = new Date(now.getTime() - IDLE_TIMEOUT_MINUTES * 60 * 1000).toISOString();

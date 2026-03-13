@@ -2,13 +2,25 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2 } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/mock-data";
 import { motion } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
+import { toast } from "@/hooks/use-toast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 
 interface VMRow {
   id: string;
@@ -31,8 +43,9 @@ export default function VirtualMachines() {
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [vms, setVms] = useState<VMRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
 
-  const fetchVMs = async () => {
+  const fetchVMs = useCallback(async () => {
     setLoading(true);
     const { data: vmData, error } = await supabase
       .from("virtual_machines")
@@ -40,7 +53,6 @@ export default function VirtualMachines() {
       .order("created_at", { ascending: false });
 
     if (error) {
-      // Fallback: fetch without joins if FK relationship isn't recognized
       const { data: fallbackData } = await supabase
         .from("virtual_machines")
         .select("*")
@@ -57,12 +69,43 @@ export default function VirtualMachines() {
       })));
     }
     setLoading(false);
+  }, []);
+
+  const handleStopVM = async (vmId: string) => {
+    setActionLoading(vmId);
+    try {
+      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+        body: { action: "stop-vm", vm_id: vmId },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({ title: "VM Stopped", description: `VM ${vmId.slice(0, 8)}… is being deallocated.` });
+    } catch (err: any) {
+      toast({ title: "Failed to stop VM", description: err.message, variant: "destructive" });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleDeleteVM = async (vmId: string) => {
+    setActionLoading(vmId);
+    try {
+      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+        body: { action: "delete-vm", vm_id: vmId },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({ title: "VM Deleted", description: `VM ${vmId.slice(0, 8)}… has been terminated.`, variant: "destructive" });
+    } catch (err: any) {
+      toast({ title: "Failed to delete VM", description: err.message, variant: "destructive" });
+    } finally {
+      setActionLoading(null);
+    }
   };
 
   useEffect(() => {
     fetchVMs();
 
-    // Realtime subscription for instant status updates
     const channel = supabase
       .channel("vm-status-changes")
       .on(
@@ -78,7 +121,6 @@ export default function VirtualMachines() {
               )
             );
           } else if (payload.eventType === "INSERT") {
-            // Refetch to get joined data
             fetchVMs();
           } else if (payload.eventType === "DELETE") {
             setVms((prev) => prev.filter((vm) => vm.id !== (payload.old as any).id));
@@ -90,7 +132,7 @@ export default function VirtualMachines() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [fetchVMs]);
 
   const filtered = vms.filter(vm => {
     const matchSearch =
@@ -102,6 +144,7 @@ export default function VirtualMachines() {
   });
 
   const allStatuses: VMStatus[] = ['running', 'idle', 'provisioning', 'starting', 'expired', 'stopped', 'deallocated', 'terminated', 'failed'];
+  const isActiveStatus = (s: string) => ['running', 'idle', 'provisioning', 'starting'].includes(s);
 
   return (
     <DashboardLayout>
@@ -173,8 +216,42 @@ export default function VirtualMachines() {
                       <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.idle_minutes > 0 ? `${vm.idle_minutes}m` : '—'}</td>
                       <td className="px-5 py-3">
                         <div className="flex gap-1">
-                          <button className="p-1.5 rounded hover:bg-warning/10 text-warning transition-colors" title="Stop"><StopCircle className="h-3.5 w-3.5" /></button>
-                          <button className="p-1.5 rounded hover:bg-destructive/10 text-destructive transition-colors" title="Delete"><Trash2 className="h-3.5 w-3.5" /></button>
+                          <button
+                            className="p-1.5 rounded hover:bg-warning/10 text-warning transition-colors disabled:opacity-40"
+                            title="Stop"
+                            disabled={!isActiveStatus(vm.status) || actionLoading === vm.id}
+                            onClick={() => handleStopVM(vm.id)}
+                          >
+                            {actionLoading === vm.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <StopCircle className="h-3.5 w-3.5" />}
+                          </button>
+                          <AlertDialog>
+                            <AlertDialogTrigger asChild>
+                              <button
+                                className="p-1.5 rounded hover:bg-destructive/10 text-destructive transition-colors disabled:opacity-40"
+                                title="Delete"
+                                disabled={actionLoading === vm.id}
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            </AlertDialogTrigger>
+                            <AlertDialogContent>
+                              <AlertDialogHeader>
+                                <AlertDialogTitle>Delete Virtual Machine</AlertDialogTitle>
+                                <AlertDialogDescription>
+                                  This will permanently terminate VM <span className="font-mono">{vm.id.slice(0, 8)}…</span> and delete its Azure resources. This action cannot be undone.
+                                </AlertDialogDescription>
+                              </AlertDialogHeader>
+                              <AlertDialogFooter>
+                                <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                <AlertDialogAction
+                                  onClick={() => handleDeleteVM(vm.id)}
+                                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                >
+                                  Delete VM
+                                </AlertDialogAction>
+                              </AlertDialogFooter>
+                            </AlertDialogContent>
+                          </AlertDialog>
                         </div>
                       </td>
                     </tr>
