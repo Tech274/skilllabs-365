@@ -115,6 +115,43 @@ export default function LabSession() {
     }
   }, [vmId, createGuacSession]);
 
+  // Idle activity tracking: detect mouse/keyboard near iframe and update last_activity_at
+  useEffect(() => {
+    if (!dbSessionId || connectionState !== "connected") return;
+
+    const markActive = () => {
+      lastActivityRef.current = Date.now();
+    };
+
+    // Listen for mouse movements, clicks, and keyboard events on the document
+    // (iframe is cross-origin so we can't listen inside it, but mousemove over it triggers on parent)
+    const events = ["mousemove", "mousedown", "keydown", "wheel", "touchstart"] as const;
+    events.forEach((evt) => document.addEventListener(evt, markActive));
+
+    // Every 60s, update last_activity_at in the database if there was recent activity
+    idleUpdateIntervalRef.current = setInterval(async () => {
+      const idleMs = Date.now() - lastActivityRef.current;
+      const idleMinutes = Math.floor(idleMs / 60000);
+
+      try {
+        await supabase
+          .from("sessions")
+          .update({
+            last_activity_at: new Date(lastActivityRef.current).toISOString(),
+            idle_minutes: idleMinutes,
+          })
+          .eq("id", dbSessionId);
+      } catch (err) {
+        console.error("Failed to update idle status:", err);
+      }
+    }, 60000);
+
+    return () => {
+      events.forEach((evt) => document.removeEventListener(evt, markActive));
+      if (idleUpdateIntervalRef.current) clearInterval(idleUpdateIntervalRef.current);
+    };
+  }, [dbSessionId, connectionState]);
+
   // Countdown timer
   useEffect(() => {
     const interval = setInterval(() => {
