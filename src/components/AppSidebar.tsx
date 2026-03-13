@@ -1,6 +1,6 @@
 import {
   LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
-  Settings, Cloud, BookOpen, History, LogOut, GraduationCap,
+  Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -21,6 +21,7 @@ const adminItems = [
   { title: "Lab Management", url: "/labs", icon: BookOpen },
   { title: "Audit Log", url: "/audit-log", icon: History },
   { title: "User Management", url: "/users", icon: Users },
+  { title: "Daily Reports", url: "/reports", icon: FileText },
 ];
 
 const instructorItems = [
