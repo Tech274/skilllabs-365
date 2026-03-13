@@ -54,7 +54,10 @@ interface VMRow {
   labName?: string;
 }
 
+type LabTemplate = Tables<"lab_templates">;
+
 const Index = () => {
+  const navigate = useNavigate();
   const [vms, setVms] = useState<VMRow[]>([]);
   const [vmLoading, setVmLoading] = useState(true);
   const [quotas, setQuotas] = useState<Record<string, QuotaItem[]>>({});
@@ -62,6 +65,8 @@ const Index = () => {
   const [vmStatusCounts, setVmStatusCounts] = useState<Record<string, number>>({});
   const [purging, setPurging] = useState(false);
   const quotaAlertShown = useRef(false);
+  const [labs, setLabs] = useState<LabTemplate[]>([]);
+  const [launchingId, setLaunchingId] = useState<string | null>(null);
 
   const fetchVMs = useCallback(async () => {
     const { data, error } = await supabase
