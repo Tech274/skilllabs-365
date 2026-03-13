@@ -57,23 +57,26 @@ export default function StudentDashboard() {
         toast({ title: "VM Provisioning", description: "Azure VM is starting up. Waiting for it to be ready..." });
         const vmId = data.vm_id;
         const pollInterval = setInterval(async () => {
-          const { data: vm } = await supabase
-            .from("virtual_machines")
-            .select("status")
-            .eq("id", vmId)
-            .maybeSingle();
-          if (vm?.status === "running") {
-            clearInterval(pollInterval);
-            toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
-            setLaunchingId(null);
-            navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
-          } else if (vm?.status === "failed" || vm?.status === "terminated" || vm?.status === "deallocated") {
-            clearInterval(pollInterval);
-            setLaunchingId(null);
-            setLaunchErrors((prev) => ({ ...prev, [lab.id]: `VM entered ${vm.status} state. Please try again.` }));
-            toast({ title: "Launch Failed", description: `VM entered ${vm.status} state.`, variant: "destructive" });
+          try {
+            const { data: statusData } = await supabase.functions.invoke("check-vm-status", {
+              body: { vm_id: vmId },
+            });
+            const vmStatus = statusData?.status;
+            if (vmStatus === "running") {
+              clearInterval(pollInterval);
+              toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
+              setLaunchingId(null);
+              navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
+            } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
+              clearInterval(pollInterval);
+              setLaunchingId(null);
+              setLaunchErrors((prev) => ({ ...prev, [lab.id]: `VM entered ${vmStatus} state. Please try again.` }));
+              toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state.`, variant: "destructive" });
+            }
+          } catch {
+            // Ignore poll errors, will retry
           }
-        }, 5000);
+        }, 10000);
         setTimeout(() => {
           clearInterval(pollInterval);
           setLaunchingId(null);
