@@ -154,6 +154,19 @@ export default function LabSession() {
     };
   }, [dbSessionId, connectionState]);
 
+  // Idle warning: update displayed idle time every 10s
+  useEffect(() => {
+    idleWarningIntervalRef.current = setInterval(() => {
+      const idleMs = Date.now() - lastActivityRef.current;
+      const mins = Math.floor(idleMs / 60000);
+      setIdleWarningMinutes(mins);
+    }, 10000);
+
+    return () => {
+      if (idleWarningIntervalRef.current) clearInterval(idleWarningIntervalRef.current);
+    };
+  }, []);
+
   // Countdown timer
   useEffect(() => {
     const interval = setInterval(() => {
