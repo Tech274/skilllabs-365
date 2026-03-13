@@ -4,9 +4,30 @@ import { Sun, Moon } from "lucide-react";
 import { useTheme } from "@/hooks/use-theme";
 import { Button } from "@/components/ui/button";
 import { NotificationsDropdown } from "@/components/NotificationsDropdown";
+import { useEffect, useState } from "react";
+import { supabase } from "@/integrations/supabase/client";
 
 export function DashboardLayout({ children }: { children: React.ReactNode }) {
   const { theme, toggle } = useTheme();
+  const [activeCount, setActiveCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    const fetchCount = async () => {
+      const { count } = await supabase
+        .from("sessions")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "active");
+      setActiveCount(count ?? 0);
+    };
+    fetchCount();
+
+    const channel = supabase
+      .channel("header-session-count")
+      .on("postgres_changes", { event: "*", schema: "public", table: "sessions" }, () => fetchCount())
+      .subscribe();
+
+    return () => { supabase.removeChannel(channel); };
+  }, []);
 
   return (
     <SidebarProvider>
@@ -20,8 +41,8 @@ export function DashboardLayout({ children }: { children: React.ReactNode }) {
             </div>
             <div className="flex items-center gap-2 sm:gap-3">
               <div className="hidden sm:flex items-center gap-2 text-xs font-mono text-muted-foreground">
-                <div className="h-1.5 w-1.5 rounded-full bg-success" />
-                <span>483 active sessions</span>
+                <div className={`h-1.5 w-1.5 rounded-full ${activeCount && activeCount > 0 ? "bg-success" : "bg-muted-foreground"}`} />
+                <span>{activeCount !== null ? `${activeCount} active session${activeCount !== 1 ? "s" : ""}` : "—"}</span>
               </div>
               <Button variant="ghost" size="icon" onClick={toggle} className="h-8 w-8">
                 {theme === 'dark' ? <Sun className="h-4 w-4 text-muted-foreground" /> : <Moon className="h-4 w-4 text-muted-foreground" />}
