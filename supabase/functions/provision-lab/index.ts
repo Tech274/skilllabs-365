@@ -350,9 +350,20 @@ Deno.serve(async (req) => {
     );
   } catch (error: unknown) {
     console.error("provision-lab error:", error);
-    const message = error instanceof Error ? error.message : "Unknown error";
+    const rawMessage = error instanceof Error ? error.message : "Unknown error";
+
+    // Parse user-friendly error message
+    let userMessage = rawMessage;
+    if (rawMessage.includes("exceeding approved") && rawMessage.includes("Cores quota")) {
+      userMessage = "Azure VM quota exceeded. All available compute cores are in use. Please stop or delete unused VMs, or contact your administrator to increase the quota.";
+    } else if (rawMessage.includes("OperationNotAllowed")) {
+      userMessage = "This operation is not currently allowed by Azure. Please try again later or contact your administrator.";
+    } else if (rawMessage.includes("Azure auth failed")) {
+      userMessage = "Azure authentication failed. Please contact your administrator.";
+    }
+
     return new Response(
-      JSON.stringify({ error: message }),
+      JSON.stringify({ error: userMessage }),
       {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
