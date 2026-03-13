@@ -169,7 +169,7 @@ async function getDataSource(guacBaseUrl: string, token: string): Promise<string
   const fallbackSources = ["postgresql", "mysql", "postgresql-shared"];
 
   for (const source of fallbackSources) {
-    const checkRes = await fetch(
+    const checkRes = await guacFetch(
       `${guacBaseUrl}/api/session/data/${source}/connections?token=${token}`
     );
     await checkRes.text(); // consume body
