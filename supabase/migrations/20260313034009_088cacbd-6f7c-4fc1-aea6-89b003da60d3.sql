@@ -1,0 +1,2 @@
+ALTER TABLE public.virtual_machines DROP CONSTRAINT virtual_machines_status_check;
+ALTER TABLE public.virtual_machines ADD CONSTRAINT virtual_machines_status_check CHECK (status = ANY (ARRAY['provisioning', 'starting', 'running', 'idle', 'expired', 'stopped', 'deallocated', 'terminated', 'failed']));
