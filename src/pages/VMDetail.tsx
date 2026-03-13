@@ -1,41 +1,105 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { MetricCard } from "@/components/MetricCard";
-import { labVMs } from "@/lib/mock-data";
+import type { VMStatus } from "@/lib/types";
 import { useParams, Link } from "react-router-dom";
-import { ArrowLeft, Monitor, Cpu, HardDrive, Clock, Activity, Terminal } from "lucide-react";
+import { ArrowLeft, Monitor, Cpu, HardDrive, Clock, Activity, Terminal, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion } from "framer-motion";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
+import { useEffect, useState, useCallback } from "react";
+import { supabase } from "@/integrations/supabase/client";
 
-// Mock CPU/Memory data for the VM
+// Mock perf data — in production this would come from Azure Monitor
 const perfData = Array.from({ length: 30 }, (_, i) => ({
   time: `${i}m`,
   cpu: Math.floor(Math.random() * 40) + 15,
   memory: Math.floor(Math.random() * 20) + 55,
 }));
 
-const vmLogs = [
-  { time: '14:32:01', level: 'INFO', message: 'Guacamole connection established (RDP)' },
-  { time: '14:31:58', level: 'INFO', message: 'VM started successfully' },
-  { time: '14:31:45', level: 'INFO', message: 'Network interface attached to private subnet' },
-  { time: '14:31:30', level: 'INFO', message: 'OS disk provisioned (ephemeral)' },
-  { time: '14:31:15', level: 'INFO', message: 'VM provisioning initiated by orchestrator' },
-  { time: '14:31:10', level: 'INFO', message: 'Credentials retrieved from Key Vault' },
-  { time: '14:31:05', level: 'INFO', message: 'VM assigned to user alice.chen@corp.com' },
-  { time: '14:30:58', level: 'DEBUG', message: 'Azure SDK: CreateVM request submitted' },
-  { time: '14:30:55', level: 'INFO', message: 'Warm pool VM selected: Standard_B2ms' },
-  { time: '14:30:50', level: 'INFO', message: 'Lab session initiated: Azure Fundamentals' },
-];
+interface VMDetailData {
+  id: string;
+  status: string;
+  region: string;
+  vm_size: string;
+  private_ip: string | null;
+  idle_minutes: number;
+  azure_vm_id: string | null;
+  created_at: string;
+  expires_at: string | null;
+  userName: string;
+  labName: string;
+}
 
 export default function VMDetail() {
   const { vmId } = useParams<{ vmId: string }>();
-  const vm = labVMs.find(v => v.id === vmId) || labVMs[0];
+  const [vm, setVm] = useState<VMDetailData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [events, setEvents] = useState<any[]>([]);
+
+  const fetchVM = useCallback(async () => {
+    if (!vmId) return;
+    const { data, error } = await supabase
+      .from("virtual_machines")
+      .select("*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name)")
+      .eq("id", vmId)
+      .single();
+
+    if (!error && data) {
+      setVm({
+        ...data,
+        userName: (data as any).profiles?.display_name || "—",
+        labName: (data as any).lab_templates?.name || "—",
+      });
+    }
+    setLoading(false);
+  }, [vmId]);
+
+  const fetchEvents = useCallback(async () => {
+    if (!vmId) return;
+    // Fetch session events related to this VM
+    const { data: sessions } = await supabase.from("sessions").select("id").eq("vm_id", vmId);
+    if (sessions && sessions.length > 0) {
+      const sessionIds = sessions.map(s => s.id);
+      const { data: evts } = await supabase
+        .from("session_events")
+        .select("*")
+        .in("session_id", sessionIds)
+        .order("created_at", { ascending: false })
+        .limit(10);
+      if (evts) setEvents(evts);
+    }
+  }, [vmId]);
+
+  useEffect(() => {
+    fetchVM();
+    fetchEvents();
+  }, [fetchVM, fetchEvents]);
+
+  if (loading) {
+    return (
+      <DashboardLayout>
+        <div className="flex items-center justify-center py-16 text-muted-foreground">
+          <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading VM details...
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (!vm) {
+    return (
+      <DashboardLayout>
+        <div className="text-center py-16">
+          <p className="text-muted-foreground">VM not found.</p>
+          <Link to="/vms" className="text-primary hover:underline text-sm mt-2 inline-block">← Back to VMs</Link>
+        </div>
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        {/* Header */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
           <div className="flex items-center gap-3">
             <Link to="/vms">
@@ -45,8 +109,8 @@ export default function VMDetail() {
             </Link>
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-2xl font-semibold text-foreground font-mono">{vm.id}</h1>
-                <StatusBadge status={vm.status} />
+                <h1 className="text-2xl font-semibold text-foreground font-mono">{vm.id.slice(0, 8)}…</h1>
+                <StatusBadge status={vm.status as VMStatus} />
               </div>
               <p className="text-sm text-muted-foreground mt-0.5">{vm.labName} · {vm.userName} · {vm.region}</p>
             </div>
@@ -57,15 +121,13 @@ export default function VMDetail() {
           </div>
         </div>
 
-        {/* Metrics */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <MetricCard title="VM Size" value={vm.vmSize} icon={Cpu} variant="default" />
-          <MetricCard title="Private IP" value={vm.privateIp} icon={Monitor} variant="primary" />
-          <MetricCard title="Idle Time" value={vm.idleMinutes > 0 ? `${vm.idleMinutes}m` : '0m'} icon={Clock} variant={vm.idleMinutes > 10 ? 'warning' : 'default'} subtitle="20m auto-stop" />
+          <MetricCard title="VM Size" value={vm.vm_size} icon={Cpu} variant="default" />
+          <MetricCard title="Private IP" value={vm.private_ip || "—"} icon={Monitor} variant="primary" />
+          <MetricCard title="Idle Time" value={vm.idle_minutes > 0 ? `${vm.idle_minutes}m` : '0m'} icon={Clock} variant={vm.idle_minutes > 10 ? 'warning' : 'default'} subtitle="20m auto-stop" />
           <MetricCard title="Disk" value="Ephemeral" icon={HardDrive} variant="default" subtitle="30 GB" />
         </div>
 
-        {/* Guacamole Session Embed */}
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3 border-b border-border">
             <div className="flex items-center gap-2">
@@ -73,14 +135,13 @@ export default function VMDetail() {
               <h3 className="text-sm font-medium text-foreground">Remote Session</h3>
             </div>
             <div className="flex items-center gap-2">
-              <div className="h-2 w-2 rounded-full bg-success animate-pulse" />
-              <span className="text-xs text-muted-foreground">Connected via RDP</span>
+              <div className={`h-2 w-2 rounded-full ${vm.status === 'running' ? 'bg-success animate-pulse' : 'bg-muted-foreground'}`} />
+              <span className="text-xs text-muted-foreground">{vm.status === 'running' ? 'Connected via RDP' : 'Disconnected'}</span>
             </div>
           </div>
           <div className="relative bg-muted/30 flex items-center justify-center" style={{ height: '400px' }}>
-            {/* This would be an iframe to Guacamole in production */}
             <div className="text-center space-y-3">
-              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10 glow-primary">
+              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-primary/10">
                 <Monitor className="h-8 w-8 text-primary" />
               </div>
               <div>
@@ -92,18 +153,10 @@ export default function VMDetail() {
                   guacamole.cloudlab.io/client/{vm.id}
                 </p>
               </div>
-              <div className="flex justify-center gap-4 text-xs text-muted-foreground">
-                <span>Protocol: RDP</span>
-                <span>·</span>
-                <span>Resolution: 1920×1080</span>
-                <span>·</span>
-                <span>Clipboard: Enabled</span>
-              </div>
             </div>
           </div>
         </motion.div>
 
-        {/* Performance Charts + Logs */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }} className="rounded-xl border border-border bg-card p-5">
             <div className="flex items-center gap-2 mb-4">
@@ -135,16 +188,20 @@ export default function VMDetail() {
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="rounded-xl border border-border bg-card">
             <div className="flex items-center gap-2 px-5 py-3 border-b border-border">
               <Terminal className="h-4 w-4 text-primary" />
-              <h3 className="text-sm font-medium text-foreground">VM Logs</h3>
+              <h3 className="text-sm font-medium text-foreground">Session Events</h3>
             </div>
             <div className="p-3 space-y-0.5 max-h-[252px] overflow-y-auto font-mono text-xs">
-              {vmLogs.map((log, i) => (
-                <div key={i} className="flex gap-3 px-2 py-1.5 rounded hover:bg-muted/30">
-                  <span className="text-muted-foreground shrink-0">{log.time}</span>
-                  <span className={log.level === 'DEBUG' ? 'text-muted-foreground' : 'text-info'}>{log.level.padEnd(5)}</span>
-                  <span className="text-foreground">{log.message}</span>
-                </div>
-              ))}
+              {events.length === 0 ? (
+                <div className="text-center py-8 text-muted-foreground">No session events recorded.</div>
+              ) : (
+                events.map((evt, i) => (
+                  <div key={i} className="flex gap-3 px-2 py-1.5 rounded hover:bg-muted/30">
+                    <span className="text-muted-foreground shrink-0">{new Date(evt.created_at).toLocaleTimeString()}</span>
+                    <span className="text-info">{evt.event_type}</span>
+                    <span className="text-foreground truncate">{JSON.stringify(evt.event_data)}</span>
+                  </div>
+                ))
+              )}
             </div>
           </motion.div>
         </div>

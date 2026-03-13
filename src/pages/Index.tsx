@@ -1,8 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
-import { sessionHistory, regionHealthData } from "@/lib/mock-data";
-import type { VMStatus } from "@/lib/mock-data";
+import type { VMStatus } from "@/lib/types";
 import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu, Trash2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState, useCallback, useRef } from "react";

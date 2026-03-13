@@ -6,7 +6,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2, CheckSquare, Square, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
-import type { VMStatus } from "@/lib/mock-data";
+import type { VMStatus } from "@/lib/types";
 import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
