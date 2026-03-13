@@ -181,8 +181,12 @@ Deno.serve(async (req) => {
     const { action } = body;
 
     // 1. Authenticate with Guacamole
-    const token = await getGuacToken(GUACAMOLE_URL, GUACAMOLE_ADMIN_USERNAME, GUACAMOLE_ADMIN_PASSWORD);
-    const dataSource = await getDataSource(GUACAMOLE_URL, token);
+    const { token, baseUrl: guacBaseUrl } = await getGuacToken(
+      GUACAMOLE_URL,
+      GUACAMOLE_ADMIN_USERNAME,
+      GUACAMOLE_ADMIN_PASSWORD
+    );
+    const dataSource = await getDataSource(guacBaseUrl, token);
 
     if (action === "create-session") {
       // Create a dynamic Guacamole connection for a VM
