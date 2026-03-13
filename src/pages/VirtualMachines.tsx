@@ -3,7 +3,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState, useEffect, useCallback } from "react";
-import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2, CheckSquare, Square, X } from "lucide-react";
+import { Search, RotateCcw, StopCircle, Trash2, ExternalLink, Loader2, CheckSquare, Square, X, Server } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/types";
