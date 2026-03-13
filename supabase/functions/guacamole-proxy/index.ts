@@ -16,26 +16,70 @@ interface GuacConnection {
   parameters?: Record<string, string>;
 }
 
-/** Authenticate with Guacamole and get an auth token */
-async function getGuacToken(guacUrl: string, username: string, password: string): Promise<string> {
-  const res = await fetch(`${guacUrl}/api/tokens`, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
-  });
+/** Normalize and build Guacamole base URL candidates */
+function buildGuacBaseCandidates(rawUrl: string): string[] {
+  const withoutHash = rawUrl.split("#")[0] || "";
+  const withoutQuery = withoutHash.split("?")[0] || "";
+  let normalized = withoutQuery.trim().replace(/\/+$/, "");
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Guacamole auth failed [${res.status}]: ${body}`);
+  // If user provided an /api URL, strip it because API paths are appended below
+  if (normalized.endsWith("/api")) {
+    normalized = normalized.slice(0, -4);
   }
 
-  const data = await res.json();
-  return data.authToken;
+  const guacamoleSuffix = "/guacamole";
+  const candidates = [normalized];
+
+  if (normalized.endsWith(guacamoleSuffix)) {
+    candidates.push(normalized.slice(0, -guacamoleSuffix.length));
+  } else {
+    candidates.push(`${normalized}${guacamoleSuffix}`);
+  }
+
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+/** Authenticate with Guacamole and get an auth token + resolved base URL */
+async function getGuacToken(
+  guacUrl: string,
+  username: string,
+  password: string
+): Promise<{ token: string; baseUrl: string }> {
+  const candidates = buildGuacBaseCandidates(guacUrl);
+
+  for (const baseUrl of candidates) {
+    const res = await fetch(`${baseUrl}/api/tokens`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
+    });
+
+    if (res.status === 404) {
+      await res.text(); // consume body before trying next candidate
+      continue;
+    }
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Guacamole auth failed [${res.status}]: ${body}`);
+    }
+
+    const data = await res.json();
+    if (!data?.authToken) {
+      throw new Error("Guacamole auth response missing authToken");
+    }
+
+    return { token: data.authToken, baseUrl };
+  }
+
+  throw new Error(
+    `Guacamole API not found. Tried base URLs: ${candidates.join(", ")}. Check GUACAMOLE_URL secret.`
+  );
 }
 
 /** Create a connection in Guacamole and return the connection ID */
 async function createGuacConnection(
-  guacUrl: string,
+  guacBaseUrl: string,
   token: string,
   dataSource: string,
   conn: GuacConnection
@@ -60,7 +104,7 @@ async function createGuacConnection(
   };
 
   const res = await fetch(
-    `${guacUrl}/api/session/data/${dataSource}/connections?token=${token}`,
+    `${guacBaseUrl}/api/session/data/${dataSource}/connections?token=${token}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -79,13 +123,13 @@ async function createGuacConnection(
 
 /** Delete a connection in Guacamole */
 async function deleteGuacConnection(
-  guacUrl: string,
+  guacBaseUrl: string,
   token: string,
   dataSource: string,
   connectionId: string
 ): Promise<void> {
   const res = await fetch(
-    `${guacUrl}/api/session/data/${dataSource}/connections/${connectionId}?token=${token}`,
+    `${guacBaseUrl}/api/session/data/${dataSource}/connections/${connectionId}?token=${token}`,
     { method: "DELETE" }
   );
   if (!res.ok) {
@@ -95,8 +139,8 @@ async function deleteGuacConnection(
 }
 
 /** Get available data sources */
-async function getDataSource(guacUrl: string, token: string): Promise<string> {
-  const res = await fetch(`${guacUrl}/api/session/data?token=${token}`);
+async function getDataSource(guacBaseUrl: string, token: string): Promise<string> {
+  const res = await fetch(`${guacBaseUrl}/api/session/data?token=${token}`);
   if (!res.ok) {
     const body = await res.text();
     throw new Error(`Failed to get data sources [${res.status}]: ${body}`);
