@@ -1,0 +1,1 @@
+UPDATE public.user_roles SET role = 'student' WHERE user_id = '86b901bc-23e1-44a9-ad6b-897fa44f706b';
