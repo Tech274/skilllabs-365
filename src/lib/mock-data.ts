@@ -1,4 +1,4 @@
-export type VMStatus = 'provisioning' | 'starting' | 'running' | 'idle' | 'expired' | 'stopped';
+export type VMStatus = 'provisioning' | 'starting' | 'running' | 'idle' | 'expired' | 'stopped' | 'deallocated' | 'terminated' | 'failed';
 export type Region = 'East US' | 'Central India';
 
 export interface LabVM {
