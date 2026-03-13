@@ -128,7 +128,7 @@ async function deleteGuacConnection(
   dataSource: string,
   connectionId: string
 ): Promise<void> {
-  const res = await guacFetch(
+  const res = await fetch(
     `${guacBaseUrl}/api/session/data/${dataSource}/connections/${connectionId}?token=${token}`,
     { method: "DELETE" }
   );
