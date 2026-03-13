@@ -1,14 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
-// Create an HTTP client that skips TLS certificate verification
-// Required for self-signed certs on the Guacamole server
-const unsafeHttpClient = Deno.createHttpClient({ caCerts: [], proxy: undefined });
-
-/** fetch wrapper that skips TLS verification for Guacamole calls */
-function guacFetch(url: string | URL, init?: RequestInit): Promise<Response> {
-  return fetch(url, { ...init, client: unsafeHttpClient } as RequestInit);
-}
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers":
@@ -57,7 +48,7 @@ async function getGuacToken(
   const candidates = buildGuacBaseCandidates(guacUrl);
 
   for (const baseUrl of candidates) {
-    const res = await guacFetch(`${baseUrl}/api/tokens`, {
+    const res = await fetch(`${baseUrl}/api/tokens`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
@@ -112,7 +103,7 @@ async function createGuacConnection(
     },
   };
 
-  const res = await guacFetch(
+  const res = await fetch(
     `${guacBaseUrl}/api/session/data/${dataSource}/connections?token=${token}`,
     {
       method: "POST",
@@ -137,7 +128,7 @@ async function deleteGuacConnection(
   dataSource: string,
   connectionId: string
 ): Promise<void> {
-  const res = await guacFetch(
+  const res = await fetch(
     `${guacBaseUrl}/api/session/data/${dataSource}/connections/${connectionId}?token=${token}`,
     { method: "DELETE" }
   );
@@ -149,7 +140,7 @@ async function deleteGuacConnection(
 
 /** Get available data sources */
 async function getDataSource(guacBaseUrl: string, token: string): Promise<string> {
-  const listRes = await guacFetch(`${guacBaseUrl}/api/session/data?token=${token}`);
+  const listRes = await fetch(`${guacBaseUrl}/api/session/data?token=${token}`);
 
   if (listRes.ok) {
     const rawSources = await listRes.json();
@@ -169,7 +160,7 @@ async function getDataSource(guacBaseUrl: string, token: string): Promise<string
   const fallbackSources = ["postgresql", "mysql", "postgresql-shared"];
 
   for (const source of fallbackSources) {
-    const checkRes = await guacFetch(
+    const checkRes = await fetch(
       `${guacBaseUrl}/api/session/data/${source}/connections?token=${token}`
     );
     await checkRes.text(); // consume body
