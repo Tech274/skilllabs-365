@@ -1,6 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Monitor, Terminal, Play, Loader2, Clock, History, CheckCircle2, AlertCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
@@ -27,6 +27,11 @@ export default function StudentDashboard() {
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
   const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
+  const [provisioningVmId, setProvisioningVmId] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const launchingLabRef = useRef<LabTemplate | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -42,8 +47,35 @@ export default function StudentDashboard() {
     load();
   }, [user]);
 
+  const clearProvisioning = useCallback(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    pollRef.current = null;
+    timeoutRef.current = null;
+    setLaunchingId(null);
+    setProvisioningStart(null);
+    setProvisioningVmId(null);
+    setCancelling(false);
+    launchingLabRef.current = null;
+  }, []);
+
+  const handleCancelProvisioning = async () => {
+    if (!provisioningVmId) return;
+    setCancelling(true);
+    try {
+      await supabase.functions.invoke("cleanup-idle-labs", {
+        body: { action: "deallocate-vm", vm_id: provisioningVmId },
+      });
+      toast({ title: "Provisioning Cancelled", description: "VM has been deallocated." });
+    } catch {
+      toast({ title: "Cancel Failed", description: "Could not cancel VM. It may need manual cleanup.", variant: "destructive" });
+    }
+    clearProvisioning();
+  };
+
   const handleLaunchLab = async (lab: LabTemplate) => {
     setLaunchingId(lab.id);
+    launchingLabRef.current = lab;
     setLaunchErrors((prev) => ({ ...prev, [lab.id]: "" }));
     try {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
@@ -55,37 +87,35 @@ export default function StudentDashboard() {
       if (data.status === "running") {
         toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
         navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
+        clearProvisioning();
       } else {
         setProvisioningStart(Date.now());
+        setProvisioningVmId(data.vm_id);
         toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
         const vmId = data.vm_id;
-        const pollInterval = setInterval(async () => {
+        pollRef.current = setInterval(async () => {
           try {
             const { data: statusData } = await supabase.functions.invoke("check-vm-status", {
               body: { vm_id: vmId },
             });
             const vmStatus = statusData?.status;
             if (vmStatus === "running") {
-              clearInterval(pollInterval);
-              toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
-              setLaunchingId(null);
-              setProvisioningStart(null);
-              navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
+              const labRef = launchingLabRef.current;
+              clearProvisioning();
+              toast({ title: "✅ VM Ready", description: "Your lab environment is ready." });
+              navigate(`/labs/session/${labRef?.id || lab.id}?vm_id=${vmId}`);
             } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
-              clearInterval(pollInterval);
-              setLaunchingId(null);
-              setProvisioningStart(null);
+              clearProvisioning();
               setLaunchErrors((prev) => ({ ...prev, [lab.id]: `VM entered ${vmStatus} state. Please try again.` }));
               toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state.`, variant: "destructive" });
             }
           } catch {
-            // Ignore poll errors, will retry
+            // Ignore poll errors
           }
         }, 10000);
-        setTimeout(() => {
-          clearInterval(pollInterval);
-          setLaunchingId(null);
-          setProvisioningStart(null);
+        timeoutRef.current = setTimeout(() => {
+          clearProvisioning();
+          toast({ title: "Provisioning Timeout", description: "VM took too long. Please try again.", variant: "destructive" });
         }, 180000);
         return;
       }
@@ -94,9 +124,17 @@ export default function StudentDashboard() {
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
       toast({ title: "Launch Failed", description: message, variant: "destructive" });
     } finally {
-      if (launchingId === lab.id) setLaunchingId(null);
+      if (launchingId === lab.id && !provisioningVmId) setLaunchingId(null);
     }
   };
+
+  // Cleanup poll on unmount (polling continues in background via refs until VM ready)
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, []);
 
   const activeSessions = sessions.filter(s => s.status === "active").length;
   const completedSessions = sessions.filter(s => s.status === "completed").length;
@@ -210,7 +248,11 @@ export default function StudentDashboard() {
                     </div>
                   )}
                   {launchingId === lab.id && provisioningStart && (
-                    <ProvisioningProgress startedAt={provisioningStart} />
+                    <ProvisioningProgress
+                      startedAt={provisioningStart}
+                      onCancel={handleCancelProvisioning}
+                      cancelling={cancelling}
+                    />
                   )}
                   <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
                     {launchingId === lab.id ? (
