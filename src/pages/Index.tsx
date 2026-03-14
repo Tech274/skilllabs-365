@@ -188,6 +188,7 @@ const Index = () => {
         setTimeout(() => {
           clearInterval(pollInterval);
           setLaunchingId(null);
+          setProvisioningStart(null);
         }, 180000);
         return; // Don't clear launchingId yet
       }
