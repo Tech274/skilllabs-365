@@ -26,6 +26,7 @@ export default function StudentDashboard() {
   const [loading, setLoading] = useState(true);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
+  const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
 
   useEffect(() => {
     if (!user) return;
