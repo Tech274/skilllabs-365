@@ -180,15 +180,15 @@ export default function StudentDashboard() {
                       </div>
                     </div>
                   )}
-                  {launchingId === lab.id && provisioningStart && (
+                  {provisioning.isProvisioning && provisioning.labId === lab.id && (
                     <ProvisioningProgress
-                      startedAt={provisioningStart}
-                      onCancel={handleCancelProvisioning}
-                      cancelling={cancelling}
+                      startedAt={provisioning.startedAt!}
+                      onCancel={provisioning.cancelProvisioning}
+                      cancelling={provisioning.cancelling}
                     />
                   )}
-                  <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
-                    {launchingId === lab.id ? (
+                  <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)} onClick={() => handleLaunchLab(lab)}>
+                    {(launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)) ? (
                       <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</>
                     ) : launchErrors[lab.id] ? (
                       <><AlertCircle className="h-3.5 w-3.5" /> Retry Launch</>
