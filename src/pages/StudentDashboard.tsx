@@ -209,6 +209,9 @@ export default function StudentDashboard() {
                       </div>
                     </div>
                   )}
+                  {launchingId === lab.id && provisioningStart && (
+                    <ProvisioningProgress startedAt={provisioningStart} />
+                  )}
                   <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
                     {launchingId === lab.id ? (
                       <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</>

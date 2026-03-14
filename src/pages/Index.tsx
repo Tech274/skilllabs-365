@@ -336,6 +336,9 @@ const Index = () => {
                 </Button>
               ))}
             </div>
+            {provisioningStart && launchingId && (
+              <ProvisioningProgress startedAt={provisioningStart} className="mt-4" />
+            )}
           </motion.div>
         )}
 
