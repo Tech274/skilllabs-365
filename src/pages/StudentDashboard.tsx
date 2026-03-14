@@ -22,17 +22,12 @@ type Session = Tables<"sessions">;
 export default function StudentDashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
+  const provisioning = useProvisioning();
   const [labs, setLabs] = useState<LabTemplate[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
-  const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
-  const [provisioningVmId, setProvisioningVmId] = useState<string | null>(null);
-  const [cancelling, setCancelling] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const launchingLabRef = useRef<LabTemplate | null>(null);
 
   useEffect(() => {
     if (!user) return;
