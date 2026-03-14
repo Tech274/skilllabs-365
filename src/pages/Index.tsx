@@ -307,11 +307,11 @@ const Index = () => {
                 </Button>
               ))}
             </div>
-            {provisioningStart && launchingId && (
+            {provisioning.isProvisioning && (
               <ProvisioningProgress
-                startedAt={provisioningStart}
-                onCancel={handleCancelProvisioning}
-                cancelling={cancelling}
+                startedAt={provisioning.startedAt!}
+                onCancel={provisioning.cancelProvisioning}
+                cancelling={provisioning.cancelling}
                 className="mt-4"
               />
             )}
