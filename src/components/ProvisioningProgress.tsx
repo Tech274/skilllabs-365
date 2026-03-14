@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 import { Progress } from "@/components/ui/progress";
-import { Loader2, Server, Wifi, CheckCircle2 } from "lucide-react";
+import { Loader2, Server, Wifi, CheckCircle2, X } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 interface ProvisioningProgressProps {
-  startedAt: number; // Date.now() when provisioning started
-  estimatedSeconds?: number; // total estimated time (default 90s)
+  startedAt: number;
+  estimatedSeconds?: number;
+  onCancel?: () => void;
+  cancelling?: boolean;
   className?: string;
 }
 
@@ -19,6 +22,8 @@ const STAGES = [
 export function ProvisioningProgress({
   startedAt,
   estimatedSeconds = 90,
+  onCancel,
+  cancelling,
   className,
 }: ProvisioningProgressProps) {
   const [elapsed, setElapsed] = useState(0);
@@ -30,7 +35,6 @@ export function ProvisioningProgress({
     return () => clearInterval(interval);
   }, [startedAt]);
 
-  // Progress caps at 95% until actually done
   const rawPct = Math.min((elapsed / estimatedSeconds) * 100, 95);
   const remaining = Math.max(estimatedSeconds - elapsed, 0);
 
@@ -54,11 +58,25 @@ export function ProvisioningProgress({
           )} />
           <span className="text-sm font-medium text-foreground">{currentStage.label}</span>
         </div>
-        <span className="text-xs font-mono text-muted-foreground">{formatTime(remaining)}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-mono text-muted-foreground">{formatTime(remaining)}</span>
+          {onCancel && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-6 px-2 text-xs text-muted-foreground hover:text-destructive gap-1"
+              onClick={onCancel}
+              disabled={cancelling}
+            >
+              {cancelling ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
+              {cancelling ? "Cancelling..." : "Cancel"}
+            </Button>
+          )}
+        </div>
       </div>
       <Progress value={rawPct} className="h-2" />
       <div className="flex justify-between">
-        {STAGES.map((stage, i) => (
+        {STAGES.map((stage) => (
           <div key={stage.label} className="flex flex-col items-center gap-1">
             <div className={cn(
               "h-2 w-2 rounded-full transition-colors",

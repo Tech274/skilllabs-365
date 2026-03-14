@@ -374,7 +374,12 @@ const Index = () => {
               ))}
             </div>
             {provisioningStart && launchingId && (
-              <ProvisioningProgress startedAt={provisioningStart} className="mt-4" />
+              <ProvisioningProgress
+                startedAt={provisioningStart}
+                onCancel={handleCancelProvisioning}
+                cancelling={cancelling}
+                className="mt-4"
+              />
             )}
           </motion.div>
         )}
