@@ -244,6 +244,49 @@ Deno.serve(async (req) => {
     const { lab_template_id } = body;
     if (!lab_template_id) throw new Error("lab_template_id is required");
 
+    // Budget cap check
+    const { data: budgetSetting } = await supabase
+      .from("platform_settings")
+      .select("value")
+      .eq("key", "budget_cap")
+      .maybeSingle();
+
+    if (budgetSetting?.value) {
+      const budget = budgetSetting.value as { enabled: boolean; period: string; amount: number };
+      if (budget.enabled && budget.amount > 0) {
+        const VM_COST_PER_HOUR: Record<string, number> = {
+          "Standard_B2s": 0.0416, "Standard_B2ms": 0.0832, "Standard_B4ms": 0.166,
+          "Standard_D2s_v3": 0.096, "Standard_D2as_v5": 0.077, "Standard_E2s_v3": 0.126,
+        };
+
+        // Calculate current spend in the budget period
+        const now = new Date();
+        const periodStart = budget.period === "daily"
+          ? new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
+          : new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+
+        const { data: periodVMs } = await supabase
+          .from("virtual_machines")
+          .select("vm_size, created_at, status")
+          .gte("created_at", periodStart);
+
+        if (periodVMs) {
+          let totalSpend = 0;
+          for (const vm of periodVMs) {
+            const hours = Math.max(0.5, (now.getTime() - new Date(vm.created_at).getTime()) / 3600000);
+            const rate = VM_COST_PER_HOUR[vm.vm_size] || 0.05;
+            totalSpend += hours * rate;
+          }
+          if (totalSpend >= budget.amount) {
+            throw new Error(
+              `Budget cap reached: estimated ${budget.period} spend is $${totalSpend.toFixed(2)} (limit: $${budget.amount}). ` +
+              "New lab launches are paused. Contact your administrator to increase the budget or clean up resources."
+            );
+          }
+        }
+      }
+    }
+
     // Fetch lab template
     const { data: template, error: templateError } = await supabase
       .from("lab_templates")

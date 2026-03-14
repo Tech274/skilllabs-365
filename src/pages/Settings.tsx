@@ -1,6 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { Clock, Server, Bell, Shield, Save } from "lucide-react";
+import { Clock, Server, Bell, Shield, Save, DollarSign, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -8,9 +8,10 @@ import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Slider } from "@/components/ui/slider";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { toast } from "@/hooks/use-toast";
+import { supabase } from "@/integrations/supabase/client";
 
 export default function Settings() {
   const [idleTimeout, setIdleTimeout] = useState(20);
@@ -29,9 +30,47 @@ export default function Settings() {
     enforceClipboardPolicy: true, blockPublicAccess: true, requireMfa: false,
     sessionRecording: false, auditRetentionDays: 90,
   });
+  const [budgetEnabled, setBudgetEnabled] = useState(false);
+  const [budgetPeriod, setBudgetPeriod] = useState<"daily" | "monthly">("monthly");
+  const [budgetCap, setBudgetCap] = useState(100);
+  const [saving, setSaving] = useState(false);
 
-  const handleSave = () => {
-    toast({ title: "Settings saved", description: "Platform configuration updated successfully." });
+  useEffect(() => {
+    supabase
+      .from("platform_settings")
+      .select("key, value")
+      .eq("key", "budget_cap")
+      .maybeSingle()
+      .then(({ data }) => {
+        if (data?.value) {
+          const v = data.value as any;
+          setBudgetEnabled(v.enabled ?? false);
+          setBudgetPeriod(v.period ?? "monthly");
+          setBudgetCap(v.amount ?? 100);
+        }
+      });
+  }, []);
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const { error } = await supabase
+        .from("platform_settings")
+        .upsert(
+          {
+            key: "budget_cap",
+            value: { enabled: budgetEnabled, period: budgetPeriod, amount: budgetCap } as any,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "key" }
+        );
+      if (error) throw error;
+      toast({ title: "Settings saved", description: "Platform configuration updated successfully." });
+    } catch (err: any) {
+      toast({ title: "Save failed", description: err.message, variant: "destructive" });
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -42,8 +81,8 @@ export default function Settings() {
             <h1 className="text-2xl font-semibold text-foreground">Settings</h1>
             <p className="text-sm text-muted-foreground mt-1">Platform configuration and preferences</p>
           </div>
-          <Button onClick={handleSave} className="gap-2">
-            <Save className="h-4 w-4" /> Save Changes
+          <Button onClick={handleSave} className="gap-2" disabled={saving}>
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save Changes
           </Button>
         </div>
 
@@ -51,6 +90,7 @@ export default function Settings() {
           <TabsList className="flex-wrap">
             <TabsTrigger value="timeouts" className="gap-1.5"><Clock className="h-3.5 w-3.5" /> Timeouts</TabsTrigger>
             <TabsTrigger value="vm" className="gap-1.5"><Server className="h-3.5 w-3.5" /> VM Limits</TabsTrigger>
+            <TabsTrigger value="budget" className="gap-1.5"><DollarSign className="h-3.5 w-3.5" /> Budget</TabsTrigger>
             <TabsTrigger value="notifications" className="gap-1.5"><Bell className="h-3.5 w-3.5" /> Notifications</TabsTrigger>
             <TabsTrigger value="security" className="gap-1.5"><Shield className="h-3.5 w-3.5" /> Security</TabsTrigger>
           </TabsList>
@@ -139,6 +179,53 @@ export default function Settings() {
                   ))}
                 </div>
               </div>
+            </motion.div>
+          </TabsContent>
+
+          {/* Budget */}
+          <TabsContent value="budget" className="mt-6">
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+              className="rounded-xl border border-border bg-card p-6 space-y-6 max-w-2xl">
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="text-base font-semibold">Budget Cap</Label>
+                  <p className="text-xs text-muted-foreground mt-0.5">Automatically pause new lab launches when estimated spend exceeds the cap</p>
+                </div>
+                <Switch checked={budgetEnabled} onCheckedChange={setBudgetEnabled} />
+              </div>
+              {budgetEnabled && (
+                <>
+                  <div className="space-y-3">
+                    <Label>Period</Label>
+                    <Select value={budgetPeriod} onValueChange={(v) => setBudgetPeriod(v as "daily" | "monthly")}>
+                      <SelectTrigger className="max-w-xs"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="daily">Daily</SelectItem>
+                        <SelectItem value="monthly">Monthly</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-3">
+                    <Label>Spend Limit (USD)</Label>
+                    <div className="flex items-center gap-3 max-w-xs">
+                      <span className="text-lg font-semibold text-foreground">$</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={budgetCap}
+                        onChange={(e) => setBudgetCap(Number(e.target.value))}
+                        className="font-mono"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      When estimated spend reaches this amount, new VM provisioning will be blocked. Existing sessions will continue uninterrupted.
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-warning/30 bg-warning/5 p-3">
+                    <p className="text-xs text-warning font-medium">⚠️ Cost estimates are approximations based on VM uptime and published Azure pricing. Actual Azure charges may differ.</p>
+                  </div>
+                </>
+              )}
             </motion.div>
           </TabsContent>
 
