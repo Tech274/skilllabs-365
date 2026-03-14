@@ -305,6 +305,7 @@ const Index = () => {
                   )}
                   {lab.name}
                   <Badge variant="outline" className="text-[9px] font-mono ml-1">{lab.vm_size}</Badge>
+                  <span className="text-[10px] text-muted-foreground font-mono">{estimateLabCost(lab.vm_size, lab.duration)}</span>
                 </Button>
               ))}
             </div>

@@ -159,7 +159,7 @@ export default function StudentDashboard() {
                     <h3 className="text-sm font-semibold text-foreground">{lab.name}</h3>
                   </div>
                   <p className="text-xs text-muted-foreground line-clamp-2">{lab.description}</p>
-                  <div className="grid grid-cols-2 gap-2 text-center">
+                  <div className="grid grid-cols-3 gap-2 text-center">
                     <div className="rounded-lg bg-muted/50 p-2">
                       <p className="text-sm font-mono font-semibold text-foreground">{lab.duration}m</p>
                       <p className="text-[9px] text-muted-foreground uppercase">Duration</p>
@@ -167,6 +167,10 @@ export default function StudentDashboard() {
                     <div className="rounded-lg bg-muted/50 p-2">
                       <p className="text-sm font-mono font-semibold text-foreground">{lab.protocol}</p>
                       <p className="text-[9px] text-muted-foreground uppercase">Protocol</p>
+                    </div>
+                    <div className="rounded-lg bg-muted/50 p-2">
+                      <p className="text-sm font-mono font-semibold text-foreground">{estimateLabCost(lab.vm_size, lab.duration)}</p>
+                      <p className="text-[9px] text-muted-foreground uppercase">Est. Cost</p>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
