@@ -15,6 +15,8 @@ import { AiInsightCard } from "@/components/AiInsightCard";
 import { AiChatPanel } from "@/components/AiChatPanel";
 import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 import { useProvisioning } from "@/hooks/use-provisioning";
+import { estimateLabCost } from "@/lib/azure-pricing";
+import { DollarSign } from "lucide-react";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
