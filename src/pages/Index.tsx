@@ -37,6 +37,7 @@ import { Progress } from "@/components/ui/progress";
 import { AiInsightCard } from "@/components/AiInsightCard";
 import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 import { useProvisioning } from "@/hooks/use-provisioning";
+import { estimateLabCost } from "@/lib/azure-pricing";
 
 interface QuotaItem {
   name: string;
