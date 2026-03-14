@@ -60,6 +60,7 @@ type LabTemplate = Tables<"lab_templates">;
 
 const Index = () => {
   const navigate = useNavigate();
+  const provisioning = useProvisioning();
   const [vms, setVms] = useState<VMRow[]>([]);
   const [vmLoading, setVmLoading] = useState(true);
   const [quotas, setQuotas] = useState<Record<string, QuotaItem[]>>({});
@@ -69,12 +70,6 @@ const Index = () => {
   const quotaAlertShown = useRef(false);
   const [labs, setLabs] = useState<LabTemplate[]>([]);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
-  const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
-  const [provisioningVmId, setProvisioningVmId] = useState<string | null>(null);
-  const [cancelling, setCancelling] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const launchingLabRef = useRef<LabTemplate | null>(null);
 
   const fetchVMs = useCallback(async () => {
     const { data, error } = await supabase
