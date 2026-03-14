@@ -35,6 +35,7 @@ import {
 } from "recharts";
 import { Progress } from "@/components/ui/progress";
 import { AiInsightCard } from "@/components/AiInsightCard";
+import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 
 interface QuotaItem {
   name: string;
