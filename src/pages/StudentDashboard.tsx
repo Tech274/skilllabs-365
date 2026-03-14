@@ -69,10 +69,12 @@ export default function StudentDashboard() {
               clearInterval(pollInterval);
               toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
               setLaunchingId(null);
+              setProvisioningStart(null);
               navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
             } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
               clearInterval(pollInterval);
               setLaunchingId(null);
+              setProvisioningStart(null);
               setLaunchErrors((prev) => ({ ...prev, [lab.id]: `VM entered ${vmStatus} state. Please try again.` }));
               toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state.`, variant: "destructive" });
             }
