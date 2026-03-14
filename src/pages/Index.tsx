@@ -159,7 +159,8 @@ const Index = () => {
         navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
       } else {
         // VM still provisioning — poll for readiness
-        toast({ title: "VM Provisioning", description: "Azure VM is starting up. Waiting for it to be ready..." });
+        setProvisioningStart(Date.now());
+        toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
         const vmId = data.vm_id;
         const pollInterval = setInterval(async () => {
           try {
