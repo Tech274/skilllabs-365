@@ -56,7 +56,8 @@ export default function StudentDashboard() {
         toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
         navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
       } else {
-        toast({ title: "VM Provisioning", description: "Azure VM is starting up. Waiting for it to be ready..." });
+        setProvisioningStart(Date.now());
+        toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
         const vmId = data.vm_id;
         const pollInterval = setInterval(async () => {
           try {
