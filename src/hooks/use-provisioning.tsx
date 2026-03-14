@@ -129,6 +129,7 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
           clearProvisioning();
           toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state.`, variant: "destructive" });
           sendBrowserNotification("Lab Launch Failed", `${labName} failed to provision.`);
+          playFailChime();
         }
       } catch {
         // Ignore poll errors
