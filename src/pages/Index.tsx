@@ -36,6 +36,7 @@ import {
 import { Progress } from "@/components/ui/progress";
 import { AiInsightCard } from "@/components/AiInsightCard";
 import { ProvisioningProgress } from "@/components/ProvisioningProgress";
+import { useProvisioning } from "@/hooks/use-provisioning";
 
 interface QuotaItem {
   name: string;
