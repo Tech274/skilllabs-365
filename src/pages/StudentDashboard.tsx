@@ -14,6 +14,7 @@ import type { Tables } from "@/integrations/supabase/types";
 import { AiInsightCard } from "@/components/AiInsightCard";
 import { AiChatPanel } from "@/components/AiChatPanel";
 import { ProvisioningProgress } from "@/components/ProvisioningProgress";
+import { useProvisioning } from "@/hooks/use-provisioning";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
