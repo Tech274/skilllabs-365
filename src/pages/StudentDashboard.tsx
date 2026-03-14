@@ -32,7 +32,6 @@ export default function StudentDashboard() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const launchingLabRef = useRef<LabTemplate | null>(null);
-  const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
 
   useEffect(() => {
     if (!user) return;
