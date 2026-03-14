@@ -172,10 +172,12 @@ const Index = () => {
               clearInterval(pollInterval);
               toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
               setLaunchingId(null);
+              setProvisioningStart(null);
               navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
             } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
               clearInterval(pollInterval);
               setLaunchingId(null);
+              setProvisioningStart(null);
               toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state. Please try again.`, variant: "destructive" });
             }
           } catch {
