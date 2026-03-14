@@ -68,6 +68,7 @@ const Index = () => {
   const quotaAlertShown = useRef(false);
   const [labs, setLabs] = useState<LabTemplate[]>([]);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
 
   const fetchVMs = useCallback(async () => {
     const { data, error } = await supabase
