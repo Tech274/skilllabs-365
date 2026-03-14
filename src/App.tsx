@@ -5,6 +5,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { ThemeProvider } from "@/hooks/use-theme";
 import { AuthProvider } from "@/hooks/use-auth";
+import { ProvisioningProvider } from "@/hooks/use-provisioning";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import RoleProtectedRoute from "@/components/RoleProtectedRoute";
 import Index from "./pages/Index";
@@ -38,31 +39,33 @@ const App = () => (
         <Sonner />
         <BrowserRouter>
           <AuthProvider>
-            <Routes>
-              <Route path="/login" element={<Login />} />
-              <Route path="/signup" element={<Signup />} />
-              {/* Admin-only routes */}
-              <Route path="/" element={<RoleProtectedRoute allowedRoles={["admin"]}><Index /></RoleProtectedRoute>} />
-              <Route path="/vms" element={<RoleProtectedRoute allowedRoles={["admin"]}><VirtualMachines /></RoleProtectedRoute>} />
-              <Route path="/vms/:vmId" element={<RoleProtectedRoute allowedRoles={["admin"]}><VMDetail /></RoleProtectedRoute>} />
-              <Route path="/regions" element={<RoleProtectedRoute allowedRoles={["admin"]}><Regions /></RoleProtectedRoute>} />
-              <Route path="/costs" element={<RoleProtectedRoute allowedRoles={["admin"]}><CostAnalytics /></RoleProtectedRoute>} />
-              <Route path="/health" element={<RoleProtectedRoute allowedRoles={["admin"]}><Health /></RoleProtectedRoute>} />
-              <Route path="/security" element={<RoleProtectedRoute allowedRoles={["admin"]}><Security /></RoleProtectedRoute>} />
-              <Route path="/labs" element={<RoleProtectedRoute allowedRoles={["admin"]}><LabManagement /></RoleProtectedRoute>} />
-              <Route path="/audit-log" element={<RoleProtectedRoute allowedRoles={["admin"]}><SessionAuditLog /></RoleProtectedRoute>} />
-              <Route path="/users" element={<RoleProtectedRoute allowedRoles={["admin"]}><UserManagement /></RoleProtectedRoute>} />
-              <Route path="/settings" element={<RoleProtectedRoute allowedRoles={["admin"]}><Settings /></RoleProtectedRoute>} />
-              <Route path="/reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><DailyReports /></RoleProtectedRoute>} />
-              {/* Shared routes */}
-              <Route path="/sessions" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><Sessions /></RoleProtectedRoute>} />
-              <Route path="/sessions/:sessionId/playback" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><SessionPlayback /></RoleProtectedRoute>} />
-              <Route path="/labs/session/:sessionId" element={<ProtectedRoute><LabSession /></ProtectedRoute>} />
-              {/* Role-specific dashboards */}
-              <Route path="/instructor" element={<RoleProtectedRoute allowedRoles={["instructor"]}><InstructorDashboard /></RoleProtectedRoute>} />
-              <Route path="/student" element={<RoleProtectedRoute allowedRoles={["student"]}><StudentDashboard /></RoleProtectedRoute>} />
-              <Route path="*" element={<NotFound />} />
-            </Routes>
+            <ProvisioningProvider>
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/signup" element={<Signup />} />
+                {/* Admin-only routes */}
+                <Route path="/" element={<RoleProtectedRoute allowedRoles={["admin"]}><Index /></RoleProtectedRoute>} />
+                <Route path="/vms" element={<RoleProtectedRoute allowedRoles={["admin"]}><VirtualMachines /></RoleProtectedRoute>} />
+                <Route path="/vms/:vmId" element={<RoleProtectedRoute allowedRoles={["admin"]}><VMDetail /></RoleProtectedRoute>} />
+                <Route path="/regions" element={<RoleProtectedRoute allowedRoles={["admin"]}><Regions /></RoleProtectedRoute>} />
+                <Route path="/costs" element={<RoleProtectedRoute allowedRoles={["admin"]}><CostAnalytics /></RoleProtectedRoute>} />
+                <Route path="/health" element={<RoleProtectedRoute allowedRoles={["admin"]}><Health /></RoleProtectedRoute>} />
+                <Route path="/security" element={<RoleProtectedRoute allowedRoles={["admin"]}><Security /></RoleProtectedRoute>} />
+                <Route path="/labs" element={<RoleProtectedRoute allowedRoles={["admin"]}><LabManagement /></RoleProtectedRoute>} />
+                <Route path="/audit-log" element={<RoleProtectedRoute allowedRoles={["admin"]}><SessionAuditLog /></RoleProtectedRoute>} />
+                <Route path="/users" element={<RoleProtectedRoute allowedRoles={["admin"]}><UserManagement /></RoleProtectedRoute>} />
+                <Route path="/settings" element={<RoleProtectedRoute allowedRoles={["admin"]}><Settings /></RoleProtectedRoute>} />
+                <Route path="/reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><DailyReports /></RoleProtectedRoute>} />
+                {/* Shared routes */}
+                <Route path="/sessions" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><Sessions /></RoleProtectedRoute>} />
+                <Route path="/sessions/:sessionId/playback" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><SessionPlayback /></RoleProtectedRoute>} />
+                <Route path="/labs/session/:sessionId" element={<ProtectedRoute><LabSession /></ProtectedRoute>} />
+                {/* Role-specific dashboards */}
+                <Route path="/instructor" element={<RoleProtectedRoute allowedRoles={["instructor"]}><InstructorDashboard /></RoleProtectedRoute>} />
+                <Route path="/student" element={<RoleProtectedRoute allowedRoles={["student"]}><StudentDashboard /></RoleProtectedRoute>} />
+                <Route path="*" element={<NotFound />} />
+              </Routes>
+            </ProvisioningProvider>
           </AuthProvider>
         </BrowserRouter>
       </TooltipProvider>

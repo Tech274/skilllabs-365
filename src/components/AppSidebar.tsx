@@ -1,16 +1,21 @@
 import {
   LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
   Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
+  Loader2, X,
 } from "lucide-react";
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/use-auth";
+import { useProvisioning } from "@/hooks/use-provisioning";
 import { Button } from "@/components/ui/button";
+import { Progress } from "@/components/ui/progress";
 import {
   Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent,
   SidebarGroupLabel, SidebarMenu, SidebarMenuButton, SidebarMenuItem,
   SidebarHeader, SidebarFooter, useSidebar,
 } from "@/components/ui/sidebar";
+import { useEffect, useState } from "react";
+import { cn } from "@/lib/utils";
 
 const adminItems = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
@@ -48,6 +53,59 @@ const SignOutButton = ({ collapsed }: { collapsed?: boolean }) => {
     </Button>
   );
 };
+
+function SidebarProvisioningIndicator({ collapsed }: { collapsed: boolean }) {
+  const { isProvisioning, labName, startedAt, cancelling, cancelProvisioning } = useProvisioning();
+  const [elapsed, setElapsed] = useState(0);
+
+  useEffect(() => {
+    if (!isProvisioning || !startedAt) return;
+    const interval = setInterval(() => {
+      setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [isProvisioning, startedAt]);
+
+  if (!isProvisioning) return null;
+
+  const pct = Math.min((elapsed / 90) * 100, 95);
+
+  if (collapsed) {
+    return (
+      <div className="flex justify-center py-2" title={`Provisioning: ${labName}`}>
+        <div className="relative">
+          <Server className="h-4 w-4 text-primary" />
+          <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-primary animate-pulse" />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-primary/20 bg-primary/5 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-3.5 w-3.5 text-primary animate-spin" />
+          <span className="text-[11px] font-medium text-foreground truncate">Provisioning</span>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-5 w-5 text-muted-foreground hover:text-destructive"
+          onClick={cancelProvisioning}
+          disabled={cancelling}
+        >
+          {cancelling ? <Loader2 className="h-3 w-3 animate-spin" /> : <X className="h-3 w-3" />}
+        </Button>
+      </div>
+      <p className="text-[10px] text-muted-foreground truncate">{labName}</p>
+      <Progress value={pct} className="h-1.5" />
+      <p className="text-[9px] text-muted-foreground font-mono">
+        {elapsed < 90 ? `~${Math.max(90 - elapsed, 0)}s remaining` : "almost there..."}
+      </p>
+    </div>
+  );
+}
 
 export function AppSidebar() {
   const { state } = useSidebar();
@@ -113,6 +171,7 @@ export function AppSidebar() {
         )}
       </SidebarContent>
       <SidebarFooter className="p-4 space-y-2">
+        <SidebarProvisioningIndicator collapsed={collapsed} />
         {!collapsed && (
           <>
             <div className="rounded-lg border border-border bg-muted/50 p-3">
