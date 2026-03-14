@@ -123,6 +123,7 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
           clearProvisioning();
           toast({ title: "✅ VM Ready", description: `${labName} is ready to use.` });
           sendBrowserNotification("Lab Ready", `${labName} is ready to use.`);
+          playReadyChime();
           navigate(`/labs/session/${labId}?vm_id=${vmId}`);
         } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
           clearProvisioning();
