@@ -85,6 +85,7 @@ export default function StudentDashboard() {
         setTimeout(() => {
           clearInterval(pollInterval);
           setLaunchingId(null);
+          setProvisioningStart(null);
         }, 180000);
         return;
       }
