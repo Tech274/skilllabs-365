@@ -249,7 +249,11 @@ export default function StudentDashboard() {
                     </div>
                   )}
                   {launchingId === lab.id && provisioningStart && (
-                    <ProvisioningProgress startedAt={provisioningStart} />
+                    <ProvisioningProgress
+                      startedAt={provisioningStart}
+                      onCancel={handleCancelProvisioning}
+                      cancelling={cancelling}
+                    />
                   )}
                   <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
                     {launchingId === lab.id ? (
