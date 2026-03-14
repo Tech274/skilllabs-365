@@ -13,6 +13,7 @@ import { cn } from "@/lib/utils";
 import type { Tables } from "@/integrations/supabase/types";
 import { AiInsightCard } from "@/components/AiInsightCard";
 import { AiChatPanel } from "@/components/AiChatPanel";
+import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -25,6 +26,7 @@ export default function StudentDashboard() {
   const [loading, setLoading] = useState(true);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
+  const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
 
   useEffect(() => {
     if (!user) return;
@@ -54,7 +56,8 @@ export default function StudentDashboard() {
         toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
         navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
       } else {
-        toast({ title: "VM Provisioning", description: "Azure VM is starting up. Waiting for it to be ready..." });
+        setProvisioningStart(Date.now());
+        toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
         const vmId = data.vm_id;
         const pollInterval = setInterval(async () => {
           try {
@@ -66,10 +69,12 @@ export default function StudentDashboard() {
               clearInterval(pollInterval);
               toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
               setLaunchingId(null);
+              setProvisioningStart(null);
               navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
             } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
               clearInterval(pollInterval);
               setLaunchingId(null);
+              setProvisioningStart(null);
               setLaunchErrors((prev) => ({ ...prev, [lab.id]: `VM entered ${vmStatus} state. Please try again.` }));
               toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state.`, variant: "destructive" });
             }
@@ -80,6 +85,7 @@ export default function StudentDashboard() {
         setTimeout(() => {
           clearInterval(pollInterval);
           setLaunchingId(null);
+          setProvisioningStart(null);
         }, 180000);
         return;
       }
@@ -202,6 +208,9 @@ export default function StudentDashboard() {
                         <p className="text-[10px] text-destructive/80 leading-tight">{launchErrors[lab.id]}</p>
                       </div>
                     </div>
+                  )}
+                  {launchingId === lab.id && provisioningStart && (
+                    <ProvisioningProgress startedAt={provisioningStart} />
                   )}
                   <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
                     {launchingId === lab.id ? (

@@ -35,6 +35,7 @@ import {
 } from "recharts";
 import { Progress } from "@/components/ui/progress";
 import { AiInsightCard } from "@/components/AiInsightCard";
+import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 
 interface QuotaItem {
   name: string;
@@ -67,6 +68,7 @@ const Index = () => {
   const quotaAlertShown = useRef(false);
   const [labs, setLabs] = useState<LabTemplate[]>([]);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [provisioningStart, setProvisioningStart] = useState<number | null>(null);
 
   const fetchVMs = useCallback(async () => {
     const { data, error } = await supabase
@@ -157,7 +159,8 @@ const Index = () => {
         navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
       } else {
         // VM still provisioning — poll for readiness
-        toast({ title: "VM Provisioning", description: "Azure VM is starting up. Waiting for it to be ready..." });
+        setProvisioningStart(Date.now());
+        toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
         const vmId = data.vm_id;
         const pollInterval = setInterval(async () => {
           try {
@@ -169,10 +172,12 @@ const Index = () => {
               clearInterval(pollInterval);
               toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
               setLaunchingId(null);
+              setProvisioningStart(null);
               navigate(`/labs/session/${lab.id}?vm_id=${vmId}`);
             } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
               clearInterval(pollInterval);
               setLaunchingId(null);
+              setProvisioningStart(null);
               toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state. Please try again.`, variant: "destructive" });
             }
           } catch {
@@ -183,6 +188,7 @@ const Index = () => {
         setTimeout(() => {
           clearInterval(pollInterval);
           setLaunchingId(null);
+          setProvisioningStart(null);
         }, 180000);
         return; // Don't clear launchingId yet
       }
@@ -330,6 +336,9 @@ const Index = () => {
                 </Button>
               ))}
             </div>
+            {provisioningStart && launchingId && (
+              <ProvisioningProgress startedAt={provisioningStart} className="mt-4" />
+            )}
           </motion.div>
         )}
 
