@@ -132,9 +132,36 @@ export default function CostAnalytics() {
   return (
     <DashboardLayout>
       <div className="space-y-6">
-        <div>
-          <h1 className="text-2xl font-semibold text-foreground">Cost Analytics</h1>
-          <p className="text-sm text-muted-foreground mt-1">Infrastructure spend estimates based on VM usage</p>
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold text-foreground">Cost Analytics</h1>
+            <p className="text-sm text-muted-foreground mt-1">Infrastructure spend estimates based on VM usage</p>
+          </div>
+          {costBreakdown.length > 0 && (
+            <Button variant="outline" size="sm" className="gap-2" onClick={() => {
+              const rows = [["Lab Template", "VM Size", "Est. Cost (USD)", "Hours", "Status"]];
+              // Add per-lab data
+              labCosts.forEach(l => rows.push([l.name, "-", l.cost.toFixed(2), String(l.hours), "-"]));
+              // Add per-VM-size breakdown
+              costBreakdown.forEach(c => rows.push(["-", c.category, c.cost.toFixed(2), "-", `${c.percentage}%`]));
+              // Summary row
+              rows.push([]);
+              rows.push(["Month-to-Date Total", "", totalMonthly.toFixed(2), "", ""]);
+              rows.push(["Projected Monthly", "", projectedMonthly.toFixed(2), "", ""]);
+              if (budgetCap?.enabled) rows.push(["Budget Cap", budgetCap.period, String(budgetCap.amount), "", ""]);
+
+              const csv = rows.map(r => (r as string[]).map(v => `"${v ?? ""}"`).join(",")).join("\n");
+              const blob = new Blob([csv], { type: "text/csv" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `cost-report-${new Date().toISOString().slice(0, 7)}.csv`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}>
+              <Download className="h-3.5 w-3.5" /> Export CSV
+            </Button>
+          )}
         </div>
 
         {loading ? (
