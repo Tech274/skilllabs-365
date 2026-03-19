@@ -50,6 +50,9 @@ export default function CostAnalytics() {
     }
 
     const vms = vmRes.data;
+    const labMap = new Map<string, string>();
+    (labRes.data || []).forEach((l: any) => labMap.set(l.id, l.name));
+
     if (vms && vms.length > 0) {
       const sizeMap = new Map<string, number>();
       const now = Date.now();
