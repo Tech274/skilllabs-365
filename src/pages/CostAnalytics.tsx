@@ -47,7 +47,8 @@ export default function CostAnalytics() {
       supabase.from("platform_settings").select("value").eq("key", "per_lab_cost_alert").maybeSingle(),
     ]);
 
-    if (budgetRes.data?.value) {
+    if (budgetRes.data?.value) setBudgetCap(budgetRes.data.value as any);
+    if (labAlertRes.data?.value) setPerLabAlert(labAlertRes.data.value as any);
       setBudgetCap(budgetRes.data.value as any);
     }
 
