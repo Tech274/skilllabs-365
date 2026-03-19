@@ -33,6 +33,8 @@ export default function Settings() {
   const [budgetEnabled, setBudgetEnabled] = useState(false);
   const [budgetPeriod, setBudgetPeriod] = useState<"daily" | "monthly">("monthly");
   const [budgetCap, setBudgetCap] = useState(100);
+  const [perLabThreshold, setPerLabThreshold] = useState(0);
+  const [perLabAlertEnabled, setPerLabAlertEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
