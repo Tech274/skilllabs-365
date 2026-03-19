@@ -38,19 +38,22 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    supabase
-      .from("platform_settings")
-      .select("key, value")
-      .eq("key", "budget_cap")
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.value) {
-          const v = data.value as any;
-          setBudgetEnabled(v.enabled ?? false);
-          setBudgetPeriod(v.period ?? "monthly");
-          setBudgetCap(v.amount ?? 100);
-        }
-      });
+    Promise.all([
+      supabase.from("platform_settings").select("key, value").eq("key", "budget_cap").maybeSingle(),
+      supabase.from("platform_settings").select("key, value").eq("key", "per_lab_cost_alert").maybeSingle(),
+    ]).then(([budgetData, labAlertData]) => {
+      if (budgetData.data?.value) {
+        const v = budgetData.data.value as any;
+        setBudgetEnabled(v.enabled ?? false);
+        setBudgetPeriod(v.period ?? "monthly");
+        setBudgetCap(v.amount ?? 100);
+      }
+      if (labAlertData.data?.value) {
+        const v = labAlertData.data.value as any;
+        setPerLabAlertEnabled(v.enabled ?? false);
+        setPerLabThreshold(v.threshold ?? 0);
+      }
+    });
   }, []);
 
   const handleSave = async () => {
