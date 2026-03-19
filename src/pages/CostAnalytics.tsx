@@ -69,6 +69,11 @@ export default function CostAnalytics() {
         const cost = hours * rate;
         sizeMap.set(vm.vm_size, (sizeMap.get(vm.vm_size) || 0) + cost);
 
+        // Track cost per lab template
+        const labName = (vm as any).lab_template_id ? (labMap.get((vm as any).lab_template_id) || "Unknown Lab") : "Unassigned";
+        const existing = labCostMap.get(labName) || { cost: 0, hours: 0 };
+        labCostMap.set(labName, { cost: existing.cost + cost, hours: existing.hours + hours });
+
         if (vm.status === "running" || vm.status === "idle") active++;
 
         if (createdAt >= monthStart) {
