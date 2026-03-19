@@ -232,6 +232,35 @@ export default function Settings() {
                   </div>
                 </>
               )}
+
+              {/* Per-Lab Cost Alert */}
+              <div className="border-t border-border pt-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label className="text-base font-semibold">Per-Lab Cost Alert</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">Highlight labs on Cost Analytics when their estimated cost exceeds a threshold</p>
+                  </div>
+                  <Switch checked={perLabAlertEnabled} onCheckedChange={setPerLabAlertEnabled} />
+                </div>
+                {perLabAlertEnabled && (
+                  <div className="space-y-3">
+                    <Label>Cost Threshold (USD per lab)</Label>
+                    <div className="flex items-center gap-3 max-w-xs">
+                      <span className="text-lg font-semibold text-foreground">$</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={perLabThreshold}
+                        onChange={(e) => setPerLabThreshold(Number(e.target.value))}
+                        className="font-mono"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Labs exceeding this cost will be flagged with a warning on the Cost Analytics page.
+                    </p>
+                  </div>
+                )}
+              </div>
             </motion.div>
           </TabsContent>
 
