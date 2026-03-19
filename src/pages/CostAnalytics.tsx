@@ -9,6 +9,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { AiInsightCard } from "@/components/AiInsightCard";
 import { Progress } from "@/components/ui/progress";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 
 const COLORS = [
   'hsl(187 80% 48%)', 'hsl(210 80% 55%)', 'hsl(152 60% 45%)',
