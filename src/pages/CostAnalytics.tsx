@@ -49,8 +49,6 @@ export default function CostAnalytics() {
 
     if (budgetRes.data?.value) setBudgetCap(budgetRes.data.value as any);
     if (labAlertRes.data?.value) setPerLabAlert(labAlertRes.data.value as any);
-      setBudgetCap(budgetRes.data.value as any);
-    }
 
     const vms = vmRes.data;
     const labMap = new Map<string, string>();
