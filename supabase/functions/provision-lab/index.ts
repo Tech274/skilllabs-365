@@ -277,6 +277,47 @@ Deno.serve(async (req) => {
             const rate = VM_COST_PER_HOUR[vm.vm_size] || 0.05;
             totalSpend += hours * rate;
           }
+
+          const pct = (totalSpend / budget.amount) * 100;
+
+          // Send budget threshold notifications to all admins
+          if (pct >= 80) {
+            const { data: adminRoles } = await supabase
+              .from("user_roles")
+              .select("user_id")
+              .eq("role", "admin");
+
+            if (adminRoles && adminRoles.length > 0) {
+              const thresholdKey = pct >= 100 ? "100" : "80";
+              const title = pct >= 100
+                ? `🚨 ${budget.period} budget limit reached`
+                : `⚠️ ${budget.period} budget at ${Math.round(pct)}%`;
+              const message = pct >= 100
+                ? `Estimated ${budget.period} spend is $${totalSpend.toFixed(2)}, exceeding the $${budget.amount} cap. New lab launches are paused.`
+                : `Estimated ${budget.period} spend is $${totalSpend.toFixed(2)} of $${budget.amount} (${Math.round(pct)}%). Consider reviewing active resources.`;
+
+              // Deduplicate: only notify once per threshold per period
+              const dedupeTag = `budget_${thresholdKey}_${budget.period}_${periodStart}`;
+              for (const admin of adminRoles) {
+                const { data: existing } = await supabase
+                  .from("notifications")
+                  .select("id")
+                  .eq("user_id", admin.user_id)
+                  .eq("type", dedupeTag)
+                  .maybeSingle();
+
+                if (!existing) {
+                  await supabase.from("notifications").insert({
+                    user_id: admin.user_id,
+                    title,
+                    message,
+                    type: dedupeTag,
+                  });
+                }
+              }
+            }
+          }
+
           if (totalSpend >= budget.amount) {
             throw new Error(
               `Budget cap reached: estimated ${budget.period} spend is $${totalSpend.toFixed(2)} (limit: $${budget.amount}). ` +
