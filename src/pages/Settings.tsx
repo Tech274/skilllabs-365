@@ -59,16 +59,17 @@ export default function Settings() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const { error } = await supabase
-        .from("platform_settings")
-        .upsert(
-          {
-            key: "budget_cap",
-            value: { enabled: budgetEnabled, period: budgetPeriod, amount: budgetCap } as any,
-            updated_at: new Date().toISOString(),
-          },
+      const results = await Promise.all([
+        supabase.from("platform_settings").upsert(
+          { key: "budget_cap", value: { enabled: budgetEnabled, period: budgetPeriod, amount: budgetCap } as any, updated_at: new Date().toISOString() },
           { onConflict: "key" }
-        );
+        ),
+        supabase.from("platform_settings").upsert(
+          { key: "per_lab_cost_alert", value: { enabled: perLabAlertEnabled, threshold: perLabThreshold } as any, updated_at: new Date().toISOString() },
+          { onConflict: "key" }
+        ),
+      ]);
+      const error = results.find(r => r.error)?.error;
       if (error) throw error;
       toast({ title: "Settings saved", description: "Platform configuration updated successfully." });
     } catch (err: any) {
