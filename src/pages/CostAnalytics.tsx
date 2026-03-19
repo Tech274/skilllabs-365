@@ -1,7 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { EmptyState } from "@/components/EmptyState";
-import { DollarSign, TrendingDown, Calculator, Coins, Loader2, AlertTriangle, TrendingUp, CalendarDays } from "lucide-react";
+import { DollarSign, TrendingDown, Calculator, Coins, Loader2, AlertTriangle, TrendingUp, CalendarDays, AlertCircle } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, AreaChart, Area, CartesianGrid } from "recharts";
 import { motion } from "framer-motion";
 import { useEffect, useState, useCallback } from "react";
