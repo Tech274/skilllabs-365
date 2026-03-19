@@ -36,6 +36,7 @@ export default function CostAnalytics() {
   const [projectedMonthly, setProjectedMonthly] = useState(0);
   const [budgetCap, setBudgetCap] = useState<BudgetCap | null>(null);
   const [activeVmCount, setActiveVmCount] = useState(0);
+  const [labCosts, setLabCosts] = useState<{ name: string; cost: number; hours: number }[]>([]);
 
   const fetchCostData = useCallback(async () => {
     const [vmRes, budgetRes] = await Promise.all([
