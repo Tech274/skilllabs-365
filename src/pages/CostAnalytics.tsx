@@ -103,11 +103,18 @@ export default function CostAnalytics() {
         .map(([day, cost]) => ({ day, cost: Math.round(cost * 100) / 100 }))
         .sort((a, b) => new Date(a.day).getTime() - new Date(b.day).getTime());
       setDailyTrend(trend);
+
+      setLabCosts(
+        Array.from(labCostMap.entries())
+          .map(([name, v]) => ({ name, cost: Math.round(v.cost * 100) / 100, hours: Math.round(v.hours) }))
+          .sort((a, b) => b.cost - a.cost)
+      );
     } else {
       setCostBreakdown([]);
       setTotalMonthly(0);
       setProjectedMonthly(0);
       setDailyTrend([]);
+      setLabCosts([]);
     }
     setLoading(false);
   }, []);
