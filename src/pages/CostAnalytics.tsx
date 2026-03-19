@@ -39,9 +39,10 @@ export default function CostAnalytics() {
   const [labCosts, setLabCosts] = useState<{ name: string; cost: number; hours: number }[]>([]);
 
   const fetchCostData = useCallback(async () => {
-    const [vmRes, budgetRes] = await Promise.all([
-      supabase.from("virtual_machines").select("vm_size, status, created_at"),
+    const [vmRes, budgetRes, labRes] = await Promise.all([
+      supabase.from("virtual_machines").select("vm_size, status, created_at, lab_template_id"),
       supabase.from("platform_settings").select("value").eq("key", "budget_cap").maybeSingle(),
+      supabase.from("lab_templates").select("id, name"),
     ]);
 
     if (budgetRes.data?.value) {
