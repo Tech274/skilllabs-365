@@ -60,6 +60,7 @@ export default function CostAnalytics() {
       let monthlyTotal = 0;
       let active = 0;
       const dailyCosts = new Map<string, number>();
+      const labCostMap = new Map<string, { cost: number; hours: number }>();
 
       for (const vm of vms) {
         const createdAt = new Date(vm.created_at).getTime();
