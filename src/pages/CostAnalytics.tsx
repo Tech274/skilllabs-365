@@ -1,7 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { EmptyState } from "@/components/EmptyState";
-import { DollarSign, TrendingDown, Calculator, Coins, Loader2, AlertTriangle, TrendingUp, CalendarDays } from "lucide-react";
+import { DollarSign, TrendingDown, Calculator, Coins, Loader2, AlertTriangle, TrendingUp, CalendarDays, AlertCircle } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, AreaChart, Area, CartesianGrid } from "recharts";
 import { motion } from "framer-motion";
 import { useEffect, useState, useCallback } from "react";
@@ -37,17 +37,18 @@ export default function CostAnalytics() {
   const [budgetCap, setBudgetCap] = useState<BudgetCap | null>(null);
   const [activeVmCount, setActiveVmCount] = useState(0);
   const [labCosts, setLabCosts] = useState<{ name: string; cost: number; hours: number }[]>([]);
+  const [perLabAlert, setPerLabAlert] = useState<{ enabled: boolean; threshold: number } | null>(null);
 
   const fetchCostData = useCallback(async () => {
-    const [vmRes, budgetRes, labRes] = await Promise.all([
+    const [vmRes, budgetRes, labRes, labAlertRes] = await Promise.all([
       supabase.from("virtual_machines").select("vm_size, status, created_at, lab_template_id"),
       supabase.from("platform_settings").select("value").eq("key", "budget_cap").maybeSingle(),
       supabase.from("lab_templates").select("id, name"),
+      supabase.from("platform_settings").select("value").eq("key", "per_lab_cost_alert").maybeSingle(),
     ]);
 
-    if (budgetRes.data?.value) {
-      setBudgetCap(budgetRes.data.value as any);
-    }
+    if (budgetRes.data?.value) setBudgetCap(budgetRes.data.value as any);
+    if (labAlertRes.data?.value) setPerLabAlert(labAlertRes.data.value as any);
 
     const vms = vmRes.data;
     const labMap = new Map<string, string>();
@@ -252,6 +253,9 @@ export default function CostAnalytics() {
                 <div className="flex items-center gap-2 mb-4">
                   <Coins className="h-4 w-4 text-primary" />
                   <h3 className="text-sm font-medium text-foreground">Cost per Lab Template</h3>
+                  {perLabAlert?.enabled && perLabAlert.threshold > 0 && (
+                    <span className="text-[10px] text-muted-foreground ml-auto font-mono">Alert threshold: ${perLabAlert.threshold}</span>
+                  )}
                 </div>
                 <ResponsiveContainer width="100%" height={Math.max(200, labCosts.length * 40)}>
                   <BarChart data={labCosts} layout="vertical" margin={{ left: 20 }}>
@@ -259,11 +263,29 @@ export default function CostAnalytics() {
                     <XAxis type="number" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} />
                     <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} width={140} />
                     <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} formatter={(v: number, name: string) => [name === 'cost' ? `$${v.toFixed(2)}` : `${v}h`, name === 'cost' ? 'Cost' : 'Hours']} />
+                    {perLabAlert?.enabled && perLabAlert.threshold > 0 && (
+                      <CartesianGrid strokeDasharray="0" horizontal={false} verticalPoints={[]} />
+                    )}
                     <Bar dataKey="cost" radius={[0, 4, 4, 0]}>
-                      {labCosts.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                      {labCosts.map((entry, i) => (
+                        <Cell key={i} fill={perLabAlert?.enabled && perLabAlert.threshold > 0 && entry.cost > perLabAlert.threshold ? 'hsl(0 72% 55%)' : COLORS[i % COLORS.length]} />
+                      ))}
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+                {/* Alert list for labs exceeding threshold */}
+                {perLabAlert?.enabled && perLabAlert.threshold > 0 && labCosts.some(l => l.cost > perLabAlert.threshold) && (
+                  <div className="mt-4 space-y-2">
+                    {labCosts.filter(l => l.cost > perLabAlert.threshold).map(lab => (
+                      <div key={lab.name} className="flex items-center gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2">
+                        <AlertCircle className="h-3.5 w-3.5 text-destructive shrink-0" />
+                        <span className="text-xs text-foreground font-medium">{lab.name}</span>
+                        <span className="text-xs text-destructive font-mono ml-auto">${lab.cost.toFixed(2)}</span>
+                        <span className="text-[10px] text-muted-foreground">exceeds ${perLabAlert.threshold} threshold</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </motion.div>
             )}
 

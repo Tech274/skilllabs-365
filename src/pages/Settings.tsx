@@ -33,37 +33,43 @@ export default function Settings() {
   const [budgetEnabled, setBudgetEnabled] = useState(false);
   const [budgetPeriod, setBudgetPeriod] = useState<"daily" | "monthly">("monthly");
   const [budgetCap, setBudgetCap] = useState(100);
+  const [perLabThreshold, setPerLabThreshold] = useState(0);
+  const [perLabAlertEnabled, setPerLabAlertEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    supabase
-      .from("platform_settings")
-      .select("key, value")
-      .eq("key", "budget_cap")
-      .maybeSingle()
-      .then(({ data }) => {
-        if (data?.value) {
-          const v = data.value as any;
-          setBudgetEnabled(v.enabled ?? false);
-          setBudgetPeriod(v.period ?? "monthly");
-          setBudgetCap(v.amount ?? 100);
-        }
-      });
+    Promise.all([
+      supabase.from("platform_settings").select("key, value").eq("key", "budget_cap").maybeSingle(),
+      supabase.from("platform_settings").select("key, value").eq("key", "per_lab_cost_alert").maybeSingle(),
+    ]).then(([budgetData, labAlertData]) => {
+      if (budgetData.data?.value) {
+        const v = budgetData.data.value as any;
+        setBudgetEnabled(v.enabled ?? false);
+        setBudgetPeriod(v.period ?? "monthly");
+        setBudgetCap(v.amount ?? 100);
+      }
+      if (labAlertData.data?.value) {
+        const v = labAlertData.data.value as any;
+        setPerLabAlertEnabled(v.enabled ?? false);
+        setPerLabThreshold(v.threshold ?? 0);
+      }
+    });
   }, []);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      const { error } = await supabase
-        .from("platform_settings")
-        .upsert(
-          {
-            key: "budget_cap",
-            value: { enabled: budgetEnabled, period: budgetPeriod, amount: budgetCap } as any,
-            updated_at: new Date().toISOString(),
-          },
+      const results = await Promise.all([
+        supabase.from("platform_settings").upsert(
+          { key: "budget_cap", value: { enabled: budgetEnabled, period: budgetPeriod, amount: budgetCap } as any, updated_at: new Date().toISOString() },
           { onConflict: "key" }
-        );
+        ),
+        supabase.from("platform_settings").upsert(
+          { key: "per_lab_cost_alert", value: { enabled: perLabAlertEnabled, threshold: perLabThreshold } as any, updated_at: new Date().toISOString() },
+          { onConflict: "key" }
+        ),
+      ]);
+      const error = results.find(r => r.error)?.error;
       if (error) throw error;
       toast({ title: "Settings saved", description: "Platform configuration updated successfully." });
     } catch (err: any) {
@@ -226,6 +232,35 @@ export default function Settings() {
                   </div>
                 </>
               )}
+
+              {/* Per-Lab Cost Alert */}
+              <div className="border-t border-border pt-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label className="text-base font-semibold">Per-Lab Cost Alert</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">Highlight labs on Cost Analytics when their estimated cost exceeds a threshold</p>
+                  </div>
+                  <Switch checked={perLabAlertEnabled} onCheckedChange={setPerLabAlertEnabled} />
+                </div>
+                {perLabAlertEnabled && (
+                  <div className="space-y-3">
+                    <Label>Cost Threshold (USD per lab)</Label>
+                    <div className="flex items-center gap-3 max-w-xs">
+                      <span className="text-lg font-semibold text-foreground">$</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={perLabThreshold}
+                        onChange={(e) => setPerLabThreshold(Number(e.target.value))}
+                        className="font-mono"
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Labs exceeding this cost will be flagged with a warning on the Cost Analytics page.
+                    </p>
+                  </div>
+                )}
+              </div>
             </motion.div>
           </TabsContent>
 
