@@ -36,11 +36,13 @@ export default function CostAnalytics() {
   const [projectedMonthly, setProjectedMonthly] = useState(0);
   const [budgetCap, setBudgetCap] = useState<BudgetCap | null>(null);
   const [activeVmCount, setActiveVmCount] = useState(0);
+  const [labCosts, setLabCosts] = useState<{ name: string; cost: number; hours: number }[]>([]);
 
   const fetchCostData = useCallback(async () => {
-    const [vmRes, budgetRes] = await Promise.all([
-      supabase.from("virtual_machines").select("vm_size, status, created_at"),
+    const [vmRes, budgetRes, labRes] = await Promise.all([
+      supabase.from("virtual_machines").select("vm_size, status, created_at, lab_template_id"),
       supabase.from("platform_settings").select("value").eq("key", "budget_cap").maybeSingle(),
+      supabase.from("lab_templates").select("id, name"),
     ]);
 
     if (budgetRes.data?.value) {
@@ -48,6 +50,9 @@ export default function CostAnalytics() {
     }
 
     const vms = vmRes.data;
+    const labMap = new Map<string, string>();
+    (labRes.data || []).forEach((l: any) => labMap.set(l.id, l.name));
+
     if (vms && vms.length > 0) {
       const sizeMap = new Map<string, number>();
       const now = Date.now();
@@ -55,6 +60,7 @@ export default function CostAnalytics() {
       let monthlyTotal = 0;
       let active = 0;
       const dailyCosts = new Map<string, number>();
+      const labCostMap = new Map<string, { cost: number; hours: number }>();
 
       for (const vm of vms) {
         const createdAt = new Date(vm.created_at).getTime();
@@ -62,6 +68,11 @@ export default function CostAnalytics() {
         const rate = VM_COST_PER_HOUR[vm.vm_size] || 0.05;
         const cost = hours * rate;
         sizeMap.set(vm.vm_size, (sizeMap.get(vm.vm_size) || 0) + cost);
+
+        // Track cost per lab template
+        const labName = (vm as any).lab_template_id ? (labMap.get((vm as any).lab_template_id) || "Unknown Lab") : "Unassigned";
+        const existing = labCostMap.get(labName) || { cost: 0, hours: 0 };
+        labCostMap.set(labName, { cost: existing.cost + cost, hours: existing.hours + hours });
 
         if (vm.status === "running" || vm.status === "idle") active++;
 
@@ -92,11 +103,18 @@ export default function CostAnalytics() {
         .map(([day, cost]) => ({ day, cost: Math.round(cost * 100) / 100 }))
         .sort((a, b) => new Date(a.day).getTime() - new Date(b.day).getTime());
       setDailyTrend(trend);
+
+      setLabCosts(
+        Array.from(labCostMap.entries())
+          .map(([name, v]) => ({ name, cost: Math.round(v.cost * 100) / 100, hours: Math.round(v.hours) }))
+          .sort((a, b) => b.cost - a.cost)
+      );
     } else {
       setCostBreakdown([]);
       setTotalMonthly(0);
       setProjectedMonthly(0);
       setDailyTrend([]);
+      setLabCosts([]);
     }
     setLoading(false);
   }, []);
@@ -227,6 +245,27 @@ export default function CostAnalytics() {
                 </div>
               </motion.div>
             </div>
+
+            {/* Cost per Lab Template */}
+            {labCosts.length > 0 && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.12 }} className="rounded-xl border border-border bg-card p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Coins className="h-4 w-4 text-primary" />
+                  <h3 className="text-sm font-medium text-foreground">Cost per Lab Template</h3>
+                </div>
+                <ResponsiveContainer width="100%" height={Math.max(200, labCosts.length * 40)}>
+                  <BarChart data={labCosts} layout="vertical" margin={{ left: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 14% 18%)" horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} />
+                    <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} width={140} />
+                    <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} formatter={(v: number, name: string) => [name === 'cost' ? `$${v.toFixed(2)}` : `${v}h`, name === 'cost' ? 'Cost' : 'Hours']} />
+                    <Bar dataKey="cost" radius={[0, 4, 4, 0]}>
+                      {labCosts.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </motion.div>
+            )}
 
             <AiInsightCard
               type="cost_insight"
