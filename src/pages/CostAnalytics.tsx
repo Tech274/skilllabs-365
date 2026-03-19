@@ -246,6 +246,27 @@ export default function CostAnalytics() {
               </motion.div>
             </div>
 
+            {/* Cost per Lab Template */}
+            {labCosts.length > 0 && (
+              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.12 }} className="rounded-xl border border-border bg-card p-5">
+                <div className="flex items-center gap-2 mb-4">
+                  <Coins className="h-4 w-4 text-primary" />
+                  <h3 className="text-sm font-medium text-foreground">Cost per Lab Template</h3>
+                </div>
+                <ResponsiveContainer width="100%" height={Math.max(200, labCosts.length * 40)}>
+                  <BarChart data={labCosts} layout="vertical" margin={{ left: 20 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="hsl(220 14% 18%)" horizontal={false} />
+                    <XAxis type="number" tick={{ fontSize: 10, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} tickFormatter={v => `$${v}`} />
+                    <YAxis type="category" dataKey="name" tick={{ fontSize: 11, fill: 'hsl(215 12% 52%)' }} tickLine={false} axisLine={false} width={140} />
+                    <Tooltip contentStyle={{ background: 'hsl(220 18% 10%)', border: '1px solid hsl(220 14% 18%)', borderRadius: '8px', fontSize: '12px', color: 'hsl(210 20% 92%)' }} formatter={(v: number, name: string) => [name === 'cost' ? `$${v.toFixed(2)}` : `${v}h`, name === 'cost' ? 'Cost' : 'Hours']} />
+                    <Bar dataKey="cost" radius={[0, 4, 4, 0]}>
+                      {labCosts.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </motion.div>
+            )}
+
             <AiInsightCard
               type="cost_insight"
               data={{ cost_breakdown: costBreakdown, total_monthly: totalMonthly, projected_monthly: projectedMonthly, budget_cap: budgetCap }}
