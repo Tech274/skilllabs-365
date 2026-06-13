@@ -14,6 +14,42 @@ export type Database = {
   }
   public: {
     Tables: {
+      access_rules: {
+        Row: {
+          active: boolean
+          asset_id: string
+          asset_type: string
+          created_at: string
+          created_by: string | null
+          id: string
+          required_plan: string | null
+          required_role: string | null
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          asset_id: string
+          asset_type: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          required_plan?: string | null
+          required_role?: string | null
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          asset_id?: string
+          asset_type?: string
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          required_plan?: string | null
+          required_role?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
       activity_logs: {
         Row: {
           action: string
@@ -40,6 +76,50 @@ export type Database = {
           target_user_id?: string
         }
         Relationships: []
+      }
+      certifications_catalog: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          name: string
+          org_id: string | null
+          published: boolean
+          slug: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name: string
+          org_id?: string | null
+          published?: boolean
+          slug: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          name?: string
+          org_id?: string | null
+          published?: boolean
+          slug?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "certifications_catalog_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       daily_reports: {
         Row: {
@@ -148,6 +228,98 @@ export type Database = {
         }
         Relationships: []
       }
+      manual_access_grants: {
+        Row: {
+          active: boolean
+          asset_id: string | null
+          asset_type: string | null
+          certification_slug: string | null
+          created_at: string
+          ends_at: string | null
+          granted_by: string | null
+          id: string
+          note: string | null
+          plan_key: string | null
+          starts_at: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          active?: boolean
+          asset_id?: string | null
+          asset_type?: string | null
+          certification_slug?: string | null
+          created_at?: string
+          ends_at?: string | null
+          granted_by?: string | null
+          id?: string
+          note?: string | null
+          plan_key?: string | null
+          starts_at?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          active?: boolean
+          asset_id?: string | null
+          asset_type?: string | null
+          certification_slug?: string | null
+          created_at?: string
+          ends_at?: string | null
+          granted_by?: string | null
+          id?: string
+          note?: string | null
+          plan_key?: string | null
+          starts_at?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      mock_exams: {
+        Row: {
+          cert_slug: string
+          created_at: string
+          created_by: string | null
+          duration_min: number
+          id: string
+          org_id: string | null
+          published: boolean
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          cert_slug: string
+          created_at?: string
+          created_by?: string | null
+          duration_min?: number
+          id?: string
+          org_id?: string | null
+          published?: boolean
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          cert_slug?: string
+          created_at?: string
+          created_by?: string | null
+          duration_min?: number
+          id?: string
+          org_id?: string | null
+          published?: boolean
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "mock_exams_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       notifications: {
         Row: {
           created_at: string
@@ -175,6 +347,65 @@ export type Database = {
           title?: string
           type?: string
           user_id?: string
+        }
+        Relationships: []
+      }
+      org_members: {
+        Row: {
+          created_at: string
+          id: string
+          org_id: string
+          org_role: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          org_id: string
+          org_role: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          org_id?: string
+          org_role?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "org_members_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      organizations: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          id: string
+          name: string
+          slug: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          name: string
+          slug: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          name?: string
+          slug?: string
+          updated_at?: string
         }
         Relationships: []
       }
@@ -258,6 +489,119 @@ export type Database = {
           user_id?: string
         }
         Relationships: []
+      }
+      question_bank: {
+        Row: {
+          answer: string
+          choices: Json
+          created_at: string
+          created_by: string | null
+          explanation: string | null
+          id: string
+          mock_exam_id: string
+          org_id: string | null
+          prompt: string
+          updated_at: string
+        }
+        Insert: {
+          answer: string
+          choices?: Json
+          created_at?: string
+          created_by?: string | null
+          explanation?: string | null
+          id?: string
+          mock_exam_id: string
+          org_id?: string | null
+          prompt: string
+          updated_at?: string
+        }
+        Update: {
+          answer?: string
+          choices?: Json
+          created_at?: string
+          created_by?: string | null
+          explanation?: string | null
+          id?: string
+          mock_exam_id?: string
+          org_id?: string | null
+          prompt?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "question_bank_mock_exam_id_fkey"
+            columns: ["mock_exam_id"]
+            isOneToOne: false
+            referencedRelation: "mock_exams"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "question_bank_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      resources: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          description: string | null
+          downloads_enabled: boolean
+          external_url: string | null
+          id: string
+          kind: string
+          org_id: string | null
+          published: boolean
+          required_plan: string | null
+          required_role: string | null
+          storage_path: string | null
+          title: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          downloads_enabled?: boolean
+          external_url?: string | null
+          id?: string
+          kind: string
+          org_id?: string | null
+          published?: boolean
+          required_plan?: string | null
+          required_role?: string | null
+          storage_path?: string | null
+          title: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          downloads_enabled?: boolean
+          external_url?: string | null
+          id?: string
+          kind?: string
+          org_id?: string | null
+          published?: boolean
+          required_plan?: string | null
+          required_role?: string | null
+          storage_path?: string | null
+          title?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "resources_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       session_events: {
         Row: {
@@ -351,6 +695,42 @@ export type Database = {
           },
         ]
       }
+      subscriptions: {
+        Row: {
+          created_at: string
+          current_period_end: string | null
+          id: string
+          plan_key: string
+          provider: string | null
+          provider_subscription_id: string | null
+          status: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          current_period_end?: string | null
+          id?: string
+          plan_key: string
+          provider?: string | null
+          provider_subscription_id?: string | null
+          status?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          current_period_end?: string | null
+          id?: string
+          plan_key?: string
+          provider?: string | null
+          provider_subscription_id?: string | null
+          status?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       user_roles: {
         Row: {
           id: string
@@ -427,6 +807,10 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
+      has_asset_access: {
+        Args: { _asset_id: string; _asset_type: string; _user_id: string }
+        Returns: boolean
+      }
       has_role: {
         Args: {
           _role: Database["public"]["Enums"]["app_role"]
@@ -434,6 +818,15 @@ export type Database = {
         }
         Returns: boolean
       }
+      is_org_member: {
+        Args: { _org_id: string; _user_id: string }
+        Returns: boolean
+      }
+      is_org_role: {
+        Args: { _org_id: string; _role: string; _user_id: string }
+        Returns: boolean
+      }
+      is_platform_admin: { Args: { _user_id: string }; Returns: boolean }
     }
     Enums: {
       app_role:
