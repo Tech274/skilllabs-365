@@ -502,7 +502,35 @@ Deno.serve(async (req) => {
       console.error("Guacamole orphan cleanup failed:", e);
     }
 
+    // 7. Expire access_sessions whose expires_at has passed
+    try {
+      const { data: expired } = await supabase
+        .from("access_sessions")
+        .select("id, provider, provider_session_ref")
+        .in("status", ["created", "active"])
+        .lt("expires_at", new Date().toISOString())
+        .limit(500);
+
+      if (expired?.length) {
+        for (const s of expired) {
+          await supabase.from("access_sessions").update({
+            status: "expired",
+            ended_at: new Date().toISOString(),
+          }).eq("id", s.id);
+          await supabase.from("access_session_events").insert({
+            session_id: s.id,
+            event_type: "session.expired",
+            payload: { reason: "expires_at_reached" },
+          });
+        }
+        results.push(`Access sessions expired: ${expired.length}`);
+      }
+    } catch (e) {
+      console.error("access_sessions expiry sweep failed:", e);
+    }
+
     console.log(`Cleanup completed: ${results.length} actions taken`, results);
+
 
 
     return new Response(
