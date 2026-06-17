@@ -1,4 +1,5 @@
 import { corsHeaders, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { azureStatusToVmStatus } from "../_shared/vm-state.ts";
 
 
 Deno.serve(async (req) => {
@@ -73,9 +74,9 @@ Deno.serve(async (req) => {
 
     const ivData = await ivRes.json();
     const statuses = ivData.statuses || [];
-    const powerState = statuses.find((s: { code: string }) => s.code.startsWith("PowerState/"));
+    const mapped = azureStatusToVmStatus(statuses);
 
-    if (powerState?.code === "PowerState/running") {
+    if (mapped === "running") {
       // Get updated private IP
       const nicName = `${vmName}-nic`;
       const nicRes = await fetch(
@@ -89,14 +90,15 @@ Deno.serve(async (req) => {
       }
 
       await supabase.from("virtual_machines").update({ status: "running", private_ip: privateIp }).eq("id", vm_id);
-      return new Response(JSON.stringify({ status: "running", private_ip: privateIp }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ status: "running", private_ip: privateIp });
     }
 
-    return new Response(JSON.stringify({ status: "provisioning" }), {
-      headers: { ...corsHeaders, "Content-Type": "application/json" },
-    });
+    if (mapped === "failed" || mapped === "deallocated" || mapped === "stopped") {
+      await supabase.from("virtual_machines").update({ status: mapped }).eq("id", vm_id);
+      return jsonResponse({ status: mapped });
+    }
+
+    return jsonResponse({ status: "provisioning" });
   } catch (error: unknown) {
     console.error("check-vm-status error:", error);
     return new Response(
