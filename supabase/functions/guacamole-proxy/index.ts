@@ -228,6 +228,17 @@ Deno.serve(async (req) => {
       if (vmError || !vm) throw new Error(`VM not found: ${vmError?.message || vm_id}`);
       if (!vm.private_ip) throw new Error("VM has no private IP assigned");
 
+      // Owner or admin only
+      if (vm.user_id !== user.id) {
+        const { data: isAdmin } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
+        if (!isAdmin) {
+          return new Response(JSON.stringify({ error: "Forbidden" }), {
+            status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+
+
       const labTemplate = Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates;
       const protocol = labTemplate?.protocol?.toUpperCase() === "SSH" ? "ssh" : "rdp";
       const port = protocol === "ssh" ? "22" : "3389";
@@ -321,6 +332,22 @@ Deno.serve(async (req) => {
       const { session_id, connection_id } = body;
       if (!session_id) throw new Error("session_id is required");
 
+      // Verify caller owns the session (or is admin)
+      const { data: sessionRow } = await supabase
+        .from("sessions")
+        .select("user_id")
+        .eq("id", session_id)
+        .maybeSingle();
+      if (!sessionRow) throw new Error("Session not found");
+      if (sessionRow.user_id !== user.id) {
+        const { data: isAdmin } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
+        if (!isAdmin) {
+          return new Response(JSON.stringify({ error: "Forbidden" }), {
+            status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+
       // End the session in DB
       await supabase
         .from("sessions")
@@ -329,6 +356,7 @@ Deno.serve(async (req) => {
           status: "completed",
         })
         .eq("id", session_id);
+
 
       // Delete Guacamole connection if provided
       if (connection_id) {

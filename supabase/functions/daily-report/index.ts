@@ -1,9 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { corsHeaders, requireAdmin } from "../_shared/auth.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
-};
 
 async function getAzureToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
   const res = await fetch(
@@ -29,8 +26,12 @@ Deno.serve(async (req) => {
   }
 
   try {
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
+
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
     const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID")!;
     const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
     const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;

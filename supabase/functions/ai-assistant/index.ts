@@ -1,10 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { corsHeaders, requireUser } from "../_shared/auth.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
 
 const SYSTEM_PROMPTS: Record<string, string> = {
   cost_insight: `You are a cloud cost optimization advisor for a virtual lab platform running on Azure. Analyze the provided cost and VM data. Give specific, actionable recommendations to reduce spend. Mention exact VM sizes, suggest downgrades or Spot VMs where appropriate. Be concise — use bullet points. Focus on ROI and savings percentages.`,
@@ -30,7 +26,11 @@ serve(async (req) => {
   }
 
   try {
+    const auth = await requireUser(req);
+    if (auth instanceof Response) return auth;
+
     const { type, data } = await req.json();
+
 
     if (!type || !SYSTEM_PROMPTS[type]) {
       return new Response(
