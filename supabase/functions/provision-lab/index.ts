@@ -424,7 +424,7 @@ Deno.serve(async (req) => {
   } catch (error: unknown) {
     console.error("provision-lab error:", error);
     const rawMessage = error instanceof Error ? error.message : "Unknown error";
-    const { mapAzureError } = await import("../_shared/vm-state.ts");
+    // mapAzureError imported at top.
     const userMessage = mapAzureError(rawMessage);
 
     return new Response(
