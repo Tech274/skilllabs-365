@@ -640,6 +640,8 @@ export type Database = {
           connection_quality: string
           disconnects: number
           ended_at: string | null
+          guac_connection_id: string | null
+          guac_username: string | null
           id: string
           idle_minutes: number
           lab_template_id: string | null
@@ -654,6 +656,8 @@ export type Database = {
           connection_quality?: string
           disconnects?: number
           ended_at?: string | null
+          guac_connection_id?: string | null
+          guac_username?: string | null
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null
@@ -668,6 +672,8 @@ export type Database = {
           connection_quality?: string
           disconnects?: number
           ended_at?: string | null
+          guac_connection_id?: string | null
+          guac_username?: string | null
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null
