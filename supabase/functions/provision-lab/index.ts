@@ -402,36 +402,10 @@ Deno.serve(async (req) => {
       .eq("id", vmRecord.id);
 
     // 5. Return immediately — client will poll virtual_machines table for status
-    // Background: kick off polling but don't await it (fire-and-forget via EdgeRuntime.waitUntil pattern)
-    const bgPoll = (async () => {
-      try {
-        const status = await waitForVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
-        if (status === "running") {
-          // Re-fetch private IP now that VM is fully up
-          const nicName = `${vmName}-nic`;
-          const nicRes = await fetch(
-            `https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Network/networkInterfaces/${nicName}?api-version=2024-03-01`,
-            { headers: { Authorization: `Bearer ${azureToken}` } }
-          );
-          let finalIp = vmResult.privateIp;
-          if (nicRes.ok) {
-            const nicData = await nicRes.json();
-            finalIp = nicData?.properties?.ipConfigurations?.[0]?.properties?.privateIPAddress || finalIp;
-          }
-          await supabase.from("virtual_machines").update({ status: "running", private_ip: finalIp }).eq("id", vmRecord.id);
-        } else {
-          await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vmRecord.id);
-        }
-      } catch (e) {
-        console.error("Background VM poll failed:", e);
-        await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vmRecord.id);
-      }
-    })();
-
-    // Use waitUntil if available (Deno Deploy), otherwise just let it run
-    if (typeof (globalThis as any).EdgeRuntime?.waitUntil === "function") {
-      (globalThis as any).EdgeRuntime.waitUntil(bgPoll);
-    }
+    // NOTE: Polling Azure for "running" is intentionally NOT done here.
+    // The client polls the `check-vm-status` edge function (single source of truth),
+    // which calls Azure on demand, updates the row, and recognizes running/failed/deallocated/stopped.
+    // The `cleanup-idle-labs` cron also reconciles any VM stuck in 'provisioning' >10 minutes.
 
     return new Response(
       JSON.stringify({
@@ -449,16 +423,8 @@ Deno.serve(async (req) => {
   } catch (error: unknown) {
     console.error("provision-lab error:", error);
     const rawMessage = error instanceof Error ? error.message : "Unknown error";
-
-    // Parse user-friendly error message
-    let userMessage = rawMessage;
-    if (rawMessage.includes("exceeding approved") && rawMessage.includes("Cores quota")) {
-      userMessage = "Azure VM quota exceeded. All available compute cores are in use. Please stop or delete unused VMs, or contact your administrator to increase the quota.";
-    } else if (rawMessage.includes("OperationNotAllowed")) {
-      userMessage = "This operation is not currently allowed by Azure. Please try again later or contact your administrator.";
-    } else if (rawMessage.includes("Azure auth failed")) {
-      userMessage = "Azure authentication failed. Please contact your administrator.";
-    }
+    const { mapAzureError } = await import("../_shared/vm-state.ts");
+    const userMessage = mapAzureError(rawMessage);
 
     return new Response(
       JSON.stringify({ error: userMessage }),
