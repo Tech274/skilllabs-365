@@ -512,7 +512,15 @@ Deno.serve(async (req) => {
         .limit(500);
 
       if (expired?.length) {
+        const { revokeSession: awsRevoke } = await import("../_shared/cloud-providers/aws.ts");
+        const { revokeSession: azureRevoke } = await import("../_shared/cloud-providers/azure.ts");
+        const { revokeSession: gcpRevoke } = await import("../_shared/cloud-providers/gcp.ts");
         for (const s of expired) {
+          try {
+            if (s.provider === "aws") await awsRevoke(s.provider_session_ref);
+            else if (s.provider === "azure") await azureRevoke(s.provider_session_ref);
+            else await gcpRevoke(s.provider_session_ref);
+          } catch (e) { console.warn(`revoke failed for session ${s.id}:`, e); }
           await supabase.from("access_sessions").update({
             status: "expired",
             ended_at: new Date().toISOString(),
