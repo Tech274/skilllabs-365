@@ -28,6 +28,10 @@ import SessionPlayback from "./pages/SessionPlayback";
 import Login from "./pages/Login";
 import Signup from "./pages/Signup";
 import DailyReports from "./pages/DailyReports";
+import AccessCatalogue from "./pages/AccessCatalogue";
+import AccessTemplateDetail from "./pages/AccessTemplateDetail";
+import UserCloudAccess from "./pages/UserCloudAccess";
+
 
 const queryClient = new QueryClient();
 
@@ -56,6 +60,11 @@ const App = () => (
                 <Route path="/users" element={<RoleProtectedRoute allowedRoles={["admin"]}><UserManagement /></RoleProtectedRoute>} />
                 <Route path="/settings" element={<RoleProtectedRoute allowedRoles={["admin"]}><Settings /></RoleProtectedRoute>} />
                 <Route path="/reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><DailyReports /></RoleProtectedRoute>} />
+                <Route path="/admin/access-catalogue" element={<RoleProtectedRoute allowedRoles={["admin"]}><AccessCatalogue /></RoleProtectedRoute>} />
+                <Route path="/admin/access-templates/:id" element={<RoleProtectedRoute allowedRoles={["admin"]}><AccessTemplateDetail /></RoleProtectedRoute>} />
+                <Route path="/cloud-access" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
+                <Route path="/cloud-access/:id" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
+
                 {/* Shared routes */}
                 <Route path="/sessions" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><Sessions /></RoleProtectedRoute>} />
                 <Route path="/sessions/:sessionId/playback" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><SessionPlayback /></RoleProtectedRoute>} />

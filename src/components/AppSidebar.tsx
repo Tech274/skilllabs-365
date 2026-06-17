@@ -1,8 +1,9 @@
 import {
   LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
   Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
-  Loader2, X,
+  Loader2, X, KeyRound,
 } from "lucide-react";
+
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/use-auth";
@@ -24,9 +25,11 @@ const adminItems = [
   { title: "Regions", url: "/regions", icon: Globe },
   { title: "Cost Analytics", url: "/costs", icon: DollarSign },
   { title: "Lab Management", url: "/labs", icon: BookOpen },
+  { title: "Cloud Access", url: "/admin/access-catalogue", icon: KeyRound },
   { title: "Audit Log", url: "/audit-log", icon: History },
   { title: "User Management", url: "/users", icon: Users },
   { title: "Daily Reports", url: "/reports", icon: FileText },
+
 ];
 
 const instructorItems = [
@@ -36,7 +39,9 @@ const instructorItems = [
 
 const studentItems = [
   { title: "Dashboard", url: "/student", icon: LayoutDashboard },
+  { title: "Cloud Access", url: "/cloud-access", icon: KeyRound },
 ];
+
 
 const systemItems = [
   { title: "Health", url: "/health", icon: Activity },
