@@ -171,38 +171,7 @@ async function createAzureVM(
   };
 }
 
-/** Poll Azure VM until it's running (max 5 minutes) */
-async function waitForVM(
-  token: string,
-  subscriptionId: string,
-  resourceGroup: string,
-  vmName: string
-): Promise<string> {
-  const apiVersion = "2024-03-01";
-  const maxAttempts = 30;
 
-  for (let i = 0; i < maxAttempts; i++) {
-    const res = await fetch(
-      `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}/instanceView?api-version=${apiVersion}`,
-      {
-        headers: { Authorization: `Bearer ${token}` },
-      }
-    );
-
-    if (res.ok) {
-      const data = await res.json();
-      const statuses = data.statuses || [];
-      const powerState = statuses.find((s: { code: string }) => s.code.startsWith("PowerState/"));
-      if (powerState?.code === "PowerState/running") {
-        return "running";
-      }
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 10000));
-  }
-
-  return "timeout";
-}
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
