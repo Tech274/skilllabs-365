@@ -64,7 +64,7 @@ export default function LabSession() {
   const [timeRemaining, setTimeRemaining] = useState("");
   const [session, setSession] = useState<SessionInfo>(defaultSession);
   const [guacIframeUrl, setGuacIframeUrl] = useState("");
-  const [guacConnectionId, setGuacConnectionId] = useState<string | null>(null);
+
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
   const [iframeLoadFailed, setIframeLoadFailed] = useState(false);
   const [idleWarningMinutes, setIdleWarningMinutes] = useState(0);
