@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { mapAzureError } from "../_shared/vm-state.ts";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
