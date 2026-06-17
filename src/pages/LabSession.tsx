@@ -195,14 +195,30 @@ export default function LabSession() {
     }
   };
 
-  const handleReconnect = () => {
+  const handleReconnect = async () => {
     setConnectionState("connecting");
-    if (vmId) {
-      createGuacSession(vmId);
-    } else {
-      setTimeout(() => setConnectionState("connected"), 2000);
+    try {
+      if (dbSessionId) {
+        // Re-issue a scoped Guacamole token without recreating the connection
+        const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
+          body: { action: "reconnect", session_id: dbSessionId },
+        });
+        if (error) throw error;
+        if (data?.error) throw new Error(data.error);
+        setGuacIframeUrl(data.iframe_url);
+        setConnectionState("connected");
+        setIframeLoadFailed(false);
+      } else if (vmId) {
+        await createGuacSession(vmId);
+      } else {
+        setTimeout(() => setConnectionState("connected"), 2000);
+      }
+      toast({ title: "Reconnecting", description: "Re-establishing your lab session..." });
+    } catch (err) {
+      console.error("Reconnect failed:", err);
+      setConnectionState("error");
+      toast({ title: "Reconnect failed", description: err instanceof Error ? err.message : "Unknown error", variant: "destructive" });
     }
-    toast({ title: "Reconnecting", description: "Attempting to reconnect to the lab session..." });
   };
 
   const handleClipboardSync = () => {
@@ -213,16 +229,13 @@ export default function LabSession() {
     if (dbSessionId) {
       try {
         await supabase.functions.invoke("guacamole-proxy", {
-          body: {
-            action: "end-session",
-            session_id: dbSessionId,
-            connection_id: guacConnectionId,
-          },
+          body: { action: "end-session", session_id: dbSessionId },
         });
       } catch (err) {
         console.error("Failed to end session cleanly:", err);
       }
     }
+
     // Trigger VM cleanup/deallocation
     if (vmId) {
       try {
