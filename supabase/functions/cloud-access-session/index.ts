@@ -28,7 +28,28 @@ async function logEvent(supabase: any, session_id: string, event_type: string, a
   await supabase.from("access_session_events").insert({ session_id, event_type, actor_id, payload });
 }
 
-async function dispatchCreate(provider: Provider, ctx: { userId: string; templateConfig: Record<string, unknown>; region: string | null; durationMinutes: number }): Promise<ProviderResult> {
+interface DispatchCtx {
+  userId: string;
+  templateConfig: Record<string, unknown>;
+  region: string | null;
+  durationMinutes: number;
+  azureObjectId?: string | null;
+  azureDefaults?: Record<string, unknown> | null;
+}
+
+async function loadProviderExtras(supabase: any, provider: Provider, userId: string): Promise<Partial<DispatchCtx>> {
+  if (provider !== "azure") return {};
+  const [{ data: profile }, { data: cfg }] = await Promise.all([
+    supabase.from("profiles").select("azure_object_id").eq("user_id", userId).maybeSingle(),
+    supabase.from("cloud_provider_config").select("config").eq("provider", "azure").maybeSingle(),
+  ]);
+  return {
+    azureObjectId: profile?.azure_object_id ?? null,
+    azureDefaults: cfg?.config ?? null,
+  };
+}
+
+async function dispatchCreate(provider: Provider, ctx: DispatchCtx): Promise<ProviderResult> {
   if (provider === "aws") return awsCreate(ctx);
   if (provider === "azure") return azureCreate(ctx);
   return gcpCreate(ctx);
@@ -89,11 +110,13 @@ Deno.serve(async (req) => {
       await logEvent(supabase, pending.id, "session.created", user.id, { template_id });
 
       try {
+        const extras = await loadProviderExtras(supabase, tpl.provider as Provider, user.id);
         const result = await dispatchCreate(tpl.provider as Provider, {
           userId: user.id,
           templateConfig: tpl.provider_config || {},
           region: tpl.region,
           durationMinutes: tpl.session_duration_minutes,
+          ...extras,
         });
 
         await supabase.from("access_sessions").update({
@@ -135,11 +158,13 @@ Deno.serve(async (req) => {
 
       try {
         await dispatchRevoke(sess.provider, sess.provider_session_ref);
+        const extras = await loadProviderExtras(supabase, sess.provider, user.id);
         const result = await dispatchCreate(sess.provider, {
           userId: user.id,
           templateConfig: tpl.provider_config || {},
           region: tpl.region,
           durationMinutes: tpl.session_duration_minutes,
+          ...extras,
         });
 
         await supabase.from("access_sessions").update({
