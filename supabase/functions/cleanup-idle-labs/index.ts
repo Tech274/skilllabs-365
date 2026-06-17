@@ -83,8 +83,12 @@ Deno.serve(async (req) => {
   }
 
   try {
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
+
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+
     const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID")!;
     const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
     const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
