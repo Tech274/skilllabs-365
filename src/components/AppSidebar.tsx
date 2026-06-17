@@ -26,6 +26,8 @@ const adminItems = [
   { title: "Cost Analytics", url: "/costs", icon: DollarSign },
   { title: "Lab Management", url: "/labs", icon: BookOpen },
   { title: "Cloud Access", url: "/admin/access-catalogue", icon: KeyRound },
+  { title: "Cloud Reports", url: "/admin/cloud-reports", icon: FileText },
+  { title: "Cloud Providers", url: "/admin/cloud-providers", icon: Cloud },
   { title: "Audit Log", url: "/audit-log", icon: History },
   { title: "User Management", url: "/users", icon: Users },
   { title: "Daily Reports", url: "/reports", icon: FileText },
