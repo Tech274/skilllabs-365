@@ -759,7 +759,7 @@ export type Database = {
           lab_template_id: string | null
           private_ip: string | null
           region: string
-          status: string
+          status: Database["public"]["Enums"]["vm_status"]
           updated_at: string
           user_id: string | null
           vm_size: string
@@ -773,7 +773,7 @@ export type Database = {
           lab_template_id?: string | null
           private_ip?: string | null
           region?: string
-          status?: string
+          status?: Database["public"]["Enums"]["vm_status"]
           updated_at?: string
           user_id?: string | null
           vm_size?: string
@@ -787,7 +787,7 @@ export type Database = {
           lab_template_id?: string | null
           private_ip?: string | null
           region?: string
-          status?: string
+          status?: Database["public"]["Enums"]["vm_status"]
           updated_at?: string
           user_id?: string | null
           vm_size?: string
@@ -837,6 +837,16 @@ export type Database = {
         | "content_admin"
         | "org_exec"
         | "org_manager"
+      vm_status:
+        | "provisioning"
+        | "starting"
+        | "running"
+        | "idle"
+        | "expired"
+        | "stopped"
+        | "deallocated"
+        | "terminated"
+        | "failed"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -972,6 +982,17 @@ export const Constants = {
         "content_admin",
         "org_exec",
         "org_manager",
+      ],
+      vm_status: [
+        "provisioning",
+        "starting",
+        "running",
+        "idle",
+        "expired",
+        "stopped",
+        "deallocated",
+        "terminated",
+        "failed",
       ],
     },
   },
