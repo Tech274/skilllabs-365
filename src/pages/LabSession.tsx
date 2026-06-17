@@ -89,8 +89,8 @@ export default function LabSession() {
       if (data?.error) throw new Error(data.error);
 
       setGuacIframeUrl(data.iframe_url);
-      setGuacConnectionId(data.connection_id);
       setDbSessionId(data.session_id);
+
       setSession((prev) => ({
         ...prev,
         protocol: data.protocol || prev.protocol,
