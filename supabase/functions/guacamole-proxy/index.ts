@@ -16,74 +16,42 @@ interface GuacConnection {
   parameters?: Record<string, string>;
 }
 
-/** Normalize and build Guacamole base URL candidates */
 function buildGuacBaseCandidates(rawUrl: string): string[] {
   const withoutHash = rawUrl.split("#")[0] || "";
   const withoutQuery = withoutHash.split("?")[0] || "";
   let normalized = withoutQuery.trim().replace(/\/+$/, "");
-
-  // If user provided an /api URL, strip it because API paths are appended below
-  if (normalized.endsWith("/api")) {
-    normalized = normalized.slice(0, -4);
-  }
-
+  if (normalized.endsWith("/api")) normalized = normalized.slice(0, -4);
   const guacamoleSuffix = "/guacamole";
   const candidates = [normalized];
-
-  if (normalized.endsWith(guacamoleSuffix)) {
-    candidates.push(normalized.slice(0, -guacamoleSuffix.length));
-  } else {
-    candidates.push(`${normalized}${guacamoleSuffix}`);
-  }
-
+  if (normalized.endsWith(guacamoleSuffix)) candidates.push(normalized.slice(0, -guacamoleSuffix.length));
+  else candidates.push(`${normalized}${guacamoleSuffix}`);
   return [...new Set(candidates.filter(Boolean))];
 }
 
-/** Authenticate with Guacamole and get an auth token + resolved base URL */
-async function getGuacToken(
-  guacUrl: string,
-  username: string,
-  password: string
-): Promise<{ token: string; baseUrl: string }> {
+async function getGuacToken(guacUrl: string, username: string, password: string): Promise<{ token: string; baseUrl: string }> {
   const candidates = buildGuacBaseCandidates(guacUrl);
-
   for (const baseUrl of candidates) {
     const res = await fetch(`${baseUrl}/api/tokens`, {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
     });
-
-    if (res.status === 404) {
-      await res.text(); // consume body before trying next candidate
-      continue;
-    }
-
-    if (!res.ok) {
-      const body = await res.text();
-      throw new Error(`Guacamole auth failed [${res.status}]: ${body}`);
-    }
-
+    if (res.status === 404) { await res.text(); continue; }
+    if (!res.ok) throw new Error(`Guacamole auth failed [${res.status}]: ${await res.text()}`);
     const data = await res.json();
-    if (!data?.authToken) {
-      throw new Error("Guacamole auth response missing authToken");
-    }
-
+    if (!data?.authToken) throw new Error("Guacamole auth response missing authToken");
     return { token: data.authToken, baseUrl };
   }
-
-  throw new Error(
-    `Guacamole API not found. Tried base URLs: ${candidates.join(", ")}. Check GUACAMOLE_URL secret.`
-  );
+  throw new Error(`Guacamole API not found. Tried: ${candidates.join(", ")}.`);
 }
 
-/** Create a connection in Guacamole and return the connection ID */
-async function createGuacConnection(
-  guacBaseUrl: string,
-  token: string,
-  dataSource: string,
-  conn: GuacConnection
-): Promise<string> {
+async function deleteGuacToken(guacBaseUrl: string, token: string): Promise<void> {
+  try {
+    await fetch(`${guacBaseUrl}/api/tokens/${token}`, { method: "DELETE" });
+  } catch (e) { console.warn("Failed to revoke admin guac token:", e); }
+}
+
+async function createGuacConnection(guacBaseUrl: string, token: string, dataSource: string, conn: GuacConnection): Promise<string> {
   const payload: Record<string, unknown> = {
     parentIdentifier: "ROOT",
     name: conn.name,
@@ -97,103 +65,84 @@ async function createGuacConnection(
       ...(conn.password && { password: conn.password }),
       ...(conn.parameters || {}),
     },
-    attributes: {
-      "max-connections": "2",
-      "max-connections-per-user": "1",
-    },
+    attributes: { "max-connections": "2", "max-connections-per-user": "1" },
   };
-
-  const res = await fetch(
-    `${guacBaseUrl}/api/session/data/${dataSource}/connections?token=${token}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    }
-  );
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Failed to create Guacamole connection [${res.status}]: ${body}`);
-  }
-
-  const result = await res.json();
-  return result.identifier;
+  const res = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/connections?token=${token}`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(`Failed to create Guacamole connection [${res.status}]: ${await res.text()}`);
+  return (await res.json()).identifier;
 }
 
-/** Delete a connection in Guacamole */
-async function deleteGuacConnection(
-  guacBaseUrl: string,
-  token: string,
-  dataSource: string,
-  connectionId: string
+async function deleteGuacConnection(guacBaseUrl: string, token: string, dataSource: string, connectionId: string): Promise<void> {
+  const res = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/connections/${connectionId}?token=${token}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) console.error(`Failed to delete connection ${connectionId}: ${await res.text()}`);
+}
+
+async function createScopedGuacUser(
+  guacBaseUrl: string, adminToken: string, dataSource: string,
+  username: string, password: string, connectionId: string
 ): Promise<void> {
-  const res = await fetch(
-    `${guacBaseUrl}/api/session/data/${dataSource}/connections/${connectionId}?token=${token}`,
-    { method: "DELETE" }
-  );
-  if (!res.ok) {
-    const body = await res.text();
-    console.error(`Failed to delete connection ${connectionId}: ${body}`);
-  }
+  // Create user
+  const userRes = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users?token=${adminToken}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username, password, attributes: { disabled: "", expired: "", "valid-from": "", "valid-until": "", "access-window-start": "", "access-window-end": "", "timezone": null } }),
+  });
+  if (!userRes.ok) throw new Error(`Failed to create scoped guac user [${userRes.status}]: ${await userRes.text()}`);
+
+  // Grant READ permission on the connection
+  const permRes = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users/${encodeURIComponent(username)}/permissions?token=${adminToken}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify([{ op: "add", path: `/connectionPermissions/${connectionId}`, value: "READ" }]),
+  });
+  if (!permRes.ok) throw new Error(`Failed to grant connection permission [${permRes.status}]: ${await permRes.text()}`);
 }
 
-/** Get available data sources */
+async function deleteScopedGuacUser(guacBaseUrl: string, adminToken: string, dataSource: string, username: string): Promise<void> {
+  const res = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users/${encodeURIComponent(username)}?token=${adminToken}`, { method: "DELETE" });
+  if (!res.ok && res.status !== 404) console.error(`Failed to delete user ${username}: ${await res.text()}`);
+}
+
 async function getDataSource(guacBaseUrl: string, token: string): Promise<string> {
   const listRes = await fetch(`${guacBaseUrl}/api/session/data?token=${token}`);
-
   if (listRes.ok) {
-    const rawSources = await listRes.json();
-    const sources: string[] = Array.isArray(rawSources)
-      ? rawSources
-      : Object.keys(rawSources || {});
-
+    const raw = await listRes.json();
+    const sources: string[] = Array.isArray(raw) ? raw : Object.keys(raw || {});
     return sources.find((s) => s === "postgresql") || sources[0] || "postgresql";
   }
-
-  const listBody = await listRes.text();
-  if (listRes.status !== 404) {
-    throw new Error(`Failed to get data sources [${listRes.status}]: ${listBody}`);
+  await listRes.text();
+  if (listRes.status !== 404) throw new Error(`Failed to get data sources [${listRes.status}]`);
+  for (const source of ["postgresql", "mysql", "postgresql-shared"]) {
+    const check = await fetch(`${guacBaseUrl}/api/session/data/${source}/connections?token=${token}`);
+    await check.text();
+    if (check.status !== 404) return source;
   }
+  throw new Error(`Failed to resolve Guacamole data source at ${guacBaseUrl}`);
+}
 
-  // Fallback for deployments where /api/session/data is not exposed
-  const fallbackSources = ["postgresql", "mysql", "postgresql-shared"];
-
-  for (const source of fallbackSources) {
-    const checkRes = await fetch(
-      `${guacBaseUrl}/api/session/data/${source}/connections?token=${token}`
-    );
-    await checkRes.text(); // consume body
-
-    if (checkRes.status !== 404) {
-      return source;
-    }
-  }
-
-  throw new Error(
-    `Failed to get data sources [404] at base URL ${guacBaseUrl}. Check GUACAMOLE_URL path and reverse-proxy routing. Original response: ${listBody}`
-  );
+function randomSuffix(len = 12): string {
+  const bytes = new Uint8Array(len);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, len);
 }
 
 Deno.serve(async (req) => {
-  if (req.method === "OPTIONS") {
-    return new Response(null, { headers: corsHeaders });
-  }
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
+
+  const GUACAMOLE_URL = Deno.env.get("GUACAMOLE_URL");
+  const GUACAMOLE_ADMIN_USERNAME = Deno.env.get("GUACAMOLE_ADMIN_USERNAME");
+  const GUACAMOLE_ADMIN_PASSWORD = Deno.env.get("GUACAMOLE_ADMIN_PASSWORD");
+  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+  const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+
+  let guacBaseUrl: string | undefined;
+  let adminToken: string | undefined;
 
   try {
-    const GUACAMOLE_URL = Deno.env.get("GUACAMOLE_URL");
-    const GUACAMOLE_ADMIN_USERNAME = Deno.env.get("GUACAMOLE_ADMIN_USERNAME");
-    const GUACAMOLE_ADMIN_PASSWORD = Deno.env.get("GUACAMOLE_ADMIN_PASSWORD");
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!GUACAMOLE_URL || !GUACAMOLE_ADMIN_USERNAME || !GUACAMOLE_ADMIN_PASSWORD || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error("Missing required server configuration");
+    }
 
-    if (!GUACAMOLE_URL) throw new Error("GUACAMOLE_URL is not configured");
-    if (!GUACAMOLE_ADMIN_USERNAME) throw new Error("GUACAMOLE_ADMIN_USERNAME is not configured");
-    if (!GUACAMOLE_ADMIN_PASSWORD) throw new Error("GUACAMOLE_ADMIN_PASSWORD is not configured");
-    if (!SUPABASE_URL) throw new Error("SUPABASE_URL is not configured");
-    if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
-
-    // Validate JWT from request
     const authHeader = req.headers.get("authorization");
     if (!authHeader) throw new Error("Missing authorization header");
 
@@ -205,39 +154,33 @@ Deno.serve(async (req) => {
     const body = await req.json();
     const { action } = body;
 
-    // 1. Authenticate with Guacamole
-    const { token, baseUrl: guacBaseUrl } = await getGuacToken(
-      GUACAMOLE_URL,
-      GUACAMOLE_ADMIN_USERNAME,
-      GUACAMOLE_ADMIN_PASSWORD
-    );
-    const dataSource = await getDataSource(guacBaseUrl, token);
+    const isAdmin = async () => {
+      const { data } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
+      return !!data;
+    };
+
+    // Authenticate admin to Guacamole (server-side only)
+    const auth = await getGuacToken(GUACAMOLE_URL, GUACAMOLE_ADMIN_USERNAME, GUACAMOLE_ADMIN_PASSWORD);
+    adminToken = auth.token;
+    guacBaseUrl = auth.baseUrl;
+    const dataSource = await getDataSource(guacBaseUrl, adminToken);
 
     if (action === "create-session") {
-      // Create a dynamic Guacamole connection for a VM
       const { vm_id } = body;
       if (!vm_id) throw new Error("vm_id is required");
 
-      // Fetch VM details from database
       const { data: vm, error: vmError } = await supabase
         .from("virtual_machines")
         .select("*, lab_templates(name, protocol, clipboard_enabled, file_transfer_enabled)")
-        .eq("id", vm_id)
-        .maybeSingle();
-
+        .eq("id", vm_id).maybeSingle();
       if (vmError || !vm) throw new Error(`VM not found: ${vmError?.message || vm_id}`);
       if (!vm.private_ip) throw new Error("VM has no private IP assigned");
 
-      // Owner or admin only
-      if (vm.user_id !== user.id) {
-        const { data: isAdmin } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
-        if (!isAdmin) {
-          return new Response(JSON.stringify({ error: "Forbidden" }), {
-            status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
+      if (vm.user_id !== user.id && !(await isAdmin())) {
+        return new Response(JSON.stringify({ error: "Forbidden" }), {
+          status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
-
 
       const labTemplate = Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates;
       const protocol = labTemplate?.protocol?.toUpperCase() === "SSH" ? "ssh" : "rdp";
@@ -245,7 +188,6 @@ Deno.serve(async (req) => {
 
       const connParams: Record<string, string> = {};
       if (protocol === "rdp") {
-        // Resolution: 1920x1080, auto-fit to client display
         connParams["width"] = "1920";
         connParams["height"] = "1080";
         connParams["dpi"] = "96";
@@ -254,134 +196,144 @@ Deno.serve(async (req) => {
         connParams["enable-theming"] = "false";
         connParams["enable-font-smoothing"] = "true";
         connParams["create-drive-path"] = "/tmp/guac-drive";
-        if (labTemplate?.clipboard_enabled) {
-          connParams["disable-copy"] = "false";
-          connParams["disable-paste"] = "false";
-        } else {
-          connParams["disable-copy"] = "true";
-          connParams["disable-paste"] = "true";
-        }
-        if (labTemplate?.file_transfer_enabled) {
-          connParams["enable-drive"] = "true";
-        }
+        const clipOn = !!labTemplate?.clipboard_enabled;
+        connParams["disable-copy"] = clipOn ? "false" : "true";
+        connParams["disable-paste"] = clipOn ? "false" : "true";
+        if (labTemplate?.file_transfer_enabled) connParams["enable-drive"] = "true";
       }
 
-      // Get VM admin credentials
       const VM_ADMIN_USERNAME = Deno.env.get("AZURE_VM_ADMIN_USERNAME") || "labadmin";
       const VM_ADMIN_PASSWORD = Deno.env.get("AZURE_VM_ADMIN_PASSWORD") || "";
 
       const connectionName = `session-${vm_id}-${Date.now()}`;
-      const connectionId = await createGuacConnection(guacBaseUrl, token, dataSource, {
-        name: connectionName,
-        protocol,
-        hostname: vm.private_ip,
-        port,
-        username: VM_ADMIN_USERNAME,
-        password: VM_ADMIN_PASSWORD,
-        parameters: connParams,
+      const connectionId = await createGuacConnection(guacBaseUrl, adminToken, dataSource, {
+        name: connectionName, protocol, hostname: vm.private_ip, port,
+        username: VM_ADMIN_USERNAME, password: VM_ADMIN_PASSWORD, parameters: connParams,
       });
 
-      // Build the iframe URL with client token
-      // Guacamole client URL format: /#/client/{base64(connectionId + \0 + c + \0 + dataSource)}
-      const clientId = btoa(`${connectionId}\0c\0${dataSource}`);
-      const iframeUrl = `${guacBaseUrl}/#/client/${encodeURIComponent(clientId)}?token=${token}`;
+      // Create a scoped, per-session Guacamole user so the admin token never leaves the server
+      const scopedUsername = `s-${user.id.slice(0, 8)}-${randomSuffix(10)}`;
+      const scopedPassword = randomSuffix(32);
+      try {
+        await createScopedGuacUser(guacBaseUrl, adminToken, dataSource, scopedUsername, scopedPassword, connectionId);
+      } catch (e) {
+        await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, connectionId);
+        throw e;
+      }
 
-      // Create session record in database
+      // Get a scoped token by logging in as the scoped user
+      let scopedToken: string;
+      try {
+        const scopedAuth = await getGuacToken(GUACAMOLE_URL, scopedUsername, scopedPassword);
+        scopedToken = scopedAuth.token;
+      } catch (e) {
+        await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, scopedUsername);
+        await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, connectionId);
+        throw e;
+      }
+
+      const clientId = btoa(`${connectionId}\0c\0${dataSource}`);
+      const iframeUrl = `${guacBaseUrl}/#/client/${encodeURIComponent(clientId)}?token=${scopedToken}`;
+
       const { data: session, error: sessionError } = await supabase
         .from("sessions")
         .insert({
-          user_id: user.id,
-          vm_id: vm.id,
-          region: vm.region,
-          status: "active",
-          connection_quality: "good",
+          user_id: user.id, vm_id: vm.id, region: vm.region,
+          status: "active", connection_quality: "good",
           lab_template_id: vm.lab_template_id,
-        })
-        .select()
-        .single();
+          guac_connection_id: connectionId,
+          guac_username: scopedUsername,
+        }).select().single();
 
       if (sessionError) {
-        // Clean up Guacamole connection on failure
-        await deleteGuacConnection(guacBaseUrl, token, dataSource, connectionId);
+        await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, scopedUsername);
+        await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, connectionId);
         throw new Error(`Failed to create session record: ${sessionError.message}`);
       }
 
-      // Update VM status to running
-      await supabase
-        .from("virtual_machines")
-        .update({ status: "running" })
-        .eq("id", vm_id);
+      await supabase.from("virtual_machines").update({ status: "running" }).eq("id", vm_id);
 
-      return new Response(
-        JSON.stringify({
-          session_id: session.id,
-          iframe_url: iframeUrl,
-          connection_id: connectionId,
-          guac_token: token,
-          protocol: protocol.toUpperCase(),
-          vm_ip: vm.private_ip,
-        }),
-        {
-          status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
+      return new Response(JSON.stringify({
+        session_id: session.id,
+        iframe_url: iframeUrl,
+        protocol: protocol.toUpperCase(),
+        vm_ip: vm.private_ip,
+      }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+    }
+
+    if (action === "reconnect") {
+      const { session_id } = body;
+      if (!session_id) throw new Error("session_id is required");
+
+      const { data: sess } = await supabase
+        .from("sessions")
+        .select("user_id, status, guac_connection_id, guac_username")
+        .eq("id", session_id).maybeSingle();
+      if (!sess) throw new Error("Session not found");
+      if (sess.status !== "active") throw new Error("Session is no longer active");
+      if (sess.user_id !== user.id && !(await isAdmin())) {
+        return new Response(JSON.stringify({ error: "Forbidden" }), {
+          status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      if (!sess.guac_connection_id || !sess.guac_username) {
+        throw new Error("Session has no Guacamole connection metadata");
+      }
+
+      // Rotate password and issue a fresh scoped token
+      const newPassword = randomSuffix(32);
+      const updRes = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users/${encodeURIComponent(sess.guac_username)}/password?token=${adminToken}`, {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newPassword, oldPassword: "" }),
+      });
+      if (!updRes.ok) {
+        const txt = await updRes.text();
+        throw new Error(`Failed to rotate scoped user password [${updRes.status}]: ${txt}`);
+      }
+      const scoped = await getGuacToken(GUACAMOLE_URL, sess.guac_username, newPassword);
+      const clientId = btoa(`${sess.guac_connection_id}\0c\0${dataSource}`);
+      const iframeUrl = `${guacBaseUrl}/#/client/${encodeURIComponent(clientId)}?token=${scoped.token}`;
+      return new Response(JSON.stringify({ session_id, iframe_url: iframeUrl }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     if (action === "end-session") {
-      const { session_id, connection_id } = body;
+      const { session_id } = body;
       if (!session_id) throw new Error("session_id is required");
 
-      // Verify caller owns the session (or is admin)
-      const { data: sessionRow } = await supabase
+      const { data: sess } = await supabase
         .from("sessions")
-        .select("user_id")
-        .eq("id", session_id)
-        .maybeSingle();
-      if (!sessionRow) throw new Error("Session not found");
-      if (sessionRow.user_id !== user.id) {
-        const { data: isAdmin } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
-        if (!isAdmin) {
-          return new Response(JSON.stringify({ error: "Forbidden" }), {
-            status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
-          });
-        }
+        .select("user_id, guac_connection_id, guac_username")
+        .eq("id", session_id).maybeSingle();
+      if (!sess) throw new Error("Session not found");
+      if (sess.user_id !== user.id && !(await isAdmin())) {
+        return new Response(JSON.stringify({ error: "Forbidden" }), {
+          status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
       }
 
-      // End the session in DB
-      await supabase
-        .from("sessions")
-        .update({
-          ended_at: new Date().toISOString(),
-          status: "completed",
-        })
+      await supabase.from("sessions")
+        .update({ ended_at: new Date().toISOString(), status: "completed" })
         .eq("id", session_id);
 
+      if (sess.guac_username) await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, sess.guac_username);
+      if (sess.guac_connection_id) await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, sess.guac_connection_id);
 
-      // Delete Guacamole connection if provided
-      if (connection_id) {
-        await deleteGuacConnection(guacBaseUrl, token, dataSource, connection_id);
-      }
-
-      return new Response(
-        JSON.stringify({ success: true }),
-        {
-          status: 200,
-          headers: { ...corsHeaders, "Content-Type": "application/json" },
-        }
-      );
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
     }
 
     throw new Error(`Unknown action: ${action}`);
   } catch (error: unknown) {
     console.error("guacamole-proxy error:", error);
     const message = error instanceof Error ? error.message : "Unknown error";
-    return new Response(
-      JSON.stringify({ error: message }),
-      {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
-    );
+    return new Response(JSON.stringify({ error: message }), {
+      status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+    });
+  } finally {
+    // Always revoke the admin token after the request completes
+    if (guacBaseUrl && adminToken) await deleteGuacToken(guacBaseUrl, adminToken);
   }
 });
