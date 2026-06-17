@@ -439,7 +439,71 @@ Deno.serve(async (req) => {
       console.error("Quota check for notifications failed:", e);
     }
 
+    // 6. Cleanup Guacamole connections + scoped users for any completed sessions
+    //    that still have lingering guac metadata (per-session resource cleanup).
+    try {
+      const { data: orphanGuacSessions } = await supabase
+        .from("sessions")
+        .select("id, guac_connection_id, guac_username")
+        .neq("status", "active")
+        .or("guac_connection_id.not.is.null,guac_username.not.is.null")
+        .limit(200);
+
+      if (orphanGuacSessions?.length) {
+        const GUACAMOLE_URL = Deno.env.get("GUACAMOLE_URL");
+        const GUACAMOLE_ADMIN_USERNAME = Deno.env.get("GUACAMOLE_ADMIN_USERNAME");
+        const GUACAMOLE_ADMIN_PASSWORD = Deno.env.get("GUACAMOLE_ADMIN_PASSWORD");
+
+        if (GUACAMOLE_URL && GUACAMOLE_ADMIN_USERNAME && GUACAMOLE_ADMIN_PASSWORD) {
+          const candidates = [GUACAMOLE_URL.replace(/\/+$/, "")];
+          if (!candidates[0].endsWith("/guacamole")) candidates.push(candidates[0] + "/guacamole");
+          else candidates.push(candidates[0].replace(/\/guacamole$/, ""));
+
+          let guacToken = "", guacBase = "";
+          for (const base of candidates) {
+            const r = await fetch(`${base}/api/tokens`, {
+              method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+              body: `username=${encodeURIComponent(GUACAMOLE_ADMIN_USERNAME)}&password=${encodeURIComponent(GUACAMOLE_ADMIN_PASSWORD)}`,
+            });
+            if (r.ok) { const d = await r.json(); guacToken = d.authToken; guacBase = base; break; }
+            await r.text();
+          }
+
+          if (guacToken) {
+            // Resolve data source
+            let dataSource = "postgresql";
+            const dsRes = await fetch(`${guacBase}/api/session/data?token=${guacToken}`);
+            if (dsRes.ok) {
+              const raw = await dsRes.json();
+              const sources: string[] = Array.isArray(raw) ? raw : Object.keys(raw || {});
+              dataSource = sources.find((s) => s === "postgresql") || sources[0] || "postgresql";
+            }
+
+            let cleaned = 0;
+            for (const s of orphanGuacSessions) {
+              if (s.guac_connection_id) {
+                await fetch(`${guacBase}/api/session/data/${dataSource}/connections/${s.guac_connection_id}?token=${guacToken}`, { method: "DELETE" }).catch(() => {});
+              }
+              if (s.guac_username) {
+                await fetch(`${guacBase}/api/session/data/${dataSource}/users/${encodeURIComponent(s.guac_username)}?token=${guacToken}`, { method: "DELETE" }).catch(() => {});
+              }
+              await supabase.from("sessions")
+                .update({ guac_connection_id: null, guac_username: null })
+                .eq("id", s.id);
+              cleaned++;
+            }
+            // Revoke admin token
+            await fetch(`${guacBase}/api/tokens/${guacToken}`, { method: "DELETE" }).catch(() => {});
+            if (cleaned) results.push(`Guacamole cleanup: removed ${cleaned} orphan session(s)`);
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Guacamole orphan cleanup failed:", e);
+    }
+
     console.log(`Cleanup completed: ${results.length} actions taken`, results);
+
 
     return new Response(
       JSON.stringify({
