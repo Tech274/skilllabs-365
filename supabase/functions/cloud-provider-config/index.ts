@@ -1,4 +1,4 @@
-import { corsHeaders, requireRole, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
 const AWS_SECRETS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_ROLE_ARN"];
 const AZURE_SECRETS = ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID"];
@@ -13,7 +13,7 @@ Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
-    const auth = await requireRole(req, ["admin", "super_admin", "content_admin"]);
+    const auth = await requireAdmin(req);
     if (auth instanceof Response) return auth;
     const { supabase, userId } = auth;
 
