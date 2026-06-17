@@ -12,22 +12,21 @@ Deno.serve(async (req) => {
     const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
     const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID")!;
     const AZURE_RESOURCE_GROUP = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
-    const authHeader = req.headers.get("authorization");
-    if (!authHeader?.startsWith("Bearer ")) throw new Error("Missing authorization");
-
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-    const { data: { user }, error: userError } = await supabase.auth.getUser(authHeader.replace("Bearer ", ""));
-    if (userError || !user) throw new Error("Unauthorized");
+    const auth = await requireUser(req);
+    if (auth instanceof Response) return auth;
+    const supabase = auth.supabase;
 
     const { vm_id } = await req.json();
-    if (!vm_id) throw new Error("vm_id is required");
+    if (!vm_id) return errorResponse("vm_id is required", 400);
 
     // Get VM record
     const { data: vm } = await supabase.from("virtual_machines").select("*").eq("id", vm_id).maybeSingle();
-    if (!vm) throw new Error("VM not found");
+    if (!vm) return errorResponse("VM not found", 404);
+
+    const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
+    if (forbidden) return forbidden;
+
     if (vm.status !== "provisioning") {
       return new Response(JSON.stringify({ status: vm.status }), {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
