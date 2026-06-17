@@ -1,13 +1,17 @@
-// Azure provider adapter — time-boxed RBAC role assignment on a scoped RG/subscription.
-// Requires AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET / AZURE_SUBSCRIPTION_ID
-// secrets (already configured for the VM-lab side of this project) plus the user's
-// Entra ID object id (oid) stored on the profile as azure_object_id.
+// Azure provider adapter — time-boxed RBAC role assignment, returns Azure portal deep link.
+// Required secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET.
+// Per-template provider_config (or fallback to cloud_provider_config row 'azure'):
+//   { subscription_id, resource_group?, scope?, role_definition_id, use_pim? }
+// User profile MUST have azure_object_id (Entra ID oid).
 
 interface CreateCtx {
   userId: string;
   templateConfig: Record<string, unknown>;
   region: string | null;
   durationMinutes: number;
+  // Resolved by the caller (cloud-access-session) from profile + cloud_provider_config:
+  azureObjectId?: string | null;
+  azureDefaults?: Record<string, unknown> | null;
 }
 
 interface Result {
@@ -16,24 +20,143 @@ interface Result {
   scope: Record<string, unknown>;
 }
 
-export async function createSession(_ctx: CreateCtx): Promise<Result> {
-  const haveTenant = Deno.env.get("AZURE_TENANT_ID");
-  if (!haveTenant) {
-    throw new Error("Azure provider not configured: AZURE_TENANT_ID is missing.");
+async function armToken(): Promise<string> {
+  const tenant = Deno.env.get("AZURE_TENANT_ID");
+  const clientId = Deno.env.get("AZURE_CLIENT_ID");
+  const secret = Deno.env.get("AZURE_CLIENT_SECRET");
+  if (!tenant || !clientId || !secret) {
+    throw new Error("Azure provider not configured: AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET missing.");
   }
-  // Implementation note: real flow is
-  //   1) Lookup profile.azure_object_id for the user
-  //   2) Microsoft.Authorization/roleAssignments PUT with endDateTime = now + duration
-  //   3) Return https://portal.azure.com/#@<tenant>/resource/<scope>/overview
-  //   provider_session_ref = the roleAssignmentId so revoke can DELETE it.
-  throw new Error("Azure portal federation handler not yet wired in this build. Configure the user's azure_object_id and request Phase 5b.");
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: clientId,
+    client_secret: secret,
+    resource: "https://management.azure.com/",
+  });
+  const resp = await fetch(`https://login.microsoftonline.com/${tenant}/oauth2/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`AAD token failed (${resp.status}): ${text.slice(0, 400)}`);
+  const json = JSON.parse(text);
+  return json.access_token as string;
+}
+
+function guid(): string {
+  return crypto.randomUUID();
+}
+
+function resolveScope(cfg: Record<string, unknown>, defaults: Record<string, unknown> | null): string {
+  const explicit = (cfg.scope as string | undefined) || (defaults?.scope as string | undefined);
+  if (explicit) return explicit;
+  const sub = (cfg.subscription_id as string | undefined) || (defaults?.subscription_id as string | undefined) || Deno.env.get("AZURE_SUBSCRIPTION_ID");
+  const rg  = (cfg.resource_group as string | undefined) || (defaults?.resource_group as string | undefined) || Deno.env.get("AZURE_RESOURCE_GROUP");
+  if (!sub) throw new Error("Azure provider not configured: subscription_id required (template provider_config, cloud_provider_config, or AZURE_SUBSCRIPTION_ID).");
+  if (rg) return `/subscriptions/${sub}/resourceGroups/${rg}`;
+  return `/subscriptions/${sub}`;
+}
+
+function resolveRoleDefinitionId(cfg: Record<string, unknown>, defaults: Record<string, unknown> | null, scope: string): string {
+  const raw = (cfg.role_definition_id as string | undefined)
+    || (defaults?.role_definition_id as string | undefined)
+    || "acdd72a7-3385-48ef-bd42-f606fba81ae7"; // Reader (built-in)
+  if (raw.startsWith("/")) return raw;
+  // Scope-qualified built-in role
+  return `${scope.split("/resourceGroups/")[0]}/providers/Microsoft.Authorization/roleDefinitions/${raw}`;
+}
+
+export async function createSession(ctx: CreateCtx): Promise<Result> {
+  if (!ctx.azureObjectId) {
+    throw new Error("This user is missing azure_object_id on their profile. An admin must set it before granting Azure access.");
+  }
+  const cfg = ctx.templateConfig || {};
+  const defaults = ctx.azureDefaults || null;
+  const scope = resolveScope(cfg, defaults);
+  const roleDefinitionId = resolveRoleDefinitionId(cfg, defaults, scope);
+  const usePim = Boolean(cfg.use_pim ?? defaults?.use_pim);
+  const tenantId = (cfg.tenant_id as string | undefined) || (defaults?.tenant_id as string | undefined) || Deno.env.get("AZURE_TENANT_ID")!;
+
+  const token = await armToken();
+  const assignmentName = guid();
+  const startDateTime = new Date(Date.now() + 60_000).toISOString();        // start ~1 min from now
+  const endDateTime   = new Date(Date.now() + ctx.durationMinutes * 60_000).toISOString();
+
+  let assignmentPath: string;
+  let body: Record<string, unknown>;
+
+  if (usePim) {
+    // PIM-style time-boxed assignment (requires PIM SKU on the tenant).
+    assignmentPath = `${scope}/providers/Microsoft.Authorization/roleAssignmentScheduleRequests/${assignmentName}?api-version=2020-10-01`;
+    body = {
+      properties: {
+        principalId: ctx.azureObjectId,
+        roleDefinitionId,
+        requestType: "AdminAssign",
+        scheduleInfo: {
+          startDateTime,
+          expiration: { type: "AfterDateTime", endDateTime },
+        },
+        justification: "Lovable Cloud Lab session",
+      },
+    };
+  } else {
+    // Standard role assignment — revoked explicitly on session end / cleanup cron.
+    assignmentPath = `${scope}/providers/Microsoft.Authorization/roleAssignments/${assignmentName}?api-version=2022-04-01`;
+    body = {
+      properties: {
+        roleDefinitionId,
+        principalId: ctx.azureObjectId,
+        principalType: "User",
+        description: `Lovable Cloud Lab session (expires ${endDateTime})`,
+      },
+    };
+  }
+
+  const resp = await fetch(`https://management.azure.com${assignmentPath}`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`Azure role assignment failed (${resp.status}): ${text.slice(0, 500)}`);
+  const json = JSON.parse(text);
+
+  const assignmentId: string = json?.id || assignmentPath.split("?")[0];
+
+  const portal = `https://portal.azure.com/#@${tenantId}/resource${scope}/overview`;
+
+  return {
+    federated_url: portal,
+    provider_session_ref: assignmentId,
+    scope: {
+      scope,
+      role_definition_id: roleDefinitionId,
+      principal_id: ctx.azureObjectId,
+      end_date_time: endDateTime,
+      use_pim: usePim,
+    },
+  };
 }
 
 export async function refreshSession(ctx: CreateCtx): Promise<Result> {
+  // Extend by revoking the prior assignment (caller passes new ctx) and creating a fresh one.
   return createSession(ctx);
 }
 
-export async function revokeSession(_ref: string | null): Promise<void> {
-  // Real impl: DELETE the role assignment by id (ref).
-  return;
+export async function revokeSession(ref: string | null): Promise<void> {
+  if (!ref) return;
+  try {
+    const token = await armToken();
+    // ref is the full ARM id; DELETE works for both classic and PIM schedule-request ids.
+    const apiVersion = ref.includes("roleAssignmentScheduleRequests")
+      ? "2020-10-01" : "2022-04-01";
+    await fetch(`https://management.azure.com${ref}?api-version=${apiVersion}`, {
+      method: "DELETE",
+      headers: { authorization: `Bearer ${token}` },
+    });
+  } catch (e) {
+    console.warn("azure revoke failed:", e);
+  }
 }

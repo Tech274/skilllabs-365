@@ -325,6 +325,27 @@ export type Database = {
           },
         ]
       }
+      cloud_provider_config: {
+        Row: {
+          config: Json
+          provider: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          config?: Json
+          provider: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          config?: Json
+          provider?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
       daily_reports: {
         Row: {
           created_at: string
@@ -667,6 +688,7 @@ export type Database = {
       profiles: {
         Row: {
           avatar_url: string | null
+          azure_object_id: string | null
           created_at: string
           display_name: string
           email: string | null
@@ -676,6 +698,7 @@ export type Database = {
         }
         Insert: {
           avatar_url?: string | null
+          azure_object_id?: string | null
           created_at?: string
           display_name?: string
           email?: string | null
@@ -685,6 +708,7 @@ export type Database = {
         }
         Update: {
           avatar_url?: string | null
+          azure_object_id?: string | null
           created_at?: string
           display_name?: string
           email?: string | null

@@ -31,6 +31,8 @@ import DailyReports from "./pages/DailyReports";
 import AccessCatalogue from "./pages/AccessCatalogue";
 import AccessTemplateDetail from "./pages/AccessTemplateDetail";
 import UserCloudAccess from "./pages/UserCloudAccess";
+import CloudProviders from "./pages/CloudProviders";
+import AdminCloudReports from "./pages/AdminCloudReports";
 
 
 const queryClient = new QueryClient();
@@ -62,6 +64,8 @@ const App = () => (
                 <Route path="/reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><DailyReports /></RoleProtectedRoute>} />
                 <Route path="/admin/access-catalogue" element={<RoleProtectedRoute allowedRoles={["admin"]}><AccessCatalogue /></RoleProtectedRoute>} />
                 <Route path="/admin/access-templates/:id" element={<RoleProtectedRoute allowedRoles={["admin"]}><AccessTemplateDetail /></RoleProtectedRoute>} />
+                <Route path="/admin/cloud-providers" element={<RoleProtectedRoute allowedRoles={["admin"]}><CloudProviders /></RoleProtectedRoute>} />
+                <Route path="/admin/cloud-reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminCloudReports /></RoleProtectedRoute>} />
                 <Route path="/cloud-access" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
                 <Route path="/cloud-access/:id" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
 
