@@ -26,7 +26,11 @@ serve(async (req) => {
   }
 
   try {
+    const auth = await requireUser(req);
+    if (auth instanceof Response) return auth;
+
     const { type, data } = await req.json();
+
 
     if (!type || !SYSTEM_PROMPTS[type]) {
       return new Response(
