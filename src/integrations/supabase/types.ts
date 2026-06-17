@@ -50,6 +50,210 @@ export type Database = {
         }
         Relationships: []
       }
+      access_session_events: {
+        Row: {
+          actor_id: string | null
+          at: string
+          event_type: string
+          id: string
+          payload: Json
+          session_id: string
+        }
+        Insert: {
+          actor_id?: string | null
+          at?: string
+          event_type: string
+          id?: string
+          payload?: Json
+          session_id: string
+        }
+        Update: {
+          actor_id?: string | null
+          at?: string
+          event_type?: string
+          id?: string
+          payload?: Json
+          session_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "access_session_events_session_id_fkey"
+            columns: ["session_id"]
+            isOneToOne: false
+            referencedRelation: "access_sessions"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      access_sessions: {
+        Row: {
+          batch_id: string | null
+          created_at: string
+          credit_consumed: number
+          ended_at: string | null
+          error_message: string | null
+          expires_at: string
+          federated_url: string | null
+          id: string
+          last_activity_at: string
+          parent_session_id: string | null
+          provider: Database["public"]["Enums"]["cloud_provider"]
+          provider_session_ref: string | null
+          refresh_count: number
+          region: string | null
+          scope: Json
+          started_at: string
+          status: Database["public"]["Enums"]["access_session_status"]
+          template_id: string
+          updated_at: string
+          user_id: string
+          workspace_batch_id: string | null
+        }
+        Insert: {
+          batch_id?: string | null
+          created_at?: string
+          credit_consumed?: number
+          ended_at?: string | null
+          error_message?: string | null
+          expires_at: string
+          federated_url?: string | null
+          id?: string
+          last_activity_at?: string
+          parent_session_id?: string | null
+          provider: Database["public"]["Enums"]["cloud_provider"]
+          provider_session_ref?: string | null
+          refresh_count?: number
+          region?: string | null
+          scope?: Json
+          started_at?: string
+          status?: Database["public"]["Enums"]["access_session_status"]
+          template_id: string
+          updated_at?: string
+          user_id: string
+          workspace_batch_id?: string | null
+        }
+        Update: {
+          batch_id?: string | null
+          created_at?: string
+          credit_consumed?: number
+          ended_at?: string | null
+          error_message?: string | null
+          expires_at?: string
+          federated_url?: string | null
+          id?: string
+          last_activity_at?: string
+          parent_session_id?: string | null
+          provider?: Database["public"]["Enums"]["cloud_provider"]
+          provider_session_ref?: string | null
+          refresh_count?: number
+          region?: string | null
+          scope?: Json
+          started_at?: string
+          status?: Database["public"]["Enums"]["access_session_status"]
+          template_id?: string
+          updated_at?: string
+          user_id?: string
+          workspace_batch_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "access_sessions_batch_id_fkey"
+            columns: ["batch_id"]
+            isOneToOne: false
+            referencedRelation: "template_batches"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "access_sessions_parent_session_id_fkey"
+            columns: ["parent_session_id"]
+            isOneToOne: false
+            referencedRelation: "access_sessions"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "access_sessions_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "access_templates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "access_sessions_workspace_batch_id_fkey"
+            columns: ["workspace_batch_id"]
+            isOneToOne: false
+            referencedRelation: "template_workspace_batches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      access_templates: {
+        Row: {
+          allowed_services: Json
+          created_at: string
+          created_by: string | null
+          credit_limit: number
+          description: string | null
+          id: string
+          name: string
+          org_id: string | null
+          provider: Database["public"]["Enums"]["cloud_provider"]
+          provider_config: Json
+          refresh_allowed: boolean
+          region: string | null
+          self_enroll: boolean
+          session_duration_minutes: number
+          status: Database["public"]["Enums"]["access_template_status"]
+          updated_at: string
+          validity_days: number
+        }
+        Insert: {
+          allowed_services?: Json
+          created_at?: string
+          created_by?: string | null
+          credit_limit?: number
+          description?: string | null
+          id?: string
+          name: string
+          org_id?: string | null
+          provider: Database["public"]["Enums"]["cloud_provider"]
+          provider_config?: Json
+          refresh_allowed?: boolean
+          region?: string | null
+          self_enroll?: boolean
+          session_duration_minutes?: number
+          status?: Database["public"]["Enums"]["access_template_status"]
+          updated_at?: string
+          validity_days?: number
+        }
+        Update: {
+          allowed_services?: Json
+          created_at?: string
+          created_by?: string | null
+          credit_limit?: number
+          description?: string | null
+          id?: string
+          name?: string
+          org_id?: string | null
+          provider?: Database["public"]["Enums"]["cloud_provider"]
+          provider_config?: Json
+          refresh_allowed?: boolean
+          region?: string | null
+          self_enroll?: boolean
+          session_duration_minutes?: number
+          status?: Database["public"]["Enums"]["access_template_status"]
+          updated_at?: string
+          validity_days?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "access_templates_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       activity_logs: {
         Row: {
           action: string
@@ -737,6 +941,193 @@ export type Database = {
         }
         Relationships: []
       }
+      template_assignments: {
+        Row: {
+          assignee_id: string | null
+          assignee_type: Database["public"]["Enums"]["template_assignee_type"]
+          batch_id: string | null
+          granted_at: string
+          granted_by: string | null
+          id: string
+          revoked_at: string | null
+          template_id: string
+          workspace_batch_id: string | null
+        }
+        Insert: {
+          assignee_id?: string | null
+          assignee_type: Database["public"]["Enums"]["template_assignee_type"]
+          batch_id?: string | null
+          granted_at?: string
+          granted_by?: string | null
+          id?: string
+          revoked_at?: string | null
+          template_id: string
+          workspace_batch_id?: string | null
+        }
+        Update: {
+          assignee_id?: string | null
+          assignee_type?: Database["public"]["Enums"]["template_assignee_type"]
+          batch_id?: string | null
+          granted_at?: string
+          granted_by?: string | null
+          id?: string
+          revoked_at?: string | null
+          template_id?: string
+          workspace_batch_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "template_assignments_batch_id_fkey"
+            columns: ["batch_id"]
+            isOneToOne: false
+            referencedRelation: "template_batches"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "template_assignments_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "access_templates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "template_assignments_workspace_batch_id_fkey"
+            columns: ["workspace_batch_id"]
+            isOneToOne: false
+            referencedRelation: "template_workspace_batches"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      template_batches: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          credit_allocation: number
+          end_date: string | null
+          id: string
+          lab_count: number
+          name: string
+          org_id: string | null
+          published: boolean
+          session_duration_override: number | null
+          start_date: string | null
+          template_id: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          credit_allocation?: number
+          end_date?: string | null
+          id?: string
+          lab_count?: number
+          name: string
+          org_id?: string | null
+          published?: boolean
+          session_duration_override?: number | null
+          start_date?: string | null
+          template_id: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          credit_allocation?: number
+          end_date?: string | null
+          id?: string
+          lab_count?: number
+          name?: string
+          org_id?: string | null
+          published?: boolean
+          session_duration_override?: number | null
+          start_date?: string | null
+          template_id?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "template_batches_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "template_batches_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "access_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      template_workspace_batches: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          end_date: string | null
+          id: string
+          lab_count: number
+          name: string
+          org_id: string | null
+          published: boolean
+          session_duration_override: number | null
+          shared_credit_pool: number
+          start_date: string | null
+          template_id: string
+          updated_at: string
+          workspace_group_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          end_date?: string | null
+          id?: string
+          lab_count?: number
+          name: string
+          org_id?: string | null
+          published?: boolean
+          session_duration_override?: number | null
+          shared_credit_pool?: number
+          start_date?: string | null
+          template_id: string
+          updated_at?: string
+          workspace_group_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          end_date?: string | null
+          id?: string
+          lab_count?: number
+          name?: string
+          org_id?: string | null
+          published?: boolean
+          session_duration_override?: number | null
+          shared_credit_pool?: number
+          start_date?: string | null
+          template_id?: string
+          updated_at?: string
+          workspace_group_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "template_workspace_batches_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "template_workspace_batches_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "access_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       user_roles: {
         Row: {
           id: string
@@ -833,8 +1224,21 @@ export type Database = {
         Returns: boolean
       }
       is_platform_admin: { Args: { _user_id: string }; Returns: boolean }
+      user_can_access_template: {
+        Args: { _template_id: string; _user_id: string }
+        Returns: boolean
+      }
     }
     Enums: {
+      access_session_status:
+        | "created"
+        | "active"
+        | "expired"
+        | "refreshed"
+        | "revoked"
+        | "failed"
+        | "completed"
+      access_template_status: "draft" | "published" | "archived"
       app_role:
         | "admin"
         | "instructor"
@@ -843,6 +1247,8 @@ export type Database = {
         | "content_admin"
         | "org_exec"
         | "org_manager"
+      cloud_provider: "azure" | "aws" | "gcp"
+      template_assignee_type: "user" | "org" | "group" | "self_enroll"
       vm_status:
         | "provisioning"
         | "starting"
@@ -980,6 +1386,16 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
+      access_session_status: [
+        "created",
+        "active",
+        "expired",
+        "refreshed",
+        "revoked",
+        "failed",
+        "completed",
+      ],
+      access_template_status: ["draft", "published", "archived"],
       app_role: [
         "admin",
         "instructor",
@@ -989,6 +1405,8 @@ export const Constants = {
         "org_exec",
         "org_manager",
       ],
+      cloud_provider: ["azure", "aws", "gcp"],
+      template_assignee_type: ["user", "org", "group", "self_enroll"],
       vm_status: [
         "provisioning",
         "starting",
