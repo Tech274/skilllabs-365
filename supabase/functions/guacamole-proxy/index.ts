@@ -332,6 +332,22 @@ Deno.serve(async (req) => {
       const { session_id, connection_id } = body;
       if (!session_id) throw new Error("session_id is required");
 
+      // Verify caller owns the session (or is admin)
+      const { data: sessionRow } = await supabase
+        .from("sessions")
+        .select("user_id")
+        .eq("id", session_id)
+        .maybeSingle();
+      if (!sessionRow) throw new Error("Session not found");
+      if (sessionRow.user_id !== user.id) {
+        const { data: isAdmin } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
+        if (!isAdmin) {
+          return new Response(JSON.stringify({ error: "Forbidden" }), {
+            status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+
       // End the session in DB
       await supabase
         .from("sessions")
@@ -340,6 +356,7 @@ Deno.serve(async (req) => {
           status: "completed",
         })
         .eq("id", session_id);
+
 
       // Delete Guacamole connection if provided
       if (connection_id) {
