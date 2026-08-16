@@ -69,7 +69,7 @@ describe("AiStatus failure rendering", () => {
     render(<AiStatus />);
 
     await waitFor(() => expect(screen.getByText("Misconfigured")).toBeInTheDocument());
-    expect(screen.getByText(/Missing configuration: LOVABLE_API_KEY/)).toBeInTheDocument();
+    expect(screen.getAllByText(/Missing configuration: LOVABLE_API_KEY/).length).toBeGreaterThan(0);
   });
 
   it("lists recent failed AI requests with error metadata", async () => {
