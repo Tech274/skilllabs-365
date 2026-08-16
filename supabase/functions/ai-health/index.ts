@@ -2,13 +2,16 @@
 // gateway probe, and recent failure counts.
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders, jsonResponse, requireAdmin } from "../_shared/auth.ts";
+import { DEGRADED_LATENCY_MS, sendAiAlert, shouldAlert } from "../_shared/ai-alerts.ts";
 import {
   DEFAULT_AI_MODEL,
   callAiGateway,
+  checkCircuit,
   logAiRequest,
   missingAiEnv,
   newRequestId,
 } from "../_shared/ai-runtime.ts";
+
 
 serve(async (req) => {
   if (req.method === "OPTIONS") {
