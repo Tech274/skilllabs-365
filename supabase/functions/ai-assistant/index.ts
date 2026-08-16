@@ -1,9 +1,11 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders, requireUser } from "../_shared/auth.ts";
 import {
+  CIRCUIT_OPEN_MESSAGE,
   DEFAULT_AI_MODEL,
   assertAiEnv,
   callAiGateway,
+  checkCircuit,
   logAiRequest,
   newRequestId,
 } from "../_shared/ai-runtime.ts";
@@ -50,6 +52,15 @@ serve(async (req) => {
     const auth = await requireUser(req);
     if (auth instanceof Response) return auth;
     userId = auth.userId;
+
+    const circuit = await checkCircuit();
+    if (circuit.open) {
+      console.warn(`[ai-circuit] open (${circuit.failures} recent failures), rejecting request`);
+      return json(
+        { error: CIRCUIT_OPEN_MESSAGE, retry_after_seconds: circuit.retryAfterSeconds },
+        503,
+      );
+    }
 
     const { type, data } = await req.json();
 

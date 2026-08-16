@@ -31,6 +31,8 @@ interface HealthPayload {
   missing_env: string[];
   latency_ms: number | null;
   http_status?: number;
+  circuit_open?: boolean;
+  circuit_retry_after_seconds?: number;
   checked_at: string;
   message: string;
 }
@@ -165,6 +167,14 @@ export default function AiStatus() {
               {health?.message && (
                 <p className="sm:col-span-3 text-sm text-muted-foreground">{health.message}</p>
               )}
+              {health?.circuit_open ? (
+                <p className="sm:col-span-3 text-sm text-amber-400">
+                  Circuit breaker open — AI calls are paused
+                  {health.circuit_retry_after_seconds
+                    ? ` for ${health.circuit_retry_after_seconds}s`
+                    : ""} after repeated failures.
+                </p>
+              ) : null}
               {health?.missing_env?.length ? (
                 <p className="sm:col-span-3 text-sm text-destructive">
                   Missing configuration: {health.missing_env.join(", ")}

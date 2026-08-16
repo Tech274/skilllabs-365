@@ -44,28 +44,55 @@ export type AiLogEntry = {
   userId?: string | null;
 };
 
+const REDACTIONS: Array<[RegExp, string]> = [
+  // Bearer tokens / API keys / JWTs
+  [/\bBearer\s+[A-Za-z0-9._\-]+/gi, "Bearer [redacted]"],
+  [/\beyJ[A-Za-z0-9._\-]{10,}/g, "[redacted-jwt]"],
+  [/\b(sk|pk|rk|api)[-_][A-Za-z0-9]{8,}/gi, "[redacted-key]"],
+  // Emails
+  [/[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}/g, "[redacted-email]"],
+  // Phone numbers
+  [/\+?\d[\d\s\-().]{8,}\d/g, "[redacted-phone]"],
+  // IPv4
+  [/\b\d{1,3}(\.\d{1,3}){3}\b/g, "[redacted-ip]"],
+  // Long free-text blobs of user content quoted by providers
+  [/"content"\s*:\s*"(?:[^"\\]|\\.)*"/g, '"content":"[redacted]"'],
+];
+
+/**
+ * Strip anything that could carry user content or credentials before it is
+ * written to the database. Only safe metadata is persisted.
+ */
+export function redactForLog(input: unknown, maxLength = 500): string | null {
+  if (input === null || input === undefined) return null;
+  let text = typeof input === "string" ? input : JSON.stringify(input);
+  if (!text) return null;
+  for (const [pattern, replacement] of REDACTIONS) {
+    text = text.replace(pattern, replacement);
+  }
+  text = text.replace(/\s+/g, " ").trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength)}…` : text;
+}
+
 /** Structured console log + durable row in public.ai_request_logs. */
 export async function logAiRequest(entry: AiLogEntry): Promise<void> {
+  const safeError = redactForLog(entry.errorMessage);
   const line = JSON.stringify({
     scope: "ai",
     fn: entry.functionName,
     request_id: entry.requestId,
     model: entry.model,
-    latency_ms: entry.latencyMs,
+    latency_ms: Math.round(entry.latencyMs),
     status: entry.status,
     http_status: entry.httpStatus,
     error_type: entry.errorType,
-    error_message: entry.errorMessage,
+    error_message: safeError,
   });
   if (entry.status === "error") console.error(line);
   else console.log(line);
 
   try {
-    const supabase = createClient(
-      Deno.env.get("SUPABASE_URL")!,
-      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
-      { auth: { autoRefreshToken: false, persistSession: false } },
-    );
+    const supabase = serviceClient();
     await supabase.from("ai_request_logs").insert({
       function_name: entry.functionName,
       request_id: entry.requestId,
@@ -74,7 +101,7 @@ export async function logAiRequest(entry: AiLogEntry): Promise<void> {
       status: entry.status,
       http_status: entry.httpStatus ?? null,
       error_type: entry.errorType ?? null,
-      error_message: entry.errorMessage ? entry.errorMessage.slice(0, 2000) : null,
+      error_message: safeError,
       user_id: entry.userId && entry.userId !== "00000000-0000-0000-0000-000000000000"
         ? entry.userId
         : null,
@@ -83,6 +110,84 @@ export async function logAiRequest(entry: AiLogEntry): Promise<void> {
     console.error("[ai-log] failed to persist AI log:", e instanceof Error ? e.message : e);
   }
 }
+
+function serviceClient() {
+  return createClient(
+    Deno.env.get("SUPABASE_URL")!,
+    Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+    { auth: { autoRefreshToken: false, persistSession: false } },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Circuit breaker
+// ---------------------------------------------------------------------------
+
+export const CIRCUIT_FAILURE_THRESHOLD = 5;
+/** Failures inside this window count toward the threshold. */
+export const CIRCUIT_WINDOW_MS = 120_000;
+/** How long calls stay blocked after the breaker trips. */
+export const CIRCUIT_OPEN_MS = 60_000;
+
+export type CircuitState = {
+  open: boolean;
+  failures: number;
+  retryAfterSeconds: number;
+};
+
+/**
+ * Pure evaluation of breaker state from recent log rows (newest first).
+ * Trips when >= threshold failures happened inside the window and no success
+ * has been recorded since the most recent failure.
+ */
+export function evaluateCircuit(
+  rows: Array<{ status: string; created_at: string }>,
+  now = Date.now(),
+): CircuitState {
+  const recent = rows.filter((r) => now - new Date(r.created_at).getTime() <= CIRCUIT_WINDOW_MS);
+  const failures = recent.filter((r) => r.status === "error");
+  if (failures.length < CIRCUIT_FAILURE_THRESHOLD) {
+    return { open: false, failures: failures.length, retryAfterSeconds: 0 };
+  }
+
+  const lastFailureAt = Math.max(...failures.map((r) => new Date(r.created_at).getTime()));
+  const successAfter = recent.some(
+    (r) => r.status === "success" && new Date(r.created_at).getTime() > lastFailureAt,
+  );
+  const elapsed = now - lastFailureAt;
+  if (successAfter || elapsed >= CIRCUIT_OPEN_MS) {
+    return { open: false, failures: failures.length, retryAfterSeconds: 0 };
+  }
+
+  return {
+    open: true,
+    failures: failures.length,
+    retryAfterSeconds: Math.ceil((CIRCUIT_OPEN_MS - elapsed) / 1000),
+  };
+}
+
+/** Reads recent AI logs and decides whether the breaker is open. Fails open. */
+export async function checkCircuit(functionName?: string): Promise<CircuitState> {
+  try {
+    const supabase = serviceClient();
+    let query = supabase
+      .from("ai_request_logs")
+      .select("status, created_at")
+      .gte("created_at", new Date(Date.now() - CIRCUIT_WINDOW_MS).toISOString())
+      .order("created_at", { ascending: false })
+      .limit(50);
+    if (functionName) query = query.eq("function_name", functionName);
+    const { data, error } = await query;
+    if (error || !data) return { open: false, failures: 0, retryAfterSeconds: 0 };
+    return evaluateCircuit(data as Array<{ status: string; created_at: string }>);
+  } catch {
+    return { open: false, failures: 0, retryAfterSeconds: 0 };
+  }
+}
+
+export const CIRCUIT_OPEN_MESSAGE =
+  "The AI service is temporarily paused after repeated failures. Please try again shortly.";
+
 
 /** 429 and 5xx are transient; everything else is terminal. */
 export function isRetryableStatus(status: number): boolean {
