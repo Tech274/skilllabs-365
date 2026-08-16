@@ -23,3 +23,6 @@ verify_jwt = false
 
 [functions.ai-health]
 verify_jwt = false
+
+[functions.cloud-provider-health]
+verify_jwt = false

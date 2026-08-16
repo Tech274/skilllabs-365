@@ -480,6 +480,39 @@ export type Database = {
         }
         Relationships: []
       }
+      cloud_provider_health_checks: {
+        Row: {
+          check_name: string
+          checked_at: string
+          detail: string | null
+          id: string
+          latency_ms: number | null
+          provider: string
+          region: string | null
+          status: string
+        }
+        Insert: {
+          check_name: string
+          checked_at?: string
+          detail?: string | null
+          id?: string
+          latency_ms?: number | null
+          provider: string
+          region?: string | null
+          status: string
+        }
+        Update: {
+          check_name?: string
+          checked_at?: string
+          detail?: string | null
+          id?: string
+          latency_ms?: number | null
+          provider?: string
+          region?: string | null
+          status?: string
+        }
+        Relationships: []
+      }
       daily_reports: {
         Row: {
           created_at: string
