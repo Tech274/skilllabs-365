@@ -281,6 +281,48 @@ export type Database = {
         }
         Relationships: []
       }
+      ai_request_logs: {
+        Row: {
+          created_at: string
+          error_message: string | null
+          error_type: string | null
+          function_name: string
+          http_status: number | null
+          id: string
+          latency_ms: number | null
+          model: string | null
+          request_id: string | null
+          status: string
+          user_id: string | null
+        }
+        Insert: {
+          created_at?: string
+          error_message?: string | null
+          error_type?: string | null
+          function_name: string
+          http_status?: number | null
+          id?: string
+          latency_ms?: number | null
+          model?: string | null
+          request_id?: string | null
+          status: string
+          user_id?: string | null
+        }
+        Update: {
+          created_at?: string
+          error_message?: string | null
+          error_type?: string | null
+          function_name?: string
+          http_status?: number | null
+          id?: string
+          latency_ms?: number | null
+          model?: string | null
+          request_id?: string | null
+          status?: string
+          user_id?: string | null
+        }
+        Relationships: []
+      }
       certifications_catalog: {
         Row: {
           created_at: string
