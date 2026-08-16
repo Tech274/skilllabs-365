@@ -1,5 +1,16 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders, requireUser } from "../_shared/auth.ts";
+import {
+  DEFAULT_AI_MODEL,
+  assertAiEnv,
+  callAiGateway,
+  logAiRequest,
+  newRequestId,
+} from "../_shared/ai-runtime.ts";
+
+// Fail fast at boot when the AI configuration is incomplete.
+assertAiEnv();
+
 
 
 const SYSTEM_PROMPT = `You are a friendly, knowledgeable AI lab assistant for SkillLabs 365 — a cloud-based virtual lab platform where students practice with real Azure VMs via browser-based RDP/SSH sessions.
@@ -21,22 +32,23 @@ serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const requestId = newRequestId();
+  const startedAt = performance.now();
+  const json = (body: unknown, status = 200) =>
+    new Response(JSON.stringify({ ...(body as object), request_id: requestId }), {
+      status,
+      headers: { ...corsHeaders, "Content-Type": "application/json", "X-Request-Id": requestId },
+    });
+
+  let userId: string | null = null;
+
   try {
     const auth = await requireUser(req);
     if (auth instanceof Response) return auth;
+    userId = auth.userId;
 
     const { messages, context } = await req.json();
 
-
-    const LOVABLE_API_KEY = Deno.env.get("LOVABLE_API_KEY");
-    if (!LOVABLE_API_KEY) {
-      return new Response(
-        JSON.stringify({ error: "AI service not configured" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
-      );
-    }
-
-    // Build context message
     const contextMessage = context
       ? `\n\nStudent context:\n${JSON.stringify(context, null, 2)}`
       : "";
@@ -49,48 +61,79 @@ serve(async (req) => {
       })),
     ];
 
-    const response = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${LOVABLE_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-3.6-flash",
-        messages: aiMessages,
-        stream: true,
-      }),
-    });
+    const response = await callAiGateway(
+      { model: DEFAULT_AI_MODEL, messages: aiMessages, stream: true },
+      { apiKey: Deno.env.get("LOVABLE_API_KEY")!, requestId },
+    );
 
     if (!response.ok) {
+      const text = await response.text();
+      await logAiRequest({
+        functionName: "ai-chat",
+        requestId,
+        model: DEFAULT_AI_MODEL,
+        latencyMs: performance.now() - startedAt,
+        status: "error",
+        httpStatus: response.status,
+        errorType: "gateway_error",
+        errorMessage: text,
+        userId,
+      });
+
       if (response.status === 429) {
-        return new Response(
-          JSON.stringify({ error: "I'm getting too many requests right now. Please try again in a moment." }),
-          { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        return json(
+          { error: "I'm getting too many requests right now. Please try again in a moment." },
+          429,
         );
       }
       if (response.status === 402) {
-        return new Response(
-          JSON.stringify({ error: "AI service credits exhausted. Please contact your administrator." }),
-          { status: 402, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+        return json(
+          { error: "AI service credits exhausted. Please contact your administrator." },
+          402,
         );
       }
-      const text = await response.text();
-      console.error("AI gateway error:", response.status, text);
-      return new Response(
-        JSON.stringify({ error: "AI service temporarily unavailable" }),
-        { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      return json(
+        {
+          error:
+            "The AI assistant is temporarily unavailable. Please try again in a moment — if it keeps failing, an admin can check AI status.",
+        },
+        503,
       );
     }
 
+    await logAiRequest({
+      functionName: "ai-chat",
+      requestId,
+      model: DEFAULT_AI_MODEL,
+      latencyMs: performance.now() - startedAt,
+      status: "success",
+      httpStatus: response.status,
+      userId,
+    });
+
     return new Response(response.body, {
-      headers: { ...corsHeaders, "Content-Type": "text/event-stream" },
+      headers: {
+        ...corsHeaders,
+        "Content-Type": "text/event-stream",
+        "X-Request-Id": requestId,
+      },
     });
   } catch (e) {
-    console.error("ai-chat error:", e);
-    return new Response(
-      JSON.stringify({ error: e instanceof Error ? e.message : "Unknown error" }),
-      { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+    const message = e instanceof Error ? e.message : "Unknown error";
+    await logAiRequest({
+      functionName: "ai-chat",
+      requestId,
+      model: DEFAULT_AI_MODEL,
+      latencyMs: performance.now() - startedAt,
+      status: "error",
+      errorType: "unhandled_error",
+      errorMessage: message,
+      userId,
+    });
+    return json(
+      { error: "The AI assistant is temporarily unavailable. Please try again in a moment." },
+      503,
     );
   }
 });
+

@@ -1,0 +1,103 @@
+// AI provider health check. Admin-only; reports env config status, a live
+// gateway probe, and recent failure counts.
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { corsHeaders, jsonResponse, requireAdmin } from "../_shared/auth.ts";
+import {
+  DEFAULT_AI_MODEL,
+  callAiGateway,
+  logAiRequest,
+  missingAiEnv,
+  newRequestId,
+} from "../_shared/ai-runtime.ts";
+
+serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { headers: corsHeaders });
+  }
+
+  const auth = await requireAdmin(req);
+  if (auth instanceof Response) return auth;
+
+  const missing = missingAiEnv();
+  if (missing.length > 0) {
+    return jsonResponse({
+      status: "misconfigured",
+      model: DEFAULT_AI_MODEL,
+      missing_env: missing,
+      latency_ms: null,
+      checked_at: new Date().toISOString(),
+      message: `Missing configuration: ${missing.join(", ")}`,
+    });
+  }
+
+  const requestId = newRequestId();
+  const startedAt = performance.now();
+
+  try {
+    const response = await callAiGateway(
+      {
+        model: DEFAULT_AI_MODEL,
+        messages: [{ role: "user", content: "ping" }],
+        max_tokens: 1,
+        stream: false,
+      },
+      { apiKey: Deno.env.get("LOVABLE_API_KEY")!, requestId, maxAttempts: 1 },
+    );
+    const latency = performance.now() - startedAt;
+    const bodyText = await response.text();
+
+    const ok = response.ok;
+    await logAiRequest({
+      functionName: "ai-health",
+      requestId,
+      model: DEFAULT_AI_MODEL,
+      latencyMs: latency,
+      status: ok ? "success" : "error",
+      httpStatus: response.status,
+      errorType: ok ? undefined : "gateway_error",
+      errorMessage: ok ? undefined : bodyText,
+      userId: auth.userId,
+    });
+
+    const status = ok
+      ? "healthy"
+      : response.status === 429
+      ? "rate_limited"
+      : response.status === 402
+      ? "no_credits"
+      : "degraded";
+
+    return jsonResponse({
+      status,
+      model: DEFAULT_AI_MODEL,
+      missing_env: [],
+      latency_ms: Math.round(latency),
+      http_status: response.status,
+      checked_at: new Date().toISOString(),
+      message: ok
+        ? "AI provider responding normally"
+        : `AI provider returned ${response.status}`,
+    });
+  } catch (e) {
+    const latency = performance.now() - startedAt;
+    const message = e instanceof Error ? e.message : "Unknown error";
+    await logAiRequest({
+      functionName: "ai-health",
+      requestId,
+      model: DEFAULT_AI_MODEL,
+      latencyMs: latency,
+      status: "error",
+      errorType: "network_error",
+      errorMessage: message,
+      userId: auth.userId,
+    });
+    return jsonResponse({
+      status: "unreachable",
+      model: DEFAULT_AI_MODEL,
+      missing_env: [],
+      latency_ms: Math.round(latency),
+      checked_at: new Date().toISOString(),
+      message,
+    });
+  }
+});
