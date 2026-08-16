@@ -23,15 +23,19 @@ serve(async (req) => {
 
   const missing = missingAiEnv();
   if (missing.length > 0) {
+    const message = `Missing configuration: ${missing.join(", ")}`;
+    await sendAiAlert({ status: "misconfigured", message, latencyMs: null, model: DEFAULT_AI_MODEL });
     return jsonResponse({
       status: "misconfigured",
       model: DEFAULT_AI_MODEL,
       missing_env: missing,
       latency_ms: null,
+      circuit_open: false,
       checked_at: new Date().toISOString(),
-      message: `Missing configuration: ${missing.join(", ")}`,
+      message,
     });
   }
+
 
   const requestId = newRequestId();
   const startedAt = performance.now();
