@@ -1,5 +1,16 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { corsHeaders, requireUser } from "../_shared/auth.ts";
+import {
+  DEFAULT_AI_MODEL,
+  assertAiEnv,
+  callAiGateway,
+  logAiRequest,
+  newRequestId,
+} from "../_shared/ai-runtime.ts";
+
+// Fail fast at boot when the AI configuration is incomplete.
+assertAiEnv();
+
 
 
 const SYSTEM_PROMPT = `You are a friendly, knowledgeable AI lab assistant for SkillLabs 365 — a cloud-based virtual lab platform where students practice with real Azure VMs via browser-based RDP/SSH sessions.
