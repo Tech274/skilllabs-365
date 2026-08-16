@@ -24,6 +24,9 @@ import {
 import { EmptyState } from "@/components/EmptyState";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { AiHealthChart } from "@/components/AiHealthChart";
+import { AiQuotaManager } from "@/components/AiQuotaManager";
+import { AiAlertDeliveries } from "@/components/AiAlertDeliveries";
 
 interface HealthPayload {
   status: string;
@@ -183,6 +186,12 @@ export default function AiStatus() {
             </CardContent>
           </Card>
         </motion.div>
+
+        <AiHealthChart />
+
+        <AiQuotaManager />
+
+        <AiAlertDeliveries />
 
         <Card>
           <CardHeader className="pb-3">

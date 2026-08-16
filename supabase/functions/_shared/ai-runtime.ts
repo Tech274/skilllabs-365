@@ -42,6 +42,8 @@ export type AiLogEntry = {
   errorType?: string;
   errorMessage?: string;
   userId?: string | null;
+  orgId?: string | null;
+  attempts?: number;
 };
 
 const REDACTIONS: Array<[RegExp, string]> = [
@@ -86,6 +88,7 @@ export async function logAiRequest(entry: AiLogEntry): Promise<void> {
     status: entry.status,
     http_status: entry.httpStatus,
     error_type: entry.errorType,
+    attempts: entry.attempts ?? 1,
     error_message: safeError,
   });
   if (entry.status === "error") console.error(line);
@@ -100,6 +103,8 @@ export async function logAiRequest(entry: AiLogEntry): Promise<void> {
       latency_ms: Math.round(entry.latencyMs),
       status: entry.status,
       http_status: entry.httpStatus ?? null,
+      attempts: entry.attempts ?? 1,
+      org_id: entry.orgId ?? null,
       error_type: entry.errorType ?? null,
       error_message: safeError,
       user_id: entry.userId && entry.userId !== "00000000-0000-0000-0000-000000000000"
@@ -202,12 +207,19 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  */
 export async function callAiGateway(
   body: unknown,
-  opts: { apiKey: string; requestId: string; maxAttempts?: number },
+  opts: {
+    apiKey: string;
+    requestId: string;
+    maxAttempts?: number;
+    /** Mutable counter written with the number of attempts actually made. */
+    attemptCounter?: { count: number };
+  },
 ): Promise<Response> {
   const maxAttempts = opts.maxAttempts ?? 3;
   let lastError: unknown = null;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (opts.attemptCounter) opts.attemptCounter.count = attempt;
     try {
       const response = await fetch(AI_GATEWAY_URL, {
         method: "POST",

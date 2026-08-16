@@ -21,6 +21,10 @@ vi.mock("@/components/DashboardLayout", () => ({
   DashboardLayout: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
 }));
 
+vi.mock("@/components/AiHealthChart", () => ({ AiHealthChart: () => <div /> }));
+vi.mock("@/components/AiQuotaManager", () => ({ AiQuotaManager: () => <div /> }));
+vi.mock("@/components/AiAlertDeliveries", () => ({ AiAlertDeliveries: () => <div /> }));
+
 vi.mock("@/hooks/use-toast", () => ({ toast: vi.fn() }));
 
 import AiStatus from "../AiStatus";

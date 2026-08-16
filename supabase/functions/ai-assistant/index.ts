@@ -9,6 +9,7 @@ import {
   logAiRequest,
   newRequestId,
 } from "../_shared/ai-runtime.ts";
+import { enforceAiQuota } from "../_shared/ai-quota.ts";
 
 // Fail fast at boot when the AI configuration is incomplete.
 assertAiEnv();
@@ -47,11 +48,42 @@ serve(async (req) => {
     });
 
   let userId: string | null = null;
+  let orgId: string | null = null;
+  const attemptCounter = { count: 1 };
 
   try {
     const auth = await requireUser(req);
     if (auth instanceof Response) return auth;
     userId = auth.userId;
+
+    const quota = await enforceAiQuota(auth.userId, { isServiceRole: auth.isServiceRole });
+    orgId = quota.orgId;
+    if (!quota.allowed) {
+      console.warn(
+        `[ai-quota] blocked ${"ai-assistant"} for ${quota.scope} scope (${quota.used}/${quota.limit} per ${quota.window})`,
+      );
+      await logAiRequest({
+        functionName: "ai-assistant",
+        requestId,
+        latencyMs: performance.now() - startedAt,
+        status: "error",
+        httpStatus: 429,
+        errorType: "quota_exceeded",
+        errorMessage: `${quota.scope} ${quota.window} quota exceeded (${quota.used}/${quota.limit})`,
+        userId,
+        orgId,
+      });
+      return json(
+        {
+          error: quota.message,
+          quota_exceeded: true,
+          quota_scope: quota.scope,
+          quota_window: quota.window,
+          retry_after_seconds: quota.retryAfterSeconds,
+        },
+        429,
+      );
+    }
 
     const circuit = await checkCircuit();
     if (circuit.open) {
@@ -83,7 +115,7 @@ serve(async (req) => {
         ],
         stream: false,
       },
-      { apiKey: Deno.env.get("LOVABLE_API_KEY")!, requestId },
+      { apiKey: Deno.env.get("LOVABLE_API_KEY")!, requestId, attemptCounter },
     );
 
     if (!response.ok) {
@@ -98,6 +130,8 @@ serve(async (req) => {
         errorType: "gateway_error",
         errorMessage: text,
         userId,
+        orgId,
+        attempts: attemptCounter.count,
       });
 
       if (response.status === 429) {
@@ -126,6 +160,8 @@ serve(async (req) => {
       status: "success",
       httpStatus: response.status,
       userId,
+      orgId,
+      attempts: attemptCounter.count,
     });
 
     return json({ insight: content });
@@ -140,6 +176,8 @@ serve(async (req) => {
       errorType: "unhandled_error",
       errorMessage: message,
       userId,
+      orgId,
+      attempts: attemptCounter.count,
     });
     return json(
       { error: "The AI service is temporarily unavailable. Please try again in a moment." },

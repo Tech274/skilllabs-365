@@ -281,8 +281,48 @@ export type Database = {
         }
         Relationships: []
       }
+      ai_alert_deliveries: {
+        Row: {
+          alert_status: string
+          alert_title: string
+          channel: string
+          created_at: string
+          delivery_status: string
+          detail: string | null
+          id: string
+          latency_ms: number | null
+          model: string | null
+          recipients: number
+        }
+        Insert: {
+          alert_status: string
+          alert_title: string
+          channel: string
+          created_at?: string
+          delivery_status: string
+          detail?: string | null
+          id?: string
+          latency_ms?: number | null
+          model?: string | null
+          recipients?: number
+        }
+        Update: {
+          alert_status?: string
+          alert_title?: string
+          channel?: string
+          created_at?: string
+          delivery_status?: string
+          detail?: string | null
+          id?: string
+          latency_ms?: number | null
+          model?: string | null
+          recipients?: number
+        }
+        Relationships: []
+      }
       ai_request_logs: {
         Row: {
+          attempts: number
           created_at: string
           error_message: string | null
           error_type: string | null
@@ -291,11 +331,13 @@ export type Database = {
           id: string
           latency_ms: number | null
           model: string | null
+          org_id: string | null
           request_id: string | null
           status: string
           user_id: string | null
         }
         Insert: {
+          attempts?: number
           created_at?: string
           error_message?: string | null
           error_type?: string | null
@@ -304,11 +346,13 @@ export type Database = {
           id?: string
           latency_ms?: number | null
           model?: string | null
+          org_id?: string | null
           request_id?: string | null
           status: string
           user_id?: string | null
         }
         Update: {
+          attempts?: number
           created_at?: string
           error_message?: string | null
           error_type?: string | null
@@ -317,9 +361,57 @@ export type Database = {
           id?: string
           latency_ms?: number | null
           model?: string | null
+          org_id?: string | null
           request_id?: string | null
           status?: string
           user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "ai_request_logs_org_id_fkey"
+            columns: ["org_id"]
+            isOneToOne: false
+            referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      ai_usage_quotas: {
+        Row: {
+          active: boolean
+          created_at: string
+          created_by: string | null
+          daily_limit: number
+          id: string
+          note: string | null
+          per_minute_limit: number
+          scope: string
+          scope_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          daily_limit?: number
+          id?: string
+          note?: string | null
+          per_minute_limit?: number
+          scope: string
+          scope_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          created_at?: string
+          created_by?: string | null
+          daily_limit?: number
+          id?: string
+          note?: string | null
+          per_minute_limit?: number
+          scope?: string
+          scope_id?: string | null
+          updated_at?: string
         }
         Relationships: []
       }
