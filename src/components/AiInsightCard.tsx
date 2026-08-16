@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Sparkles, Loader2, ChevronDown, ChevronUp, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { motion, AnimatePresence } from "framer-motion";
-import { supabase } from "@/integrations/supabase/client";
+import { AI_FALLBACK_MESSAGE, invokeAiFunction } from "@/lib/ai-client";
 import ReactMarkdown from "react-markdown";
 import { cn } from "@/lib/utils";
 
@@ -32,20 +32,16 @@ export function AiInsightCard({
     setLoading(true);
     setError(null);
     try {
-      const { data: result, error: fnError } = await supabase.functions.invoke(
-        "ai-assistant",
-        { body: { type, data } }
-      );
-      if (fnError) throw fnError;
-      if (result?.error) throw new Error(result.error);
+      const result = await invokeAiFunction<{ insight: string }>("ai-assistant", { type, data });
       setInsight(result.insight);
       setExpanded(true);
     } catch (err: any) {
-      setError(err.message || "Failed to get AI insight");
+      setError(err?.message || AI_FALLBACK_MESSAGE);
     } finally {
       setLoading(false);
     }
   };
+
 
   if (variant === "inline") {
     return (
