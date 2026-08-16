@@ -94,6 +94,10 @@ export default function CloudProviders() {
           </AlertDescription>
         </Alert>
 
+        <CloudProviderHealthPanel />
+
+
+
         <Tabs defaultValue="aws">
           <TabsList>
             <TabsTrigger value="aws">AWS</TabsTrigger>
