@@ -1,6 +1,8 @@
-import { corsHeadersFor, corsHeaders, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { azureStatusToVmStatus } from "../_shared/vm-state.ts";
-
+import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
+import { getAzureToken } from "../_shared/azure-preflight.ts";
+import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
 
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
@@ -9,12 +11,6 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID")!;
-    const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
-    const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
-    const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID")!;
-    const AZURE_RESOURCE_GROUP = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
-
     const auth = await requireUser(req);
     if (auth instanceof Response) return auth;
     const supabase = auth.supabase;
@@ -30,47 +26,29 @@ Deno.serve(async (req) => {
     if (forbidden) return forbidden;
 
     if (vm.status !== "provisioning") {
-      return new Response(JSON.stringify({ status: vm.status }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ status: vm.status });
     }
 
     // Extract VM name from azure_vm_id
     const azureVmId = vm.azure_vm_id;
     if (!azureVmId) {
-      return new Response(JSON.stringify({ status: "provisioning" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ status: "provisioning" });
     }
     const vmName = azureVmId.split("/").pop()!;
 
-    // Get Azure token
-    const tokenRes = await fetch(
-      `https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({
-          grant_type: "client_credentials",
-          client_id: AZURE_CLIENT_ID,
-          client_secret: AZURE_CLIENT_SECRET,
-          scope: "https://management.azure.com/.default",
-        }),
-      }
-    );
-    const tokenData = await tokenRes.json();
-    const azureToken = tokenData.access_token;
+    // Credentials come from the Resource Providers registry that created this VM.
+    const admin = serviceClient();
+    const azure = await resolveAzureRuntime(admin, vm.provider_account_id);
+    const azureToken = await getAzureToken(azure.tenantId, azure.clientId, azure.clientSecret);
 
     // Check VM instance view
     const ivRes = await fetch(
-      `https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Compute/virtualMachines/${vmName}/instanceView?api-version=2024-03-01`,
-      { headers: { Authorization: `Bearer ${azureToken}` } }
+      `https://management.azure.com/subscriptions/${azure.subscriptionId}/resourceGroups/${azure.resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}/instanceView?api-version=2024-03-01`,
+      { headers: { Authorization: `Bearer ${azureToken}` } },
     );
 
     if (!ivRes.ok) {
-      return new Response(JSON.stringify({ status: "provisioning" }), {
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      });
+      return jsonResponse({ status: "provisioning" });
     }
 
     const ivData = await ivRes.json();
@@ -81,8 +59,8 @@ Deno.serve(async (req) => {
       // Get updated private IP
       const nicName = `${vmName}-nic`;
       const nicRes = await fetch(
-        `https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/${AZURE_RESOURCE_GROUP}/providers/Microsoft.Network/networkInterfaces/${nicName}?api-version=2024-03-01`,
-        { headers: { Authorization: `Bearer ${azureToken}` } }
+        `https://management.azure.com/subscriptions/${azure.subscriptionId}/resourceGroups/${azure.resourceGroup}/providers/Microsoft.Network/networkInterfaces/${nicName}?api-version=2024-03-01`,
+        { headers: { Authorization: `Bearer ${azureToken}` } },
       );
       let privateIp = vm.private_ip;
       if (nicRes.ok) {
@@ -104,7 +82,7 @@ Deno.serve(async (req) => {
     console.error("check-vm-status error:", error);
     return new Response(
       JSON.stringify({ error: error instanceof Error ? error.message : "Unknown error" }),
-      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+      { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
 });
