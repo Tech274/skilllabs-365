@@ -44,6 +44,8 @@ const CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder?: 
   azure: [
     { key: "subscription_id", label: "Subscription ID", placeholder: "00000000-0000-0000-0000-000000000000" },
     { key: "resource_group", label: "Resource Group (optional)", placeholder: "skilllabs-rg" },
+    { key: "subnet_id", label: "Subnet ID (required for lab VMs)", placeholder: "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>" },
+    { key: "vm_admin_username", label: "VM Admin Username (optional)", placeholder: "labadmin" },
     { key: "role_definition_id", label: "Role Definition ID (optional)", placeholder: "Reader by default" },
   ],
   aws: [
