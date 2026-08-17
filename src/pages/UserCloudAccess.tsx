@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   Cloud, Clock, CreditCard, Calendar, ArrowLeft, Loader2, ExternalLink,
-  RefreshCw, X, AlertCircle, CheckCircle2, Copy, KeyRound, LogOut, Timer,
+  RefreshCw, AlertCircle, CheckCircle2, Copy, KeyRound, LogOut, Timer,
 } from "lucide-react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { EmptyState } from "@/components/EmptyState";
