@@ -412,6 +412,9 @@ Deno.serve(async (req) => {
         { status: 400, headers: traceHeaders },
       );
     }
+    providerCtx.subscriptionId = azure.subscriptionId;
+    providerCtx.resourceGroup = azure.resourceGroup;
+    providerCtx.accountName = azure.displayName;
     await trace.success(SOURCE, "resource-provider", `Using resource provider "${azure.displayName}"`, {
       account_id: azure.accountId,
       subscription_id: azure.subscriptionId,
