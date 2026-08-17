@@ -39,6 +39,7 @@ import { AiInsightCard } from "@/components/AiInsightCard";
 import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 import { useProvisioning } from "@/hooks/use-provisioning";
 import { estimateLabCost } from "@/lib/azure-pricing";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 interface QuotaItem {
   name: string;
@@ -152,6 +153,7 @@ const Index = () => {
     try {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
+        headers: idempotencyHeaders(`provision:${lab.id}`),
       });
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
 

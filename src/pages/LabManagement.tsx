@@ -18,6 +18,7 @@ import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { readFunctionError } from "@/lib/function-error";
 import type { Tables, TablesInsert } from "@/integrations/supabase/types";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 type LabTemplate = Tables<"lab_templates">;
 
@@ -145,7 +146,10 @@ export default function LabManagement() {
   const handleLaunchLab = async (lab: LabTemplate) => {
     setLaunchingId(lab.id);
     try {
-      const { data, error } = await supabase.functions.invoke("provision-lab", { body: { lab_template_id: lab.id } });
+      const { data, error } = await supabase.functions.invoke("provision-lab", {
+        body: { lab_template_id: lab.id },
+        headers: idempotencyHeaders(`provision:${lab.id}`),
+      });
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
       toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
       navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);

@@ -17,6 +17,7 @@ import {
 } from "recharts";
 import { AiInsightCard } from "@/components/AiInsightCard";
 import { AiChatPanel } from "@/components/AiChatPanel";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 type LabTemplate = Tables<"lab_templates">;
 
@@ -138,6 +139,7 @@ export default function InstructorDashboard() {
     try {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
+        headers: idempotencyHeaders(`provision:${lab.id}`),
       });
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
       toast({ title: "VM Ready", description: "Redirecting to your lab session..." });

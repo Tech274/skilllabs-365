@@ -24,6 +24,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
+import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 const isMixedContent = (url: string) => {
@@ -83,6 +85,7 @@ export default function LabSession() {
     try {
       const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
         body: { action: "create-session", vm_id: targetVmId },
+        headers: idempotencyHeaders(`guac-session:${targetVmId}`),
       });
 
       if (error) throw error;
