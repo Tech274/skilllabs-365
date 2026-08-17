@@ -37,3 +37,27 @@ jobs:
         run: bash scripts/deno-check.sh
       - name: Run edge function tests
         run: deno test --allow-all --no-check supabase/functions/
+
+  staging-smoke:
+    name: Staging smoke test (provision / connect / cleanup)
+    # Runs on every staging deploy (push to main). A cleanup verification
+    # failure fails this job and therefore the deployment gate.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [frontend, edge-functions]
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Run staging smoke test
+        env:
+          SUPABASE_URL: ${{ secrets.STAGING_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.STAGING_SUPABASE_ANON_KEY }}
+          SMOKE_EMAIL: ${{ secrets.SMOKE_EMAIL }}
+          SMOKE_PASSWORD: ${{ secrets.SMOKE_PASSWORD }}
+          SMOKE_LAB_TEMPLATE_ID: ${{ secrets.SMOKE_LAB_TEMPLATE_ID }}
+        run: bash scripts/smoke-test.sh
+
