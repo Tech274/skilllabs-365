@@ -314,6 +314,19 @@ export default function AdminResourceProviders() {
                                 <span className="font-mono text-foreground/80">{a.default_region || "—"}</span>
                               </div>
                             </div>
+                            {a.readiness && !a.readiness.ready && (
+                              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
+                                <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                <span>
+                                  Lab launches are blocked — missing: {a.readiness.missing.map((m) => m.label).join(", ")}
+                                </span>
+                              </div>
+                            )}
+                            {a.readiness?.ready && (
+                              <Badge variant="outline" className="gap-1 text-[10px] border-success/40 text-success">
+                                <ShieldCheck className="h-3 w-3" /> Ready for lab VMs
+                              </Badge>
+                            )}
                             <div className="flex flex-wrap gap-1">
                               {Object.entries(a.credential_keys ?? {}).filter(([, set]) => set).map(([k]) => (
                                 <Badge key={k} variant="outline" className="text-[10px]">{k} set</Badge>
@@ -415,6 +428,59 @@ export default function AdminResourceProviders() {
             {providerConfig.length > 0 && (
               <div className="space-y-3 rounded-lg border border-border p-3">
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Configuration</p>
+
+                {form.provider === "azure" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">VM access mode</Label>
+                      <Select
+                        value={form.config.vm_auth_mode || "password"}
+                        onValueChange={(v) => setForm({ ...form, config: { ...form.config, vm_auth_mode: v } })}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="password">Stored VM admin password</SelectItem>
+                          <SelectItem value="key_vault">Key Vault secret</SelectItem>
+                          <SelectItem value="managed_identity">Managed identity (no stored password)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">
+                        Managed identity attaches an identity to each lab VM and uses an ephemeral bootstrap
+                        credential that is never stored. Key Vault reads the password at provision time.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="text-xs">Subnet</Label>
+                        <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={loadSubnets} disabled={loadingSubnets}>
+                          {loadingSubnets ? <Loader2 className="h-3 w-3 animate-spin" /> : <PlugZap className="h-3 w-3" />}
+                          Load subnets
+                        </Button>
+                      </div>
+                      {subnets.length > 0 ? (
+                        <Select
+                          value={form.config.subnet_id ?? ""}
+                          onValueChange={(v) => setForm({ ...form, config: { ...form.config, subnet_id: v } })}
+                        >
+                          <SelectTrigger><SelectValue placeholder="Select a VNet / subnet" /></SelectTrigger>
+                          <SelectContent>
+                            {subnets.map((sn) => (
+                              <SelectItem key={sn.id} value={sn.id}>{sn.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : null}
+                      <Input
+                        value={form.config.subnet_id ?? ""}
+                        placeholder="/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>"
+                        onChange={(e) => setForm({ ...form, config: { ...form.config, subnet_id: e.target.value } })}
+                      />
+                      {formErrors.subnet_id && <p className="text-[11px] text-destructive">{formErrors.subnet_id}</p>}
+                    </div>
+                  </>
+                )}
+
                 {providerConfig.map((f) => (
                   <div key={f.key} className="space-y-1.5">
                     <Label className="text-xs">{f.label}</Label>
@@ -423,6 +489,7 @@ export default function AdminResourceProviders() {
                       placeholder={f.placeholder}
                       onChange={(e) => setForm({ ...form, config: { ...form.config, [f.key]: e.target.value } })}
                     />
+                    {formErrors[f.key] && <p className="text-[11px] text-destructive">{formErrors[f.key]}</p>}
                   </div>
                 ))}
               </div>
@@ -437,11 +504,12 @@ export default function AdminResourceProviders() {
                   <div key={f.key} className="space-y-1.5">
                     <Label className="text-xs">{f.label}</Label>
                     <Input
-                      type={f.key.includes("secret") || f.key.includes("token") ? "password" : "text"}
+                      type={f.key.includes("secret") || f.key.includes("token") || f.key.includes("password") ? "password" : "text"}
                       autoComplete="new-password"
                       value={form.credentials[f.key] ?? ""}
                       onChange={(e) => setForm({ ...form, credentials: { ...form.credentials, [f.key]: e.target.value } })}
                     />
+                    {formErrors[f.key] && <p className="text-[11px] text-destructive">{formErrors[f.key]}</p>}
                   </div>
                 ))}
               </div>
