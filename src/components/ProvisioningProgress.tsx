@@ -95,6 +95,7 @@ export function ProvisioningProgress({
           </div>
         ))}
       </div>
+      {vmId && <ProvisioningTimeline vmId={vmId} className="mt-1" />}
     </div>
   );
 }
