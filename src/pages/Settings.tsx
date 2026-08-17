@@ -1,6 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { Clock, Server, Bell, Shield, Save, DollarSign, Loader2 } from "lucide-react";
+import { Clock, Server, Bell, Shield, Save, DollarSign, Loader2, Network } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -35,13 +35,23 @@ export default function Settings() {
   const [budgetCap, setBudgetCap] = useState(100);
   const [perLabThreshold, setPerLabThreshold] = useState(0);
   const [perLabAlertEnabled, setPerLabAlertEnabled] = useState(false);
+  const [network, setNetwork] = useState({
+    resource_group: "",
+    vnet_name: "skilllabs-vnet",
+    vnet_cidr: "10.30.0.0/16",
+    subnet_name: "default",
+    subnet_cidr: "10.30.1.0/24",
+    connectivity_check_enabled: false,
+    connectivity_check_timeout_ms: 5000,
+  });
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     Promise.all([
       supabase.from("platform_settings").select("key, value").eq("key", "budget_cap").maybeSingle(),
       supabase.from("platform_settings").select("key, value").eq("key", "per_lab_cost_alert").maybeSingle(),
-    ]).then(([budgetData, labAlertData]) => {
+      supabase.from("platform_settings").select("key, value").eq("key", "azure_network_defaults").maybeSingle(),
+    ]).then(([budgetData, labAlertData, networkData]) => {
       if (budgetData.data?.value) {
         const v = budgetData.data.value as any;
         setBudgetEnabled(v.enabled ?? false);
@@ -52,6 +62,10 @@ export default function Settings() {
         const v = labAlertData.data.value as any;
         setPerLabAlertEnabled(v.enabled ?? false);
         setPerLabThreshold(v.threshold ?? 0);
+      }
+      if (networkData.data?.value) {
+        const v = networkData.data.value as any;
+        setNetwork((prev) => ({ ...prev, ...v }));
       }
     });
   }, []);
@@ -66,6 +80,10 @@ export default function Settings() {
         ),
         supabase.from("platform_settings").upsert(
           { key: "per_lab_cost_alert", value: { enabled: perLabAlertEnabled, threshold: perLabThreshold } as any, updated_at: new Date().toISOString() },
+          { onConflict: "key" }
+        ),
+        supabase.from("platform_settings").upsert(
+          { key: "azure_network_defaults", value: network as any, updated_at: new Date().toISOString() },
           { onConflict: "key" }
         ),
       ]);
@@ -97,6 +115,7 @@ export default function Settings() {
             <TabsTrigger value="timeouts" className="gap-1.5"><Clock className="h-3.5 w-3.5" /> Timeouts</TabsTrigger>
             <TabsTrigger value="vm" className="gap-1.5"><Server className="h-3.5 w-3.5" /> VM Limits</TabsTrigger>
             <TabsTrigger value="budget" className="gap-1.5"><DollarSign className="h-3.5 w-3.5" /> Budget</TabsTrigger>
+            <TabsTrigger value="network" className="gap-1.5"><Network className="h-3.5 w-3.5" /> Network</TabsTrigger>
             <TabsTrigger value="notifications" className="gap-1.5"><Bell className="h-3.5 w-3.5" /> Notifications</TabsTrigger>
             <TabsTrigger value="security" className="gap-1.5"><Shield className="h-3.5 w-3.5" /> Security</TabsTrigger>
           </TabsList>
@@ -257,6 +276,77 @@ export default function Settings() {
                     </div>
                     <p className="text-xs text-muted-foreground">
                       Labs exceeding this cost will be flagged with a warning on the Cost Analytics page.
+                    </p>
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </TabsContent>
+
+          {/* Network */}
+          <TabsContent value="network" className="mt-6">
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+              className="rounded-xl border border-border bg-card p-6 space-y-6 max-w-2xl">
+              <div>
+                <Label className="text-base font-semibold">Automatic Lab Network</Label>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Used when a resource provider has no Subnet ID and provisioning has to create the VNet/subnet.
+                </p>
+              </div>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="space-y-2">
+                  <Label>Resource Group</Label>
+                  <Input value={network.resource_group}
+                    onChange={(e) => setNetwork(p => ({ ...p, resource_group: e.target.value }))}
+                    placeholder="skilllabs-rg" className="font-mono" />
+                  <p className="text-xs text-muted-foreground">Leave blank to use the provider account's resource group.</p>
+                </div>
+                <div className="space-y-2">
+                  <Label>VNet Name</Label>
+                  <Input value={network.vnet_name}
+                    onChange={(e) => setNetwork(p => ({ ...p, vnet_name: e.target.value }))}
+                    className="font-mono" />
+                </div>
+                <div className="space-y-2">
+                  <Label>VNet CIDR</Label>
+                  <Input value={network.vnet_cidr}
+                    onChange={(e) => setNetwork(p => ({ ...p, vnet_cidr: e.target.value }))}
+                    placeholder="10.30.0.0/16" className="font-mono" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Subnet Name</Label>
+                  <Input value={network.subnet_name}
+                    onChange={(e) => setNetwork(p => ({ ...p, subnet_name: e.target.value }))}
+                    className="font-mono" />
+                </div>
+                <div className="space-y-2">
+                  <Label>Subnet CIDR</Label>
+                  <Input value={network.subnet_cidr}
+                    onChange={(e) => setNetwork(p => ({ ...p, subnet_cidr: e.target.value }))}
+                    placeholder="10.30.1.0/24" className="font-mono" />
+                </div>
+              </div>
+
+              <div className="border-t border-border pt-6 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <Label className="text-base font-semibold">Post-Provisioning Connectivity Check</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      Probe SSH (22) or RDP (3389) after the VM is created and record the result on the provisioning timeline.
+                    </p>
+                  </div>
+                  <Switch checked={network.connectivity_check_enabled}
+                    onCheckedChange={(v) => setNetwork(p => ({ ...p, connectivity_check_enabled: v }))} />
+                </div>
+                {network.connectivity_check_enabled && (
+                  <div className="space-y-2 max-w-xs">
+                    <Label>Probe Timeout (ms)</Label>
+                    <Input type="number" min={1000} max={30000} step={500}
+                      value={network.connectivity_check_timeout_ms}
+                      onChange={(e) => setNetwork(p => ({ ...p, connectivity_check_timeout_ms: Number(e.target.value) }))}
+                      className="font-mono" />
+                    <p className="text-xs text-muted-foreground">
+                      Lab VMs are private, so a failed probe is informational only — it never blocks provisioning.
                     </p>
                   </div>
                 )}
