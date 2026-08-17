@@ -18,6 +18,7 @@ import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 import { useProvisioning } from "@/hooks/use-provisioning";
 import { estimateLabCost } from "@/lib/azure-pricing";
 import { DollarSign } from "lucide-react";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -52,6 +53,7 @@ export default function StudentDashboard() {
     try {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
+        headers: idempotencyHeaders(`provision:${lab.id}`),
       });
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
 
@@ -63,6 +65,7 @@ export default function StudentDashboard() {
         toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
       }
     } catch (err: any) {
+      resetIdempotency(`provision:${lab.id}`);
       const message = err.message || "Failed to provision VM. Please try again.";
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
       toast({ title: "Launch Failed", description: message, variant: "destructive" });
@@ -189,6 +192,7 @@ export default function StudentDashboard() {
                   {provisioning.isProvisioning && provisioning.labId === lab.id && (
                     <ProvisioningProgress
                       startedAt={provisioning.startedAt!}
+                      vmId={provisioning.vmId}
                       onCancel={provisioning.cancelProvisioning}
                       cancelling={provisioning.cancelling}
                     />

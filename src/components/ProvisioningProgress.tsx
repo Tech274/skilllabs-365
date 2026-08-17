@@ -3,12 +3,15 @@ import { Progress } from "@/components/ui/progress";
 import { Loader2, Server, Wifi, CheckCircle2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
 
 interface ProvisioningProgressProps {
   startedAt: number;
   estimatedSeconds?: number;
   onCancel?: () => void;
   cancelling?: boolean;
+  /** When provided, the live Edge Function step timeline is streamed below the bar. */
+  vmId?: string | null;
   className?: string;
 }
 
@@ -24,6 +27,7 @@ export function ProvisioningProgress({
   estimatedSeconds = 90,
   onCancel,
   cancelling,
+  vmId,
   className,
 }: ProvisioningProgressProps) {
   const [elapsed, setElapsed] = useState(0);
@@ -91,6 +95,7 @@ export function ProvisioningProgress({
           </div>
         ))}
       </div>
+      {vmId && <ProvisioningTimeline vmId={vmId} className="mt-1" />}
     </div>
   );
 }

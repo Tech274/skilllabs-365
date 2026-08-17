@@ -39,6 +39,7 @@ import { AiInsightCard } from "@/components/AiInsightCard";
 import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 import { useProvisioning } from "@/hooks/use-provisioning";
 import { estimateLabCost } from "@/lib/azure-pricing";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 interface QuotaItem {
   name: string;
@@ -152,6 +153,7 @@ const Index = () => {
     try {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
+        headers: idempotencyHeaders(`provision:${lab.id}`),
       });
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
 
@@ -164,6 +166,8 @@ const Index = () => {
         toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
       }
     } catch (err: any) {
+      // Failed attempt: next click should be a fresh provisioning operation.
+      resetIdempotency(`provision:${lab.id}`);
       toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
     } finally {
       setLaunchingId(null);
@@ -311,6 +315,7 @@ const Index = () => {
             {provisioning.isProvisioning && (
               <ProvisioningProgress
                 startedAt={provisioning.startedAt!}
+                vmId={provisioning.vmId}
                 onCancel={provisioning.cancelProvisioning}
                 cancelling={provisioning.cancelling}
                 className="mt-4"

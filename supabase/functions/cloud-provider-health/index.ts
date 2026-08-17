@@ -17,13 +17,13 @@ type Check = {
 };
 
 async function sha256Hex(data: string): Promise<string> {
-  const hash = await crypto.subtle.digest("SHA-256", enc.encode(data));
+  const hash = await crypto.subtle.digest("SHA-256", enc.encode(data) as BufferSource);
   return [...new Uint8Array(hash)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 async function hmac(key: Uint8Array, data: string): Promise<Uint8Array> {
-  const k = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  return new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(data)));
+  const k = await crypto.subtle.importKey("raw", key as BufferSource, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(data) as BufferSource));
 }
 
 function grade(latency: number): "healthy" | "degraded" {

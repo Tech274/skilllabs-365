@@ -24,6 +24,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
+import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 const isMixedContent = (url: string) => {
@@ -83,6 +85,7 @@ export default function LabSession() {
     try {
       const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
         body: { action: "create-session", vm_id: targetVmId },
+        headers: idempotencyHeaders(`guac-session:${targetVmId}`),
       });
 
       if (error) throw error;
@@ -102,6 +105,7 @@ export default function LabSession() {
       iframeTimerRef.current = setTimeout(() => setIframeLoadFailed(true), 15000);
     } catch (err) {
       console.error("Failed to create Guacamole session:", err);
+      resetIdempotency(`guac-session:${targetVmId}`);
       setConnectionState("error");
     }
   }, []);
@@ -414,6 +418,7 @@ export default function LabSession() {
               />
               <h2 className="text-lg font-semibold text-foreground mb-2">Connecting to Lab Session</h2>
               <p className="text-sm text-muted-foreground mb-1">Establishing secure {session.protocol} connection...</p>
+              {vmId && <ProvisioningTimeline vmId={vmId} className="mt-6 w-full max-w-md text-left" />}
               <p className="text-xs text-muted-foreground font-mono">{session.privateIp} · {session.region}</p>
               <div className="mt-8 space-y-2 text-xs text-muted-foreground">
                 <motion.div
@@ -462,6 +467,7 @@ export default function LabSession() {
               </div>
               <h2 className="text-lg font-semibold text-foreground mb-2">Connection Failed</h2>
               <p className="text-sm text-muted-foreground mb-6">Unable to establish connection to the remote session.</p>
+              {vmId && <ProvisioningTimeline vmId={vmId} className="mb-6 w-full max-w-md text-left" />}
               <div className="flex gap-3">
                 <Button variant="outline" onClick={() => navigate("/labs")}>
                   Back to Labs

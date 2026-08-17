@@ -38,10 +38,11 @@ export async function getAzureToken(
 export function detectConfigIssue(
   raw: string,
   ctx: { subscriptionId?: string; resourceGroup?: string } = {},
-): { setting: string; suggestion: string } | null {
+): { code: string; setting: string; suggestion: string } | null {
   const m = raw || "";
   if (/SubscriptionNotFound|could not be found|InvalidSubscriptionId/i.test(m)) {
     return {
+      code: "SubscriptionNotFound",
       setting: "AZURE_SUBSCRIPTION_ID",
       suggestion:
         `Azure does not recognise subscription "${ctx.subscriptionId ?? "(unset)"}" for this service principal. ` +
@@ -50,30 +51,35 @@ export function detectConfigIssue(
   }
   if (/DisabledSubscription|SubscriptionDisabled/i.test(m)) {
     return {
+      code: "DisabledSubscription",
       setting: "AZURE_SUBSCRIPTION_ID",
       suggestion: "The Azure subscription is disabled. Re-enable it in Azure or point AZURE_SUBSCRIPTION_ID at an active subscription.",
     };
   }
   if (/AuthorizationFailed|does not have authorization/i.test(m)) {
     return {
+      code: "AuthorizationFailed",
       setting: "AZURE_CLIENT_ID / role assignment",
       suggestion: "The service principal lacks permission. Assign it the Contributor role on the subscription or resource group.",
     };
   }
   if (/ResourceGroupNotFound/i.test(m)) {
     return {
+      code: "ResourceGroupNotFound",
       setting: "AZURE_RESOURCE_GROUP",
       suggestion: `Resource group "${ctx.resourceGroup ?? "(unset)"}" does not exist in this subscription. Create it or update AZURE_RESOURCE_GROUP.`,
     };
   }
   if (/AADSTS|invalid_client|unauthorized_client|Azure auth failed/i.test(m)) {
     return {
+      code: "InvalidClientSecret",
       setting: "AZURE_CLIENT_SECRET",
       suggestion: "Service principal sign-in failed. Re-enter AZURE_CLIENT_ID / AZURE_CLIENT_SECRET (use the secret *value*, not the secret ID) and AZURE_TENANT_ID.",
     };
   }
   if (/MissingSubscriptionRegistration/i.test(m)) {
     return {
+      code: "MissingSubscriptionRegistration",
       setting: "Azure resource providers",
       suggestion: "Register the Microsoft.Compute and Microsoft.Network resource providers on the subscription.",
     };

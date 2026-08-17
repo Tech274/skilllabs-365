@@ -1,5 +1,9 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
+import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+
+const SOURCE = "cleanup-idle-labs";
 
 const IDLE_TIMEOUT_MINUTES = 15;
 const STUCK_PROVISIONING_MINUTES = 10;
@@ -87,11 +91,13 @@ Deno.serve(async (req) => {
     // Parse optional body for manual trigger (before auth so we can branch on action)
     let action = "auto-cleanup";
     let targetVmId: string | null = null;
+    let rawBody: Record<string, unknown> = {};
     try {
-      const body = await req.json();
-      action = body.action || action;
-      targetVmId = body.vm_id || null;
+      rawBody = await req.json();
+      action = (rawBody.action as string) || action;
+      targetVmId = (rawBody.vm_id as string) || null;
     } catch { /* no body = scheduled run */ }
+    const correlationId = correlationIdFrom(req);
 
     // `cancel-provisioning` is the only student-callable action: it is scoped to
     // the caller's own VM. Everything else stays admin / service-role only.
@@ -119,7 +125,7 @@ Deno.serve(async (req) => {
 
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status, user_id")
+        .select("id, azure_vm_id, status, user_id, lab_template_id")
         .eq("id", targetVmId)
         .maybeSingle();
       if (!vm) return errorResponse("VM not found", 404);
@@ -127,23 +133,70 @@ Deno.serve(async (req) => {
       const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
       if (forbidden) return forbidden;
 
-      await supabase
-        .from("sessions")
-        .update({ ended_at: new Date().toISOString(), status: "completed" })
-        .eq("vm_id", targetVmId)
-        .eq("status", "active");
+      const timeline = new ProvisioningTimeline(supabase, {
+        correlationId,
+        userId: vm.user_id,
+        vmId: vm.id,
+        labTemplateId: vm.lab_template_id,
+      });
 
-      if (vm.azure_vm_id) {
-        try {
-          const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
-          await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, extractVmName(vm.azure_vm_id));
-        } catch (e) {
-          console.error("cancel-provisioning: azure delete failed", e);
-        }
+      // Terminal already -> nothing to do. Cancelling twice must be a no-op,
+      // never a second Azure delete call.
+      if (vm.status === "terminated" || vm.status === "failed") {
+        await timeline.skipped(SOURCE, "cancel", "VM was already stopped — cancellation ignored", { status: vm.status });
+        return jsonResponse({ success: true, action: "already-cancelled", vm_id: targetVmId, correlation_id: correlationId });
       }
 
-      await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", targetVmId);
-      return jsonResponse({ success: true, action: "cancelled", vm_id: targetVmId });
+      // Idempotency key guards concurrent duplicate cancels.
+      const cancelKey = idempotencyKeyFrom(req, { ...rawBody, idempotency_key: rawBody.idempotency_key ?? `cancel:${targetVmId}` });
+      const claim = await claimIdempotency(supabase, {
+        key: cancelKey,
+        userId: auth.userId,
+        action: "cancel-provisioning",
+        correlationId,
+      });
+      if (claim.outcome === "replay") {
+        await timeline.skipped(SOURCE, "cancel", "Duplicate cancellation replayed", { key: cancelKey });
+        return jsonResponse({ ...claim.response, idempotent_replay: true });
+      }
+      if (claim.outcome === "in_progress") {
+        await timeline.skipped(SOURCE, "cancel", "Duplicate cancellation ignored — one is already running", { key: cancelKey });
+        return jsonResponse({ success: true, action: "cancel-in-progress", vm_id: targetVmId, idempotent_replay: true });
+      }
+
+      try {
+        await timeline.start(SOURCE, "cancel", "Cancelling lab and releasing Azure resources");
+
+        await supabase
+          .from("sessions")
+          .update({ ended_at: new Date().toISOString(), status: "completed" })
+          .eq("vm_id", targetVmId)
+          .eq("status", "active");
+
+        if (vm.azure_vm_id) {
+          try {
+            const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+            await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, extractVmName(vm.azure_vm_id));
+          } catch (e) {
+            console.error("cancel-provisioning: azure delete failed", e);
+            await timeline.failed(SOURCE, "azure-delete", e instanceof Error ? e.message : "Azure delete failed");
+          }
+        }
+
+        await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", targetVmId);
+        const response = { success: true, action: "cancelled", vm_id: targetVmId, correlation_id: correlationId };
+        await completeIdempotency(supabase, {
+          key: cancelKey,
+          userId: auth.userId,
+          action: "cancel-provisioning",
+          response,
+        });
+        await timeline.success(SOURCE, "cancel", "Lab cancelled and Azure resources released");
+        return jsonResponse(response);
+      } catch (e) {
+        await releaseIdempotency(supabase, { key: cancelKey, userId: auth.userId, action: "cancel-provisioning" });
+        throw e;
+      }
     }
 
     // Handle targeted stop/delete actions
