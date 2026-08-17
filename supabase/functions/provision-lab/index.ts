@@ -370,6 +370,93 @@ Deno.serve(async (req) => {
       throw new Error(`Lab template not found: ${templateError?.message || lab_template_id}`);
     }
 
+    // --- Resource Provider ------------------------------------------------
+    // Every lab template must resolve to an active Azure account in the
+    // Resource Providers registry (explicit selection or the provider default).
+    // Without one we refuse to provision — no ambient/legacy credentials exist.
+    if (template.provider && template.provider !== "azure") {
+      return new Response(
+        JSON.stringify({
+          error: `Lab VM provisioning currently supports Azure resource providers only (template is set to ${template.provider}).`,
+          setting: "Lab template → Resource provider",
+          correlation_id: correlationId,
+        }),
+        { status: 400, headers: traceHeaders },
+      );
+    }
+
+    await trace.start(SOURCE, "resource-provider", "Resolving resource provider account for this lab");
+    let azure: AzureRuntime;
+    try {
+      azure = await resolveAzureRuntime(supabase, template.provider_account_id);
+      assertVmProvisioningReady(azure);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Resource provider not configured";
+      const setting = e instanceof ProviderConfigError ? e.setting : "Resource Providers";
+      const suggestion = e instanceof ProviderConfigError ? e.suggestion : undefined;
+      await trace.failed(SOURCE, "resource-provider", message, { setting });
+      await notifyConfigIssue(service, {
+        provider: "azure",
+        code: "ResourceProviderNotConfigured",
+        setting,
+        message,
+        suggestion,
+        context: "lab provisioning",
+      });
+      return new Response(
+        JSON.stringify({ error: message, setting, suggestion, correlation_id: correlationId, stage: "resource-provider" }),
+        { status: 400, headers: traceHeaders },
+      );
+    }
+    await trace.success(SOURCE, "resource-provider", `Using resource provider "${azure.displayName}"`, {
+      account_id: azure.accountId,
+      subscription_id: azure.subscriptionId,
+      resource_group: azure.resourceGroup,
+    });
+
+    // Preflight: confirm the subscription exists and the service principal can
+    // reach it before we create any DB row or Azure resource.
+    await trace.start(SOURCE, "preflight", "Validating Azure subscription and service principal access");
+    const preflight = await verifyAzureSubscription({
+      tenantId: azure.tenantId,
+      clientId: azure.clientId,
+      clientSecret: azure.clientSecret,
+      subscriptionId: azure.subscriptionId,
+      resourceGroup: azure.resourceGroup,
+      accountName: azure.displayName,
+    });
+    if (!preflight.ok) {
+      console.error("provision-lab preflight failed:", JSON.stringify(preflight));
+      await trace.failed(SOURCE, "preflight", preflight.message, {
+        code: preflight.code,
+        setting: preflight.setting,
+        step: preflight.step,
+      });
+      if (preflight.setting) {
+        await notifyConfigIssue(service, {
+          provider: "azure",
+          code: preflight.code ?? "PreflightFailed",
+          setting: preflight.setting,
+          message: preflight.message,
+          suggestion: preflight.suggestion,
+          context: "lab provisioning preflight",
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          correlation_id: correlationId,
+          error: preflight.message,
+          code: preflight.code,
+          setting: preflight.setting,
+          suggestion: preflight.suggestion,
+          details: preflight.details,
+          stage: `preflight:${preflight.step}`,
+        }),
+        { status: 400, headers: traceHeaders },
+      );
+    }
+    await trace.success(SOURCE, "preflight", "Azure subscription and resource group reachable");
+
     // Determine region mapping
     const regionMap: Record<string, string> = {
       "East US": "eastus",
@@ -378,7 +465,7 @@ Deno.serve(async (req) => {
       "West Europe": "westeurope",
       "Southeast Asia": "southeastasia",
     };
-    const azureRegion = regionMap[template.region] || "eastus";
+    const azureRegion = regionMap[template.region] || azure.defaultRegion || "eastus";
 
     // Generate unique VM name
     const vmName = `lab-${template.id.substring(0, 8)}-${Date.now().toString(36)}`;
@@ -389,6 +476,7 @@ Deno.serve(async (req) => {
       .insert({
         user_id: userId,
         lab_template_id: template.id,
+        provider_account_id: azure.accountId,
         region: template.region === "All Regions" ? "East US" : template.region,
         vm_size: template.vm_size,
         status: "provisioning",
@@ -407,7 +495,7 @@ Deno.serve(async (req) => {
 
     // 2. Get Azure auth token
     await trace.start(SOURCE, "azure-auth", "Authenticating with Azure");
-    const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+    const azureToken = await getAzureToken(azure.tenantId, azure.clientId, azure.clientSecret);
     await trace.success(SOURCE, "azure-auth", "Azure service principal authenticated");
 
     // 3. Create Azure VM
