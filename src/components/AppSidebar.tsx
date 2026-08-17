@@ -30,6 +30,7 @@ const adminItems = [
   { title: "Resource Providers", url: "/admin/resource-providers", icon: Cloud },
   { title: "AI Status", url: "/admin/ai-status", icon: Sparkles },
   { title: "Provisioning Export", url: "/admin/provisioning-export", icon: Download },
+  { title: "Provisioning Status", url: "/admin/provisioning-status", icon: Activity },
   { title: "Provisioning Retries", url: "/admin/provisioning-retries", icon: RotateCcw },
   { title: "Audit Log", url: "/audit-log", icon: History },
   { title: "User Management", url: "/users", icon: Users },
