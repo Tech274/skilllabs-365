@@ -190,24 +190,8 @@ Deno.serve(async (req) => {
   let admin: any = null;
 
   try {
-    // Required secrets
-    const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID");
-    const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID");
-    const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET");
-    const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID");
-    const AZURE_RESOURCE_GROUP = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
-    const AZURE_SUBNET_ID = Deno.env.get("AZURE_SUBNET_ID") || "";
-    const AZURE_VM_ADMIN_USERNAME = Deno.env.get("AZURE_VM_ADMIN_USERNAME") || "labadmin";
-    const AZURE_VM_ADMIN_PASSWORD = Deno.env.get("AZURE_VM_ADMIN_PASSWORD") || "";
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-    if (!AZURE_TENANT_ID) throw new Error("AZURE_TENANT_ID is not configured");
-    if (!AZURE_CLIENT_ID) throw new Error("AZURE_CLIENT_ID is not configured");
-    if (!AZURE_CLIENT_SECRET) throw new Error("AZURE_CLIENT_SECRET is not configured");
-    if (!AZURE_SUBSCRIPTION_ID) throw new Error("AZURE_SUBSCRIPTION_ID is not configured");
-    if (!AZURE_SUBNET_ID) throw new Error("AZURE_SUBNET_ID is not configured");
-    if (!AZURE_VM_ADMIN_PASSWORD) throw new Error("AZURE_VM_ADMIN_PASSWORD is not configured");
     if (!SUPABASE_URL) throw new Error("SUPABASE_URL is not configured");
     if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
 
@@ -218,50 +202,6 @@ Deno.serve(async (req) => {
     const trace = new ProvisioningTimeline(service, { correlationId });
     timeline = trace;
 
-    // Preflight: confirm the subscription exists and the service principal can
-    // reach it before we create any DB row or Azure resource.
-    await trace.start(SOURCE, "preflight", "Validating Azure subscription and service principal access");
-    const preflight = await verifyAzureSubscription({
-      tenantId: AZURE_TENANT_ID,
-      clientId: AZURE_CLIENT_ID,
-      clientSecret: AZURE_CLIENT_SECRET,
-      subscriptionId: AZURE_SUBSCRIPTION_ID,
-      resourceGroup: AZURE_RESOURCE_GROUP,
-    });
-    if (!preflight.ok) {
-      console.error("provision-lab preflight failed:", JSON.stringify(preflight));
-      await trace.failed(SOURCE, "preflight", preflight.message, {
-        code: preflight.code,
-        setting: preflight.setting,
-        step: preflight.step,
-      });
-
-      // Proactively tell admins exactly which setting to update.
-      if (preflight.setting) {
-        await notifyConfigIssue(service, {
-          provider: "azure",
-          code: preflight.code ?? "PreflightFailed",
-          setting: preflight.setting,
-          message: preflight.message,
-          suggestion: preflight.suggestion,
-          context: "lab provisioning preflight",
-        });
-      }
-
-      return new Response(
-        JSON.stringify({
-          correlation_id: correlationId,
-          error: preflight.message,
-          code: preflight.code,
-          setting: preflight.setting,
-          suggestion: preflight.suggestion,
-          details: preflight.details,
-          stage: `preflight:${preflight.step}`,
-        }),
-        { status: 400, headers: traceHeaders },
-      );
-    }
-    await trace.success(SOURCE, "preflight", "Azure subscription and resource group reachable");
 
     const authHeader = req.headers.get("authorization");
     if (!authHeader?.startsWith("Bearer ")) throw new Error("Missing authorization header");
