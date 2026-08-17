@@ -16,6 +16,12 @@ export interface AzureRuntime {
   subnetId: string;
   adminUsername: string;
   adminPassword: string;
+  /** How the lab VM admin credential is obtained. */
+  authMode: "password" | "key_vault" | "managed_identity";
+  keyVaultUri: string;
+  keyVaultSecretName: string;
+  /** Optional user-assigned managed identity resource id to attach to lab VMs. */
+  managedIdentityId: string;
   defaultRegion: string | null;
 }
 
@@ -50,6 +56,12 @@ export function azureRuntimeFromAccount(account: ProviderAccount): AzureRuntime 
     subnetId: str(cfg.subnet_id),
     adminUsername: str(cfg.vm_admin_username) || "labadmin",
     adminPassword: str(creds.vm_admin_password),
+    authMode: (["password", "key_vault", "managed_identity"].includes(str(cfg.vm_auth_mode))
+      ? str(cfg.vm_auth_mode)
+      : "password") as AzureRuntime["authMode"],
+    keyVaultUri: str(cfg.key_vault_uri).replace(/\/$/, ""),
+    keyVaultSecretName: str(cfg.key_vault_secret_name) || "lab-vm-admin-password",
+    managedIdentityId: str(cfg.managed_identity_id),
     defaultRegion: account.default_region ?? null,
   };
 
@@ -69,10 +81,20 @@ export function azureRuntimeFromAccount(account: ProviderAccount): AzureRuntime 
 }
 
 /** Extra requirements that only VM provisioning needs. */
+export function vmProvisioningGaps(runtime: AzureRuntime): { field: string; label: string }[] {
+  const gaps: { field: string; label: string }[] = [];
+  if (!runtime.subnetId) gaps.push({ field: "subnet_id", label: "Subnet ID (fully qualified ARM resource id)" });
+  if (runtime.authMode === "password" && !runtime.adminPassword) {
+    gaps.push({ field: "vm_admin_password", label: "VM admin password" });
+  }
+  if (runtime.authMode === "key_vault" && !runtime.keyVaultUri) {
+    gaps.push({ field: "key_vault_uri", label: "Key Vault URI" });
+  }
+  return gaps;
+}
+
 export function assertVmProvisioningReady(runtime: AzureRuntime): void {
-  const missing: string[] = [];
-  if (!runtime.subnetId) missing.push("Subnet ID (fully qualified ARM resource id)");
-  if (!runtime.adminPassword) missing.push("VM admin password");
+  const missing = vmProvisioningGaps(runtime).map((g) => g.label);
   if (missing.length) {
     throw new ProviderConfigError(
       `Resource provider "${runtime.displayName}" cannot provision lab VMs: ${missing.join(", ")} missing.`,
