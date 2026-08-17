@@ -36,7 +36,10 @@ interface ProviderAccount {
   last_test_status: string | null;
   last_test_message: string | null;
   last_tested_at: string | null;
+  readiness?: { ready: boolean; missing: { field: string; label: string }[] } | null;
 }
+
+interface SubnetOption { id: string; label: string }
 
 type CredField = { key: string; label: string; required: boolean };
 
@@ -44,8 +47,10 @@ const CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder?: 
   azure: [
     { key: "subscription_id", label: "Subscription ID", placeholder: "00000000-0000-0000-0000-000000000000" },
     { key: "resource_group", label: "Resource Group (optional)", placeholder: "skilllabs-rg" },
-    { key: "subnet_id", label: "Subnet ID (required for lab VMs)", placeholder: "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>" },
     { key: "vm_admin_username", label: "VM Admin Username (optional)", placeholder: "labadmin" },
+    { key: "key_vault_uri", label: "Key Vault URI (Key Vault auth mode)", placeholder: "https://my-vault.vault.azure.net" },
+    { key: "key_vault_secret_name", label: "Key Vault Secret Name (optional)", placeholder: "lab-vm-admin-password" },
+    { key: "managed_identity_id", label: "User-assigned Managed Identity ID (optional)", placeholder: "/subscriptions/.../userAssignedIdentities/<name>" },
     { key: "role_definition_id", label: "Role Definition ID (optional)", placeholder: "Reader by default" },
   ],
   aws: [
@@ -78,6 +83,9 @@ export default function AdminResourceProviders() {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProviderAccount | null>(null);
+  const [subnets, setSubnets] = useState<SubnetOption[]>([]);
+  const [loadingSubnets, setLoadingSubnets] = useState(false);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
   const call = async (payload: Record<string, unknown>) => {
     const { data, error } = await supabase.functions.invoke("cloud-provider-accounts", { body: payload });
@@ -107,7 +115,53 @@ export default function AdminResourceProviders() {
     }, {});
   }, [accounts]);
 
-  const openCreate = () => { setForm({ ...emptyForm, config: {}, credentials: {} }); setDialogOpen(true); };
+  const loadSubnets = async () => {
+    if (!form.id) {
+      toast({ title: "Save the account first", description: "Subnets are read using this account's credentials.", variant: "destructive" });
+      return;
+    }
+    setLoadingSubnets(true);
+    try {
+      const data = await call({ action: "list_subnets", id: form.id });
+      const options: SubnetOption[] = [];
+      for (const v of data.vnets ?? []) {
+        for (const sn of v.subnets ?? []) {
+          options.push({ id: sn.id, label: `${v.name} / ${sn.name} — ${sn.addressPrefix ?? "?"} (${v.location})` });
+        }
+      }
+      setSubnets(options);
+      if (!options.length) toast({ title: "No subnets found", description: "Create a virtual network in this subscription first.", variant: "destructive" });
+    } catch (e) {
+      toast({ title: "Could not read subnets", description: (e as Error).message, variant: "destructive" });
+    }
+    setLoadingSubnets(false);
+  };
+
+  const validate = () => {
+    const errors: Record<string, string> = {};
+    if (!form.display_name.trim()) errors.display_name = "Name is required.";
+    if (form.provider === "azure") {
+      const cfg = form.config;
+      const existing = accounts.find((a) => a.id === form.id);
+      const credSet = (k: string) => Boolean(form.credentials[k]?.trim() || existing?.credential_keys?.[k]);
+      if (!cfg.subscription_id?.trim()) errors.subscription_id = "Subscription ID is required.";
+      if (!credSet("tenant_id")) errors.tenant_id = "Directory (tenant) ID is required.";
+      if (!credSet("client_id")) errors.client_id = "Application (client) ID is required.";
+      if (!credSet("client_secret")) errors.client_secret = "Client Secret Value is required.";
+      if (!cfg.subnet_id?.trim()) errors.subnet_id = "Subnet ID is required before labs can launch. Use “Load subnets”.";
+      const mode = cfg.vm_auth_mode || "password";
+      if (mode === "password" && !credSet("vm_admin_password")) {
+        errors.vm_admin_password = "VM Admin Password is required for password auth mode.";
+      }
+      if (mode === "key_vault" && !cfg.key_vault_uri?.trim()) {
+        errors.key_vault_uri = "Key Vault URI is required for Key Vault auth mode.";
+      }
+    }
+    setFormErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const openCreate = () => { setForm({ ...emptyForm, config: { vm_auth_mode: "password" }, credentials: {} }); setSubnets([]); setFormErrors({}); setDialogOpen(true); };
 
   const openEdit = (a: ProviderAccount) => {
     setForm({
@@ -121,12 +175,14 @@ export default function AdminResourceProviders() {
       config: Object.fromEntries(Object.entries(a.config ?? {}).map(([k, v]) => [k, String(v ?? "")])),
       credentials: {},
     });
+    setSubnets([]);
+    setFormErrors({});
     setDialogOpen(true);
   };
 
   const save = async () => {
-    if (!form.display_name.trim()) {
-      toast({ title: "Name required", variant: "destructive" });
+    if (!validate()) {
+      toast({ title: "Fix the highlighted fields", description: "Azure lab provisioning needs these values.", variant: "destructive" });
       return;
     }
     setSaving(true);
@@ -258,6 +314,19 @@ export default function AdminResourceProviders() {
                                 <span className="font-mono text-foreground/80">{a.default_region || "—"}</span>
                               </div>
                             </div>
+                            {a.readiness && !a.readiness.ready && (
+                              <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
+                                <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                                <span>
+                                  Lab launches are blocked — missing: {a.readiness.missing.map((m) => m.label).join(", ")}
+                                </span>
+                              </div>
+                            )}
+                            {a.readiness?.ready && (
+                              <Badge variant="outline" className="gap-1 text-[10px] border-success/40 text-success">
+                                <ShieldCheck className="h-3 w-3" /> Ready for lab VMs
+                              </Badge>
+                            )}
                             <div className="flex flex-wrap gap-1">
                               {Object.entries(a.credential_keys ?? {}).filter(([, set]) => set).map(([k]) => (
                                 <Badge key={k} variant="outline" className="text-[10px]">{k} set</Badge>
@@ -359,6 +428,59 @@ export default function AdminResourceProviders() {
             {providerConfig.length > 0 && (
               <div className="space-y-3 rounded-lg border border-border p-3">
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Configuration</p>
+
+                {form.provider === "azure" && (
+                  <>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">VM access mode</Label>
+                      <Select
+                        value={form.config.vm_auth_mode || "password"}
+                        onValueChange={(v) => setForm({ ...form, config: { ...form.config, vm_auth_mode: v } })}
+                      >
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="password">Stored VM admin password</SelectItem>
+                          <SelectItem value="key_vault">Key Vault secret</SelectItem>
+                          <SelectItem value="managed_identity">Managed identity (no stored password)</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-[11px] text-muted-foreground">
+                        Managed identity attaches an identity to each lab VM and uses an ephemeral bootstrap
+                        credential that is never stored. Key Vault reads the password at provision time.
+                      </p>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <Label className="text-xs">Subnet</Label>
+                        <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={loadSubnets} disabled={loadingSubnets}>
+                          {loadingSubnets ? <Loader2 className="h-3 w-3 animate-spin" /> : <PlugZap className="h-3 w-3" />}
+                          Load subnets
+                        </Button>
+                      </div>
+                      {subnets.length > 0 ? (
+                        <Select
+                          value={form.config.subnet_id ?? ""}
+                          onValueChange={(v) => setForm({ ...form, config: { ...form.config, subnet_id: v } })}
+                        >
+                          <SelectTrigger><SelectValue placeholder="Select a VNet / subnet" /></SelectTrigger>
+                          <SelectContent>
+                            {subnets.map((sn) => (
+                              <SelectItem key={sn.id} value={sn.id}>{sn.label}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ) : null}
+                      <Input
+                        value={form.config.subnet_id ?? ""}
+                        placeholder="/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>"
+                        onChange={(e) => setForm({ ...form, config: { ...form.config, subnet_id: e.target.value } })}
+                      />
+                      {formErrors.subnet_id && <p className="text-[11px] text-destructive">{formErrors.subnet_id}</p>}
+                    </div>
+                  </>
+                )}
+
                 {providerConfig.map((f) => (
                   <div key={f.key} className="space-y-1.5">
                     <Label className="text-xs">{f.label}</Label>
@@ -367,6 +489,7 @@ export default function AdminResourceProviders() {
                       placeholder={f.placeholder}
                       onChange={(e) => setForm({ ...form, config: { ...form.config, [f.key]: e.target.value } })}
                     />
+                    {formErrors[f.key] && <p className="text-[11px] text-destructive">{formErrors[f.key]}</p>}
                   </div>
                 ))}
               </div>
@@ -381,11 +504,12 @@ export default function AdminResourceProviders() {
                   <div key={f.key} className="space-y-1.5">
                     <Label className="text-xs">{f.label}</Label>
                     <Input
-                      type={f.key.includes("secret") || f.key.includes("token") ? "password" : "text"}
+                      type={f.key.includes("secret") || f.key.includes("token") || f.key.includes("password") ? "password" : "text"}
                       autoComplete="new-password"
                       value={form.credentials[f.key] ?? ""}
                       onChange={(e) => setForm({ ...form, credentials: { ...form.credentials, [f.key]: e.target.value } })}
                     />
+                    {formErrors[f.key] && <p className="text-[11px] text-destructive">{formErrors[f.key]}</p>}
                   </div>
                 ))}
               </div>

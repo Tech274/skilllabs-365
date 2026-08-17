@@ -16,6 +16,12 @@ export interface AzureRuntime {
   subnetId: string;
   adminUsername: string;
   adminPassword: string;
+  /** How the lab VM admin credential is obtained. */
+  authMode: "password" | "key_vault" | "managed_identity";
+  keyVaultUri: string;
+  keyVaultSecretName: string;
+  /** Optional user-assigned managed identity resource id to attach to lab VMs. */
+  managedIdentityId: string;
   defaultRegion: string | null;
 }
 
@@ -50,6 +56,12 @@ export function azureRuntimeFromAccount(account: ProviderAccount): AzureRuntime 
     subnetId: str(cfg.subnet_id),
     adminUsername: str(cfg.vm_admin_username) || "labadmin",
     adminPassword: str(creds.vm_admin_password),
+    authMode: (["password", "key_vault", "managed_identity"].includes(str(cfg.vm_auth_mode))
+      ? str(cfg.vm_auth_mode)
+      : "password") as AzureRuntime["authMode"],
+    keyVaultUri: str(cfg.key_vault_uri).replace(/\/$/, ""),
+    keyVaultSecretName: str(cfg.key_vault_secret_name) || "lab-vm-admin-password",
+    managedIdentityId: str(cfg.managed_identity_id),
     defaultRegion: account.default_region ?? null,
   };
 
@@ -69,10 +81,20 @@ export function azureRuntimeFromAccount(account: ProviderAccount): AzureRuntime 
 }
 
 /** Extra requirements that only VM provisioning needs. */
+export function vmProvisioningGaps(runtime: AzureRuntime): { field: string; label: string }[] {
+  const gaps: { field: string; label: string }[] = [];
+  if (!runtime.subnetId) gaps.push({ field: "subnet_id", label: "Subnet ID (fully qualified ARM resource id)" });
+  if (runtime.authMode === "password" && !runtime.adminPassword) {
+    gaps.push({ field: "vm_admin_password", label: "VM admin password" });
+  }
+  if (runtime.authMode === "key_vault" && !runtime.keyVaultUri) {
+    gaps.push({ field: "key_vault_uri", label: "Key Vault URI" });
+  }
+  return gaps;
+}
+
 export function assertVmProvisioningReady(runtime: AzureRuntime): void {
-  const missing: string[] = [];
-  if (!runtime.subnetId) missing.push("Subnet ID (fully qualified ARM resource id)");
-  if (!runtime.adminPassword) missing.push("VM admin password");
+  const missing = vmProvisioningGaps(runtime).map((g) => g.label);
   if (missing.length) {
     throw new ProviderConfigError(
       `Resource provider "${runtime.displayName}" cannot provision lab VMs: ${missing.join(", ")} missing.`,
@@ -208,4 +230,82 @@ export async function ensureAzureSubnet(
 
   runtime.subnetId = subnetId;
   return subnetId;
+}
+
+/** List VNets and their subnets for an Azure account (admin subnet picker). */
+export async function listAzureNetworks(runtime: AzureRuntime): Promise<{
+  vnets: { id: string; name: string; location: string; addressPrefixes: string[];
+           subnets: { id: string; name: string; addressPrefix: string | null }[] }[];
+}> {
+  const token = await armToken(runtime);
+  const res = await fetch(
+    `https://management.azure.com/subscriptions/${runtime.subscriptionId}/providers/Microsoft.Network/virtualNetworks?api-version=${NET_API}`,
+    { headers: { authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) throw new Error(`Failed to list virtual networks (${res.status}): ${(await res.text()).slice(0, 300)}`);
+  const value = (await res.json()).value ?? [];
+  return {
+    // deno-lint-ignore no-explicit-any -- ARM response shape
+    vnets: value.map((v: any) => ({
+      id: v.id,
+      name: v.name,
+      location: v.location,
+      addressPrefixes: v.properties?.addressSpace?.addressPrefixes ?? [],
+      // deno-lint-ignore no-explicit-any -- ARM response shape
+      subnets: (v.properties?.subnets ?? []).map((s: any) => ({
+        id: s.id, name: s.name, addressPrefix: s.properties?.addressPrefix ?? null,
+      })),
+    })),
+  };
+}
+
+/** Random, compliant Azure VM admin password (used for managed-identity mode). */
+export function generateVmPassword(): string {
+  const sets = ["ABCDEFGHJKLMNPQRSTUVWXYZ", "abcdefghijkmnpqrstuvwxyz", "23456789", "!@#$%^*_-+="];
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  const chars = sets.map((s, i) => s[bytes[i] % s.length]);
+  for (let i = 4; i < 20; i++) {
+    const set = sets[bytes[i] % sets.length];
+    chars.push(set[bytes[i] % set.length]);
+  }
+  return chars.join("");
+}
+
+/** Fetch the VM admin password from Azure Key Vault (key_vault auth mode). */
+export async function fetchKeyVaultSecret(runtime: AzureRuntime, secretName?: string): Promise<string> {
+  const name = secretName || runtime.keyVaultSecretName;
+  const res = await fetch(`https://login.microsoftonline.com/${runtime.tenantId}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: runtime.clientId,
+      client_secret: runtime.clientSecret,
+      scope: "https://vault.azure.net/.default",
+    }),
+  });
+  if (!res.ok) throw new Error(`Key Vault auth failed [${res.status}]`);
+  const token = (await res.json()).access_token as string;
+  const secRes = await fetch(`${runtime.keyVaultUri}/secrets/${name}?api-version=7.4`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!secRes.ok) {
+    throw new ProviderConfigError(
+      `Key Vault secret "${name}" could not be read (${secRes.status}). Grant the service principal "get" access on secrets.`,
+      `Resource Providers → ${runtime.displayName}`,
+      ADMIN_HINT,
+    );
+  }
+  return String((await secRes.json()).value ?? "");
+}
+
+/**
+ * Resolve the admin password to use for a lab VM according to the account's
+ * auth mode. Managed identity still needs a bootstrap admin credential in the
+ * Azure API, so we generate an ephemeral one that is never stored or returned.
+ */
+export async function resolveVmAdminPassword(runtime: AzureRuntime): Promise<string> {
+  if (runtime.authMode === "key_vault") return await fetchKeyVaultSecret(runtime);
+  if (runtime.authMode === "managed_identity") return generateVmPassword();
+  return runtime.adminPassword;
 }

@@ -6,7 +6,8 @@ import { notifyConfigIssue } from "../_shared/config-alerts.ts";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import {
-  assertVmProvisioningReady, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime, type AzureRuntime,
+  assertVmProvisioningReady, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime,
+  resolveVmAdminPassword, vmProvisioningGaps, type AzureRuntime,
 } from "../_shared/cloud-providers/azure-runtime.ts";
 
 const SOURCE = "provision-lab";
@@ -51,6 +52,7 @@ async function createAzureVM(
     adminUsername: string;
     adminPassword: string;
     subnetId: string;
+    identity?: { type: "SystemAssigned" } | { type: "UserAssigned"; userAssignedIdentities: Record<string, unknown> };
   }
 ): Promise<{ vmId: string; privateIp: string }> {
   const apiVersion = "2024-03-01";
@@ -140,6 +142,7 @@ async function createAzureVM(
     },
     tags: { managedBy: "skilllabs", purpose: "lab-vm" },
   };
+  if (options.identity) vmPayload.identity = options.identity;
 
   const vmRes = await fetch(
     `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}?api-version=${apiVersion}`,
@@ -391,8 +394,10 @@ Deno.serve(async (req) => {
 
     await trace.start(SOURCE, "resource-provider", "Resolving resource provider account for this lab");
     let azure: AzureRuntime;
+    let resolvedRuntime: AzureRuntime | null = null;
     try {
       azure = await resolveAzureRuntime(supabase, template.provider_account_id);
+      resolvedRuntime = azure;
       if (!azure.subnetId) {
         // No subnet configured: reuse an existing VNet or create a lab VNet,
         // then persist the id back onto the provider account.
@@ -404,6 +409,7 @@ Deno.serve(async (req) => {
       const message = e instanceof Error ? e.message : "Resource provider not configured";
       const setting = e instanceof ProviderConfigError ? e.setting : "Resource Providers";
       const suggestion = e instanceof ProviderConfigError ? e.suggestion : undefined;
+      const missingFields = resolvedRuntime ? vmProvisioningGaps(resolvedRuntime).map((g) => g.field) : [];
       await trace.failed(SOURCE, "resource-provider", message, { setting });
       await notifyConfigIssue(service, {
         provider: "azure",
@@ -414,7 +420,10 @@ Deno.serve(async (req) => {
         context: "lab provisioning",
       });
       return new Response(
-        JSON.stringify({ error: message, setting, suggestion, correlation_id: correlationId, stage: "resource-provider" }),
+        JSON.stringify({
+          error: message, setting, suggestion, missing_fields: missingFields,
+          correlation_id: correlationId, stage: "resource-provider",
+        }),
         { status: 400, headers: traceHeaders },
       );
     }
@@ -509,6 +518,9 @@ Deno.serve(async (req) => {
     // 2. Get Azure auth token
     await trace.start(SOURCE, "azure-auth", "Authenticating with Azure");
     const azureToken = await getAzureToken(azure.tenantId, azure.clientId, azure.clientSecret);
+    // Admin credential: stored password, Key Vault secret, or an ephemeral
+    // password when the account uses managed identity for VM access.
+    const vmAdminPassword = await resolveVmAdminPassword(azure);
     await trace.success(SOURCE, "azure-auth", "Azure service principal authenticated");
 
     // 3. Create Azure VM
@@ -520,8 +532,13 @@ Deno.serve(async (req) => {
         vmSize: template.vm_size,
         osImage: template.os_image,
         adminUsername: azure.adminUsername,
-        adminPassword: azure.adminPassword,
+        adminPassword: vmAdminPassword,
         subnetId: azure.subnetId,
+        identity: azure.authMode === "managed_identity"
+          ? (azure.managedIdentityId
+            ? { type: "UserAssigned" as const, userAssignedIdentities: { [azure.managedIdentityId]: {} } }
+            : { type: "SystemAssigned" as const })
+          : undefined,
       });
     } catch (azureError) {
       // Update DB record to failed
