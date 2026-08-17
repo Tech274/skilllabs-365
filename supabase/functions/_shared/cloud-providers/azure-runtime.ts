@@ -237,6 +237,64 @@ export async function ensureAzureSubnet(
   return { subnetId, created, source: created ? "created" : "discovered" };
 }
 
+/**
+ * Make sure the resource group used for lab VMs exists. Azure returns
+ * ResourceGroupNotFound during preflight when the provider record points at a
+ * group that was never created (e.g. the default "skilllabs-rg"), so we create
+ * it on demand in the target region and persist the name back on the account.
+ */
+export async function ensureAzureResourceGroup(
+  // deno-lint-ignore no-explicit-any -- untyped service client in the edge runtime
+  admin: any,
+  runtime: AzureRuntime,
+  region: string,
+  networkDefaults: AzureNetworkDefaults = DEFAULT_AZURE_NETWORK,
+): Promise<{ resourceGroup: string; created: boolean }> {
+  const sub = runtime.subscriptionId;
+  const rg = networkDefaults.resourceGroup || runtime.resourceGroup;
+  const token = await armToken(runtime);
+  const auth = { authorization: `Bearer ${token}` };
+  const url = `https://management.azure.com/subscriptions/${sub}/resourcegroups/${rg}?api-version=2021-04-01`;
+
+  const getRes = await fetch(url, { headers: auth });
+  if (getRes.ok) {
+    runtime.resourceGroup = rg;
+    return { resourceGroup: rg, created: false };
+  }
+  if (getRes.status !== 404) {
+    throw new ProviderConfigError(
+      `Resource group "${rg}" could not be verified: ${(await getRes.text()).slice(0, 300)}`,
+      `Resource Providers → ${runtime.displayName} → Resource Group`,
+      ADMIN_HINT,
+    );
+  }
+
+  const createRes = await fetch(url, {
+    method: "PUT",
+    headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ location: region }),
+  });
+  if (!createRes.ok) {
+    throw new ProviderConfigError(
+      `Resource group "${rg}" does not exist and could not be created: ${(await createRes.text()).slice(0, 300)}`,
+      `Resource Providers → ${runtime.displayName} → Resource Group`,
+      "Create the resource group in Azure, or grant the service principal Contributor on the subscription so it can create it.",
+    );
+  }
+
+  try {
+    const { data: row } = await admin
+      .from("cloud_provider_accounts").select("config").eq("id", runtime.accountId).maybeSingle();
+    await admin
+      .from("cloud_provider_accounts")
+      .update({ config: { ...(row?.config ?? {}), resource_group: rg } })
+      .eq("id", runtime.accountId);
+  } catch { /* non-fatal */ }
+
+  runtime.resourceGroup = rg;
+  return { resourceGroup: rg, created: true };
+}
+
 /** List VNets and their subnets for an Azure account (admin subnet picker). */
 export async function listAzureNetworks(runtime: AzureRuntime): Promise<{
   vnets: { id: string; name: string; location: string; addressPrefixes: string[];
