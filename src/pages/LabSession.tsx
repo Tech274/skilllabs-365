@@ -105,6 +105,7 @@ export default function LabSession() {
       iframeTimerRef.current = setTimeout(() => setIframeLoadFailed(true), 15000);
     } catch (err) {
       console.error("Failed to create Guacamole session:", err);
+      resetIdempotency(`guac-session:${targetVmId}`);
       setConnectionState("error");
     }
   }, []);
