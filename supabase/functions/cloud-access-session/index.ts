@@ -2,8 +2,9 @@ import { corsHeadersFor, corsHeaders, requireUser, errorResponse, jsonResponse }
 import { createSession as awsCreate, revokeSession as awsRevoke } from "../_shared/cloud-providers/aws.ts";
 import { createSession as azureCreate, revokeSession as azureRevoke } from "../_shared/cloud-providers/azure.ts";
 import { createSession as gcpCreate, revokeSession as gcpRevoke } from "../_shared/cloud-providers/gcp.ts";
+import { resolveAccount, serviceClient, type ProviderKey } from "../_shared/cloud-providers/accounts.ts";
 
-type Provider = "aws" | "azure" | "gcp";
+type Provider = ProviderKey;
 
 interface ProviderResult {
   federated_url: string;
@@ -35,18 +36,34 @@ interface DispatchCtx {
   durationMinutes: number;
   azureObjectId?: string | null;
   azureDefaults?: Record<string, unknown> | null;
+  credentials?: Record<string, string> | null;
+  accountConfig?: Record<string, unknown> | null;
 }
 
-async function loadProviderExtras(supabase: any, provider: Provider, userId: string): Promise<Partial<DispatchCtx>> {
-  if (provider !== "azure") return {};
-  const [{ data: profile }, { data: cfg }] = await Promise.all([
-    supabase.from("profiles").select("azure_object_id").eq("user_id", userId).maybeSingle(),
-    supabase.from("cloud_provider_config").select("config").eq("provider", "azure").maybeSingle(),
-  ]);
-  return {
-    azureObjectId: profile?.azure_object_id ?? null,
-    azureDefaults: cfg?.config ?? null,
+/**
+ * Load the resource provider account (credentials + config) for a template, plus
+ * any provider-specific user context. Credentials are read with the service role only.
+ */
+async function loadProviderExtras(
+  supabase: any,
+  provider: Provider,
+  userId: string,
+  accountId?: string | null,
+): Promise<Partial<DispatchCtx> & { accountId?: string | null }> {
+  const admin = serviceClient();
+  const account = await resolveAccount(admin, provider, accountId);
+  const extras: Partial<DispatchCtx> & { accountId?: string | null } = {
+    credentials: account?.credentials ?? null,
+    accountConfig: account?.config ?? null,
+    accountId: account?.id ?? null,
   };
+  if (provider === "azure") {
+    const { data: profile } = await supabase
+      .from("profiles").select("azure_object_id").eq("user_id", userId).maybeSingle();
+    extras.azureObjectId = profile?.azure_object_id ?? null;
+    extras.azureDefaults = account?.config ?? null;
+  }
+  return extras;
 }
 
 async function dispatchCreate(provider: Provider, ctx: DispatchCtx): Promise<ProviderResult> {
@@ -55,10 +72,10 @@ async function dispatchCreate(provider: Provider, ctx: DispatchCtx): Promise<Pro
   return gcpCreate(ctx);
 }
 
-async function dispatchRevoke(provider: Provider, ref: string | null): Promise<void> {
+async function dispatchRevoke(provider: Provider, ref: string | null, credentials?: Record<string, string> | null): Promise<void> {
   if (!ref) return;
   if (provider === "aws") return awsRevoke(ref);
-  if (provider === "azure") return azureRevoke(ref);
+  if (provider === "azure") return azureRevoke(ref, credentials as any);
   return gcpRevoke(ref);
 }
 
@@ -112,7 +129,7 @@ Deno.serve(async (req) => {
       await logEvent(supabase, pending.id, "session.created", userId, { template_id });
 
       try {
-        const extras = await loadProviderExtras(supabase, tpl.provider as Provider, userId);
+        const extras = await loadProviderExtras(supabase, tpl.provider as Provider, userId, tpl.provider_account_id);
         const result = await dispatchCreate(tpl.provider as Provider, {
           userId: userId,
           templateConfig: tpl.provider_config || {},
@@ -159,8 +176,8 @@ Deno.serve(async (req) => {
       const newExpiry = proposed < validityCap ? proposed : validityCap < new Date() ? new Date(Date.now() + 60_000) : proposed;
 
       try {
-        await dispatchRevoke(sess.provider, sess.provider_session_ref);
-        const extras = await loadProviderExtras(supabase, sess.provider, userId);
+        const extras = await loadProviderExtras(supabase, sess.provider, userId, tpl.provider_account_id);
+        await dispatchRevoke(sess.provider, sess.provider_session_ref, extras.credentials);
         const result = await dispatchCreate(sess.provider, {
           userId: userId,
           templateConfig: tpl.provider_config || {},
@@ -198,7 +215,12 @@ Deno.serve(async (req) => {
         if (!isAdmin) return errorResponse("Forbidden", 403);
       }
 
-      try { await dispatchRevoke(sess.provider, sess.provider_session_ref); } catch (e) { console.warn("revoke failed:", e); }
+      try {
+        const { data: endTpl } = await supabase
+          .from("access_templates").select("provider_account_id").eq("id", sess.template_id).maybeSingle();
+        const extras = await loadProviderExtras(supabase, sess.provider, sess.user_id, endTpl?.provider_account_id);
+        await dispatchRevoke(sess.provider, sess.provider_session_ref, extras.credentials);
+      } catch (e) { console.warn("revoke failed:", e); }
 
       await supabase.from("access_sessions").update({
         status: "completed",
