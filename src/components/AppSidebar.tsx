@@ -1,8 +1,7 @@
 import {
   LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
   Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
-  Loader2, X, KeyRound, Sparkles, Download, RotateCcw,
-} from "lucide-react";
+  Loader2, X, KeyRound, Sparkles, Download, RotateCcw, MonitorPlay, ClipboardList } from "lucide-react";
 
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -32,6 +31,8 @@ const adminItems = [
   { title: "Provisioning Export", url: "/admin/provisioning-export", icon: Download },
   { title: "Provisioning Status", url: "/admin/provisioning-status", icon: Activity },
   { title: "Provisioning Retries", url: "/admin/provisioning-retries", icon: RotateCcw },
+  { title: "Session Lifecycle", url: "/admin/session-lifecycle", icon: MonitorPlay },
+  { title: "Audit Log", url: "/admin/audit-log", icon: ClipboardList },
   { title: "Audit Log", url: "/audit-log", icon: History },
   { title: "User Management", url: "/users", icon: Users },
   { title: "Daily Reports", url: "/reports", icon: FileText },
