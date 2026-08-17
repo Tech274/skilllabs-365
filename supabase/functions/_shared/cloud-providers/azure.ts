@@ -12,7 +12,12 @@ interface CreateCtx {
   // Resolved by the caller (cloud-access-session) from profile + cloud_provider_config:
   azureObjectId?: string | null;
   azureDefaults?: Record<string, unknown> | null;
+  /** Credentials from the selected resource provider account. */
+  credentials?: Record<string, string> | null;
+  accountConfig?: Record<string, unknown> | null;
 }
+
+export interface AzureCreds { tenant_id?: string; client_id?: string; client_secret?: string }
 
 interface Result {
   federated_url: string;
@@ -20,12 +25,12 @@ interface Result {
   scope: Record<string, unknown>;
 }
 
-async function armToken(): Promise<string> {
-  const tenant = Deno.env.get("AZURE_TENANT_ID");
-  const clientId = Deno.env.get("AZURE_CLIENT_ID");
-  const secret = Deno.env.get("AZURE_CLIENT_SECRET");
+async function armToken(creds?: AzureCreds | null): Promise<string> {
+  const tenant = creds?.tenant_id || Deno.env.get("AZURE_TENANT_ID");
+  const clientId = creds?.client_id || Deno.env.get("AZURE_CLIENT_ID");
+  const secret = creds?.client_secret || Deno.env.get("AZURE_CLIENT_SECRET");
   if (!tenant || !clientId || !secret) {
-    throw new Error("Azure provider not configured: AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET missing.");
+    throw new Error("Azure resource provider not configured: add an Azure account under Admin → Resource Providers.");
   }
   const body = new URLSearchParams({
     grant_type: "client_credentials",
@@ -72,13 +77,16 @@ export async function createSession(ctx: CreateCtx): Promise<Result> {
     throw new Error("This user is missing azure_object_id on their profile. An admin must set it before granting Azure access.");
   }
   const cfg = ctx.templateConfig || {};
-  const defaults = ctx.azureDefaults || null;
+  const defaults = { ...(ctx.azureDefaults || {}), ...(ctx.accountConfig || {}) } as Record<string, unknown>;
   const scope = resolveScope(cfg, defaults);
   const roleDefinitionId = resolveRoleDefinitionId(cfg, defaults, scope);
   const usePim = Boolean(cfg.use_pim ?? defaults?.use_pim);
-  const tenantId = (cfg.tenant_id as string | undefined) || (defaults?.tenant_id as string | undefined) || Deno.env.get("AZURE_TENANT_ID")!;
+  const tenantId = (cfg.tenant_id as string | undefined)
+    || ctx.credentials?.tenant_id
+    || (defaults?.tenant_id as string | undefined)
+    || Deno.env.get("AZURE_TENANT_ID")!;
 
-  const token = await armToken();
+  const token = await armToken(ctx.credentials as AzureCreds | null | undefined);
   const assignmentName = guid();
   const startDateTime = new Date(Date.now() + 60_000).toISOString();        // start ~1 min from now
   const endDateTime   = new Date(Date.now() + ctx.durationMinutes * 60_000).toISOString();
@@ -145,10 +153,10 @@ export async function refreshSession(ctx: CreateCtx): Promise<Result> {
   return createSession(ctx);
 }
 
-export async function revokeSession(ref: string | null): Promise<void> {
+export async function revokeSession(ref: string | null, creds?: AzureCreds | null): Promise<void> {
   if (!ref) return;
   try {
-    const token = await armToken();
+    const token = await armToken(creds);
     // ref is the full ARM id; DELETE works for both classic and PIM schedule-request ids.
     const apiVersion = ref.includes("roleAssignmentScheduleRequests")
       ? "2020-10-01" : "2022-04-01";

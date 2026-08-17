@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   Cloud, Clock, CreditCard, Calendar, ArrowLeft, Loader2, ExternalLink,
-  RefreshCw, X, AlertCircle, CheckCircle2,
+  RefreshCw, AlertCircle, CheckCircle2, Copy, KeyRound, LogOut, Timer,
 } from "lucide-react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { EmptyState } from "@/components/EmptyState";
@@ -46,6 +46,21 @@ function CatalogueView() {
           <p className="text-sm text-muted-foreground mt-1">
             Open a template, generate temporary session credentials, and connect to the cloud console.
           </p>
+          <ol className="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-xs text-muted-foreground">
+            {[
+              "Pick a cloud access template",
+              "Generate your temporary credentials",
+              "Connect to the cloud console",
+              "Finish before the timer ends",
+            ].map((step, i) => (
+              <li key={step} className="rounded-lg border border-border bg-card/40 px-3 py-2 flex items-start gap-2">
+                <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-primary/15 text-[10px] font-semibold text-primary">
+                  {i + 1}
+                </span>
+                {step}
+              </li>
+            ))}
+          </ol>
         </header>
 
         {loading ? (
@@ -180,8 +195,8 @@ function TemplateView({ id }: { id: string }) {
           <div className="rounded-xl border border-warning/30 bg-warning/5 p-4 flex items-start gap-3">
             <AlertCircle className="h-4 w-4 text-warning mt-0.5" />
             <div className="text-sm">
-              <p className="font-medium text-warning">GCP provider coming soon</p>
-              <p className="text-xs text-muted-foreground mt-1">Session generation for GCP is not yet implemented.</p>
+              <p className="font-medium text-warning">{meta.label} sessions coming soon</p>
+              <p className="text-xs text-muted-foreground mt-1">Session generation for {meta.label} is not yet implemented.</p>
             </div>
           </div>
         )}
@@ -216,6 +231,32 @@ function TemplateView({ id }: { id: string }) {
               </Button>
             )}
 
+            {session.status === "active" && (
+              <div className="rounded-lg border border-border/60 bg-background/40 p-4 space-y-2">
+                <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                  <KeyRound className="h-3.5 w-3.5" /> Session access details
+                </div>
+                <CopyRow label="Sign-in link" value={session.federated_url || ""} />
+                {Object.entries((session.scope ?? {}) as Record<string, unknown>)
+                  .filter(([, v]) => typeof v === "string" || typeof v === "number")
+                  .map(([k, v]) => (
+                    <CopyRow key={k} label={k.replace(/_/g, " ")} value={String(v)} />
+                  ))}
+                <p className="pt-1 text-[11px] text-muted-foreground">
+                  These credentials are temporary and stop working when the timer reaches zero.
+                </p>
+              </div>
+            )}
+
+            {refreshWindow && (
+              <div className="flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/5 p-3 text-xs text-warning">
+                <Timer className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Your session ends soon. Save your work{tpl.refresh_allowed ? " or refresh the credentials to extend it" : ""}.
+                </span>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
               <div><span className="text-muted-foreground">Started</span><div className="font-mono">{new Date(session.started_at).toLocaleTimeString()}</div></div>
               <div><span className="text-muted-foreground">Expires</span><div className="font-mono">{new Date(session.expires_at).toLocaleTimeString()}</div></div>
@@ -237,13 +278,35 @@ function TemplateView({ id }: { id: string }) {
                 </Button>
               )}
               <Button variant="destructive" onClick={() => callSession("end", "end")} disabled={busy === "end"} className="ml-auto">
-                <X className="h-4 w-4 mr-2" /> End Session
+                {busy === "end" ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <LogOut className="h-4 w-4 mr-2" />}
+                Sign out & end session
               </Button>
             </div>
           </div>
         )}
       </div>
     </DashboardLayout>
+  );
+}
+
+function CopyRow({ label, value }: { label: string; value: string }) {
+  if (!value) return null;
+  return (
+    <div className="flex items-center gap-2">
+      <span className="w-32 shrink-0 text-[11px] uppercase tracking-wider text-muted-foreground">{label}</span>
+      <code className="flex-1 truncate rounded bg-muted/40 px-2 py-1 font-mono text-[11px]">{value}</code>
+      <Button
+        size="icon"
+        variant="ghost"
+        className="h-7 w-7"
+        onClick={() => {
+          navigator.clipboard.writeText(value);
+          toast({ title: `Copied ${label}` });
+        }}
+      >
+        <Copy className="h-3.5 w-3.5" />
+      </Button>
+    </div>
   );
 }
 

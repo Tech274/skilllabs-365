@@ -8,6 +8,10 @@ interface CreateCtx {
   templateConfig: Record<string, unknown>;
   region: string | null;
   durationMinutes: number;
+  /** Credentials from the selected resource provider account (preferred over env). */
+  credentials?: Record<string, string> | null;
+  /** Non-secret config from the selected resource provider account. */
+  accountConfig?: Record<string, unknown> | null;
 }
 
 interface Result {
@@ -136,20 +140,55 @@ function consoleDestination(region: string | null): string {
   return `https://${r}.console.aws.amazon.com/console/home?region=${r}`;
 }
 
+/** Signed sts:GetCallerIdentity — used by the admin "Test connection" action. */
+export async function stsGetCallerIdentity(creds: {
+  accessKeyId: string; secretAccessKey: string; sessionToken?: string | null;
+}): Promise<{ Account?: string; Arn?: string; UserId?: string }> {
+  const region = "us-east-1", service = "sts", host = "sts.amazonaws.com";
+  const body = new URLSearchParams({ Action: "GetCallerIdentity", Version: "2011-06-15" }).toString();
+  const bodyHash = await sha256Hex(body);
+  const amzDate = new Date().toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const dateStamp = amzDate.slice(0, 8);
+  const headers: Record<string, string> = {
+    "content-type": "application/x-www-form-urlencoded; charset=utf-8", host, "x-amz-date": amzDate,
+  };
+  if (creds.sessionToken) headers["x-amz-security-token"] = creds.sessionToken;
+  const keys = Object.keys(headers).sort();
+  const canonicalHeaders = keys.map((k) => `${k}:${headers[k].trim()}\n`).join("");
+  const signedHeaders = keys.join(";");
+  const canonical = ["POST", "/", "", canonicalHeaders, signedHeaders, bodyHash].join("\n");
+  const credentialScope = `${dateStamp}/${region}/${service}/aws4_request`;
+  const stringToSign = ["AWS4-HMAC-SHA256", amzDate, credentialScope, await sha256Hex(canonical)].join("\n");
+  const kSigning = await signingKey(creds.secretAccessKey, dateStamp, region, service);
+  const sig = [...await hmac(kSigning, stringToSign)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  const authorization = `AWS4-HMAC-SHA256 Credential=${creds.accessKeyId}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${sig}`;
+  const resp = await fetch(`https://${host}/`, {
+    method: "POST", headers: { ...headers, authorization, accept: "application/json" }, body,
+  });
+  const text = await resp.text();
+  if (!resp.ok) throw new Error(`STS GetCallerIdentity failed (${resp.status}): ${text.slice(0, 300)}`);
+  const json = JSON.parse(text);
+  return json?.GetCallerIdentityResponse?.GetCallerIdentityResult ?? json ?? {};
+}
+
 export async function createSession(ctx: CreateCtx): Promise<Result> {
-  const accessKey = Deno.env.get("AWS_ACCESS_KEY_ID");
-  const secretKey = Deno.env.get("AWS_SECRET_ACCESS_KEY");
-  const sessionTok = Deno.env.get("AWS_SESSION_TOKEN") || null;
+  const creds0 = ctx.credentials || {};
+  const acct = ctx.accountConfig || {};
+  const accessKey = creds0.access_key_id || Deno.env.get("AWS_ACCESS_KEY_ID");
+  const secretKey = creds0.secret_access_key || Deno.env.get("AWS_SECRET_ACCESS_KEY");
+  const sessionTok = creds0.session_token || Deno.env.get("AWS_SESSION_TOKEN") || null;
   const cfg = ctx.templateConfig || {};
-  const roleArn = (cfg.role_arn as string | undefined) || Deno.env.get("AWS_DEFAULT_ROLE_ARN");
+  const roleArn = (cfg.role_arn as string | undefined)
+    || (acct.default_role_arn as string | undefined)
+    || Deno.env.get("AWS_DEFAULT_ROLE_ARN");
   const policy  = (cfg.session_policy as string | undefined) || null;
-  const externalId = (cfg.external_id as string | undefined) || null;
+  const externalId = (cfg.external_id as string | undefined) || (acct.external_id as string | undefined) || null;
 
   if (!accessKey || !secretKey) {
-    throw new Error("AWS provider not configured: AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY missing.");
+    throw new Error("AWS resource provider not configured: add an AWS account under Admin → Resource Providers.");
   }
   if (!roleArn) {
-    throw new Error("AWS provider not configured: set role_arn in the template's provider_config or AWS_DEFAULT_ROLE_ARN secret.");
+    throw new Error("AWS not configured: set role_arn in the template's provider config or a default role ARN on the resource provider account.");
   }
 
   const durationSeconds = ctx.durationMinutes * 60;

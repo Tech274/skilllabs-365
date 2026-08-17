@@ -4,6 +4,8 @@ interface CreateCtx {
   templateConfig: Record<string, unknown>;
   region: string | null;
   durationMinutes: number;
+  credentials?: Record<string, string> | null;
+  accountConfig?: Record<string, unknown> | null;
 }
 interface Result {
   federated_url: string;
