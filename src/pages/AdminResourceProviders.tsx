@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  Plus, Cloud, ShieldCheck, ShieldAlert, Loader2, Trash2, Pencil, PlugZap, Star,
+  Plus, Cloud, ShieldCheck, ShieldAlert, Loader2, Trash2, Pencil, PlugZap, Star, KeyRound,
 } from "lucide-react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { EmptyState } from "@/components/EmptyState";
