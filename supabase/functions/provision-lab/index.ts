@@ -6,7 +6,7 @@ import { notifyConfigIssue } from "../_shared/config-alerts.ts";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import {
-  assertVmProvisioningReady, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime,
+  assertVmProvisioningReady, ensureAzureResourceGroup, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime,
   resolveVmAdminPassword, vmProvisioningGaps, type AzureRuntime,
 } from "../_shared/cloud-providers/azure-runtime.ts";
 import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
