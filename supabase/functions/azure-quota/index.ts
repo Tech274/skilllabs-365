@@ -1,3 +1,4 @@
+import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
 import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
@@ -30,10 +31,6 @@ Deno.serve(async (req) => {
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID")!;
-    const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
-    const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
-    const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID")!;
 
     // Auth check
     const authHeader = req.headers.get("authorization");
@@ -60,7 +57,9 @@ Deno.serve(async (req) => {
       });
     }
 
-    const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+    // Quotas are reported for the default Azure resource provider account.
+    const azure = await resolveAzureRuntime(supabase, null);
+    const azureToken = await getAzureToken(azure.tenantId, azure.clientId, azure.clientSecret);
 
     // Fetch compute usage for East US (primary region)
     const regions = ["eastus", "centralindia"];
@@ -68,7 +67,7 @@ Deno.serve(async (req) => {
 
     for (const region of regions) {
       const res = await fetch(
-        `https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/providers/Microsoft.Compute/locations/${region}/usages?api-version=2024-03-01`,
+        `https://management.azure.com/subscriptions/${azure.subscriptionId}/providers/Microsoft.Compute/locations/${region}/usages?api-version=2024-03-01`,
         { headers: { Authorization: `Bearer ${azureToken}` } }
       );
 

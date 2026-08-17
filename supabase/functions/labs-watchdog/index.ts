@@ -8,6 +8,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { corsHeadersFor, requireAdmin, jsonResponse, errorResponse } from "../_shared/auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, releaseIdempotency } from "../_shared/idempotency.ts";
+import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
 
 const SOURCE = "labs-watchdog";
 const WATCHDOG_USER = "00000000-0000-0000-0000-000000000000";
@@ -57,6 +58,7 @@ interface WatchdogVm {
   azure_vm_id: string | null;
   status: string;
   expires_at: string | null;
+  provider_account_id: string | null;
 }
 
 Deno.serve(async (req) => {
