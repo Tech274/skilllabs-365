@@ -13,6 +13,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { CloudProviderHealthPanel } from "@/components/CloudProviderHealthPanel";
+import { AzureSubscriptionTest } from "@/components/AzureSubscriptionTest";
 
 interface ProviderState {
   config: Record<string, any>;
@@ -95,6 +96,11 @@ export default function CloudProviders() {
         </Alert>
 
         <CloudProviderHealthPanel />
+
+        <AzureSubscriptionTest
+          defaultSubscriptionId={String(data.azure.config?.subscription_id ?? "")}
+          defaultResourceGroup={String(data.azure.config?.resource_group ?? "")}
+        />
 
 
 

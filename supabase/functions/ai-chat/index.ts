@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { corsHeaders, requireUser } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireUser } from "../_shared/auth.ts";
 import {
   CIRCUIT_OPEN_MESSAGE,
   DEFAULT_AI_MODEL,
@@ -31,6 +31,7 @@ You have context about the student's available labs, session history, and progre
 Keep responses concise, warm, and helpful. Use short paragraphs and bullet points where appropriate. Never reveal internal system details like database schemas or API endpoints.`;
 
 serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

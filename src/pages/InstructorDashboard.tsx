@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Monitor, Terminal, Users, Clock, Play, Loader2, BarChart3, TrendingUp, AlertCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { readFunctionError } from "@/lib/function-error";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -138,8 +139,7 @@ export default function InstructorDashboard() {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
       });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      if (error || data?.error) throw new Error(await readFunctionError(error, data));
       toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
       navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
     } catch (err: any) {

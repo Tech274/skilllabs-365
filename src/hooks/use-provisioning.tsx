@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { readFunctionError } from "@/lib/function-error";
 import { useNavigate } from "react-router-dom";
 
 interface ProvisioningState {
@@ -146,12 +147,17 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
     if (!state.vmId) return;
     setState((prev) => ({ ...prev, cancelling: true }));
     try {
-      await supabase.functions.invoke("cleanup-idle-labs", {
-        body: { action: "deallocate-vm", vm_id: state.vmId },
+      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+        body: { action: "cancel-provisioning", vm_id: state.vmId },
       });
-      toast({ title: "Provisioning Cancelled", description: "VM has been deallocated." });
-    } catch {
-      toast({ title: "Cancel Failed", description: "Could not cancel VM.", variant: "destructive" });
+      if (error || data?.error) throw new Error(await readFunctionError(error, data));
+      toast({ title: "Provisioning Cancelled", description: "Your VM has been removed." });
+    } catch (err) {
+      toast({
+        title: "Cancel Failed",
+        description: err instanceof Error ? err.message : "Could not cancel VM.",
+        variant: "destructive",
+      });
     }
     clearProvisioning();
   }, [state.vmId, clearProvisioning]);

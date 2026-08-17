@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { corsHeaders, requireAdmin } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
 const IDLE_TIMEOUT_MINUTES = 15;
 const STUCK_PROVISIONING_MINUTES = 10;
@@ -78,28 +78,13 @@ function extractVmName(azureVmId: string): string {
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const auth = await requireAdmin(req);
-    if (auth instanceof Response) return auth;
-
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-
-    const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID")!;
-    const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
-    const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
-    const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID")!;
-    const AZURE_RESOURCE_GROUP = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
-
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
-
-    // Parse optional body for manual trigger
+    // Parse optional body for manual trigger (before auth so we can branch on action)
     let action = "auto-cleanup";
     let targetVmId: string | null = null;
     try {
@@ -107,6 +92,59 @@ Deno.serve(async (req) => {
       action = body.action || action;
       targetVmId = body.vm_id || null;
     } catch { /* no body = scheduled run */ }
+
+    // `cancel-provisioning` is the only student-callable action: it is scoped to
+    // the caller's own VM. Everything else stays admin / service-role only.
+    const auth = action === "cancel-provisioning"
+      ? await requireUser(req)
+      : await requireAdmin(req);
+    if (auth instanceof Response) return auth;
+
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
+
+    const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID")!;
+    const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
+    const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
+    const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID")!;
+    const AZURE_RESOURCE_GROUP = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
+
+    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+
+    // Student-owned cancellation of a provisioning / running VM
+    if (action === "cancel-provisioning") {
+      if (!targetVmId) return errorResponse("vm_id required", 400);
+
+      const { data: vm } = await supabase
+        .from("virtual_machines")
+        .select("id, azure_vm_id, status, user_id")
+        .eq("id", targetVmId)
+        .maybeSingle();
+      if (!vm) return errorResponse("VM not found", 404);
+
+      const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
+      if (forbidden) return forbidden;
+
+      await supabase
+        .from("sessions")
+        .update({ ended_at: new Date().toISOString(), status: "completed" })
+        .eq("vm_id", targetVmId)
+        .eq("status", "active");
+
+      if (vm.azure_vm_id) {
+        try {
+          const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+          await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, extractVmName(vm.azure_vm_id));
+        } catch (e) {
+          console.error("cancel-provisioning: azure delete failed", e);
+        }
+      }
+
+      await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", targetVmId);
+      return jsonResponse({ success: true, action: "cancelled", vm_id: targetVmId });
+    }
 
     // Handle targeted stop/delete actions
     if ((action === "stop-vm" || action === "delete-vm") && targetVmId) {

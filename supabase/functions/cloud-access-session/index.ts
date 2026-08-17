@@ -1,4 +1,4 @@
-import { corsHeaders, requireUser, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireUser, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { createSession as awsCreate, revokeSession as awsRevoke } from "../_shared/cloud-providers/aws.ts";
 import { createSession as azureCreate, revokeSession as azureRevoke } from "../_shared/cloud-providers/azure.ts";
 import { createSession as gcpCreate, revokeSession as gcpRevoke } from "../_shared/cloud-providers/gcp.ts";
@@ -63,12 +63,14 @@ async function dispatchRevoke(provider: Provider, ref: string | null): Promise<v
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
     const auth = await requireUser(req);
     if (auth instanceof Response) return auth;
-    const { user, supabase } = auth;
+    const { userId, supabase } = auth;
+    if (auth.isServiceRole) return errorResponse("Forbidden: user session required", 403);
 
     let body: Record<string, unknown> = {};
     try { body = await req.json(); } catch { /* empty */ }
@@ -79,7 +81,7 @@ Deno.serve(async (req) => {
       if (!template_id) return errorResponse("template_id required", 400);
 
       // Entitlement re-check on the server
-      const { data: allowed } = await supabase.rpc("user_can_access_template", { _user_id: user.id, _template_id: template_id });
+      const { data: allowed } = await supabase.rpc("user_can_access_template", { _user_id: userId, _template_id: template_id });
       if (!allowed) return errorResponse("Forbidden: not entitled to this template", 403);
 
       const { data: tpl } = await supabase.from("access_templates").select("*").eq("id", template_id).maybeSingle();
@@ -88,7 +90,7 @@ Deno.serve(async (req) => {
 
       // One active session per user per template
       const { data: existing } = await supabase
-        .from("access_sessions").select("id").eq("user_id", user.id).eq("template_id", template_id)
+        .from("access_sessions").select("id").eq("user_id", userId).eq("template_id", template_id)
         .in("status", ["created", "active"]).limit(1).maybeSingle();
       if (existing) return errorResponse("You already have an active session for this template", 409);
 
@@ -97,7 +99,7 @@ Deno.serve(async (req) => {
       // Insert in 'created' state first
       const { data: pending, error: insertErr } = await supabase
         .from("access_sessions").insert({
-          user_id: user.id,
+          user_id: userId,
           template_id,
           provider: tpl.provider,
           region: tpl.region,
@@ -107,12 +109,12 @@ Deno.serve(async (req) => {
         }).select().single();
       if (insertErr || !pending) return errorResponse(`Could not create session: ${insertErr?.message}`, 500);
 
-      await logEvent(supabase, pending.id, "session.created", user.id, { template_id });
+      await logEvent(supabase, pending.id, "session.created", userId, { template_id });
 
       try {
-        const extras = await loadProviderExtras(supabase, tpl.provider as Provider, user.id);
+        const extras = await loadProviderExtras(supabase, tpl.provider as Provider, userId);
         const result = await dispatchCreate(tpl.provider as Provider, {
-          userId: user.id,
+          userId: userId,
           templateConfig: tpl.provider_config || {},
           region: tpl.region,
           durationMinutes: tpl.session_duration_minutes,
@@ -126,14 +128,14 @@ Deno.serve(async (req) => {
           scope: result.scope,
         }).eq("id", pending.id);
 
-        await logEvent(supabase, pending.id, "credentials.generated", user.id, { provider: tpl.provider });
+        await logEvent(supabase, pending.id, "credentials.generated", userId, { provider: tpl.provider });
 
         const { data: full } = await supabase.from("access_sessions").select("*").eq("id", pending.id).maybeSingle();
         return jsonResponse({ session: full });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Provider error";
         await supabase.from("access_sessions").update({ status: "failed", error_message: msg }).eq("id", pending.id);
-        await logEvent(supabase, pending.id, "credentials.failed", user.id, { error: msg });
+        await logEvent(supabase, pending.id, "credentials.failed", userId, { error: msg });
         return errorResponse(msg, 502);
       }
     }
@@ -144,7 +146,7 @@ Deno.serve(async (req) => {
 
       const { data: sess } = await supabase.from("access_sessions").select("*").eq("id", session_id).maybeSingle() as { data: SessionRow | null };
       if (!sess) return errorResponse("Session not found", 404);
-      if (sess.user_id !== user.id) return errorResponse("Forbidden", 403);
+      if (sess.user_id !== userId) return errorResponse("Forbidden", 403);
       if (sess.status !== "active") return errorResponse("Session is not active", 400);
 
       const { data: tpl } = await supabase.from("access_templates").select("*").eq("id", sess.template_id).maybeSingle();
@@ -158,9 +160,9 @@ Deno.serve(async (req) => {
 
       try {
         await dispatchRevoke(sess.provider, sess.provider_session_ref);
-        const extras = await loadProviderExtras(supabase, sess.provider, user.id);
+        const extras = await loadProviderExtras(supabase, sess.provider, userId);
         const result = await dispatchCreate(sess.provider, {
-          userId: user.id,
+          userId: userId,
           templateConfig: tpl.provider_config || {},
           region: tpl.region,
           durationMinutes: tpl.session_duration_minutes,
@@ -176,12 +178,12 @@ Deno.serve(async (req) => {
           scope: result.scope,
         }).eq("id", session_id);
 
-        await logEvent(supabase, session_id, "credentials.refreshed", user.id, { refresh_count: sess.refresh_count + 1 });
+        await logEvent(supabase, session_id, "credentials.refreshed", userId, { refresh_count: sess.refresh_count + 1 });
         const { data: full } = await supabase.from("access_sessions").select("*").eq("id", session_id).maybeSingle();
         return jsonResponse({ session: full });
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Refresh failed";
-        await logEvent(supabase, session_id, "credentials.refresh_failed", user.id, { error: msg });
+        await logEvent(supabase, session_id, "credentials.refresh_failed", userId, { error: msg });
         return errorResponse(msg, 502);
       }
     }
@@ -191,8 +193,8 @@ Deno.serve(async (req) => {
       if (!session_id) return errorResponse("session_id required", 400);
       const { data: sess } = await supabase.from("access_sessions").select("*").eq("id", session_id).maybeSingle() as { data: SessionRow | null };
       if (!sess) return errorResponse("Session not found", 404);
-      if (sess.user_id !== user.id) {
-        const { data: isAdmin } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
+      if (sess.user_id !== userId) {
+        const { data: isAdmin } = await supabase.rpc("is_platform_admin", { _user_id: userId });
         if (!isAdmin) return errorResponse("Forbidden", 403);
       }
 
@@ -202,7 +204,7 @@ Deno.serve(async (req) => {
         status: "completed",
         ended_at: new Date().toISOString(),
       }).eq("id", session_id);
-      await logEvent(supabase, session_id, "session.ended", user.id, {});
+      await logEvent(supabase, session_id, "session.ended", userId, {});
 
       return jsonResponse({ success: true });
     }
