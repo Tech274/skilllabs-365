@@ -35,6 +35,7 @@ import AdminResourceProviders from "./pages/AdminResourceProviders";
 import CloudProviders from "./pages/CloudProviders";
 import AdminCloudReports from "./pages/AdminCloudReports";
 import AiStatus from "./pages/AiStatus";
+import AdminProvisioningExport from "./pages/AdminProvisioningExport";
 
 
 const queryClient = new QueryClient();
