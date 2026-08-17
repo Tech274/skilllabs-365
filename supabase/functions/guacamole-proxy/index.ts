@@ -5,6 +5,13 @@ import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdemp
 
 const SOURCE = "guacamole-proxy";
 
+/** Protocol configured on the VM's lab template ("ssh" or "rdp"). */
+// deno-lint-ignore no-explicit-any
+function labTemplateProtocol(vm: any): "ssh" | "rdp" {
+  const tpl = Array.isArray(vm?.lab_templates) ? vm.lab_templates[0] : vm?.lab_templates;
+  return String(tpl?.protocol ?? "").toUpperCase() === "SSH" ? "ssh" : "rdp";
+}
+
 
 
 interface GuacConnection {
@@ -158,6 +165,9 @@ Deno.serve(async (req) => {
     const correlationId = correlationIdFrom(req);
     const traceHeaders = { ...corsHeaders, ...correlationHeaders(correlationId), "Content-Type": "application/json" };
     const timeline = new ProvisioningTimeline(supabase, { correlationId, userId: user.id });
+    let pendingClaim: { key: string; action: string } | null = null;
+
+    try {
 
     const isAdmin = async () => {
       const { data } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
@@ -201,13 +211,16 @@ Deno.serve(async (req) => {
         action: "guac-create-session",
         correlationId,
       });
+      pendingClaim = { key: sessionKey, action: "guac-create-session" };
       if (claim.outcome === "replay") {
+        pendingClaim = null;
         await timeline.skipped(SOURCE, "guacamole-connect", "Duplicate connect request replayed", { key: sessionKey });
         return new Response(JSON.stringify({ ...claim.response, idempotent_replay: true }), {
           status: 200, headers: traceHeaders,
         });
       }
       if (claim.outcome === "in_progress") {
+        pendingClaim = null;
         await timeline.skipped(SOURCE, "guacamole-connect", "Duplicate connect request ignored — one is already running", { key: sessionKey });
         return new Response(
           JSON.stringify({ error: "A connection request for this lab is already in progress.", idempotent_replay: true }),
@@ -248,6 +261,7 @@ Deno.serve(async (req) => {
             session_id: liveSession.id,
           });
           await completeIdempotency(supabase, { key: sessionKey, userId: user.id, action: "guac-create-session", response: reused });
+          pendingClaim = null;
           return new Response(JSON.stringify(reused), { status: 200, headers: traceHeaders });
         }
       }
@@ -333,6 +347,7 @@ Deno.serve(async (req) => {
       timeline.attach({ sessionId: session.id });
       await timeline.success(SOURCE, "guacamole-connect", "Remote desktop connection ready", { protocol: protocol.toUpperCase() });
       await completeIdempotency(supabase, { key: sessionKey, userId: user.id, action: "guac-create-session", response: created });
+      pendingClaim = null;
 
       return new Response(JSON.stringify(created), { status: 200, headers: traceHeaders });
     }
@@ -406,6 +421,15 @@ Deno.serve(async (req) => {
     }
 
     throw new Error(`Unknown action: ${action}`);
+    } catch (inner) {
+      // A failed attempt must never block the user's retry.
+      if (pendingClaim) {
+        await releaseIdempotency(supabase, { key: pendingClaim.key, userId: user.id, action: pendingClaim.action });
+      }
+      await timeline.failed(SOURCE, action === "end-session" ? "session-end" : "guacamole-connect",
+        inner instanceof Error ? inner.message : "Guacamole request failed");
+      throw inner;
+    }
   } catch (error: unknown) {
     console.error("guacamole-proxy error:", error);
     const message = error instanceof Error ? error.message : "Unknown error";
