@@ -2,11 +2,58 @@
 // Functions deploy with verify_jwt = false, so we validate tokens here.
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 
-export const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+const ALLOWED_HEADERS =
+  "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version";
+
+/**
+ * Production origin allowlist. Extra origins can be added with the
+ * `ALLOWED_ORIGINS` secret (comma separated). Lovable preview subdomains and
+ * localhost dev servers stay allowed so local development keeps working.
+ */
+export function isAllowedOrigin(origin: string): boolean {
+  if (!origin) return false;
+  const extra = (Deno.env.get("ALLOWED_ORIGINS") ?? "")
+    .split(",").map((o) => o.trim()).filter(Boolean);
+  if (extra.includes(origin)) return true;
+  let url: URL;
+  try { url = new URL(origin); } catch { return false; }
+  const host = url.hostname;
+  if (url.protocol === "http:" && (host === "localhost" || host === "127.0.0.1")) return true;
+  if (url.protocol !== "https:") return false;
+  return host === "lovable.app" || host.endsWith(".lovable.app") || host.endsWith(".lovableproject.com");
+}
+
+export function corsHeadersFor(req: Request): Record<string, string> {
+  const origin = req.headers.get("origin") ?? "";
+  const allowed = isAllowedOrigin(origin);
+  if (allowed) activeOrigin = origin;
+  return {
+    "Access-Control-Allow-Origin": allowed ? origin : "null",
+    "Access-Control-Allow-Headers": ALLOWED_HEADERS,
+    "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
+    "Vary": "Origin",
+  };
+}
+
+// Last allowlisted origin seen by this isolate; used by jsonResponse so callers
+// that only import `corsHeaders` still emit a non-wildcard origin.
+let activeOrigin = "";
+
+export const corsHeaders: Record<string, string> = new Proxy({}, {
+  get(_t, prop: string) {
+    if (prop === "Access-Control-Allow-Origin") return activeOrigin || "null";
+    if (prop === "Access-Control-Allow-Headers") return ALLOWED_HEADERS;
+    if (prop === "Access-Control-Allow-Methods") return "POST, GET, OPTIONS";
+    if (prop === "Vary") return "Origin";
+    return undefined;
+  },
+  ownKeys() {
+    return ["Access-Control-Allow-Origin", "Access-Control-Allow-Headers", "Access-Control-Allow-Methods", "Vary"];
+  },
+  getOwnPropertyDescriptor() {
+    return { enumerable: true, configurable: true };
+  },
+}) as Record<string, string>;
 
 export function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -18,6 +65,7 @@ export function jsonResponse(body: unknown, status = 200): Response {
 export function errorResponse(message: string, status = 400): Response {
   return jsonResponse({ error: message }, status);
 }
+
 
 function serviceClient(): SupabaseClient {
   return createClient(
