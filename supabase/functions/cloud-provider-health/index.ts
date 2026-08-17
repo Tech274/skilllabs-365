@@ -1,7 +1,7 @@
 // Realtime cloud provider health probes (AWS STS + Azure ARM).
 // Writes one row per check into public.cloud_provider_health_checks so the
 // admin UI can subscribe over realtime.
-import { corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
 const enc = new TextEncoder();
 
@@ -168,6 +168,7 @@ async function probeAzureCompute(token: string | null, region: string): Promise<
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {

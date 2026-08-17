@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
 const IDLE_TIMEOUT_MINUTES = 15;
 const STUCK_PROVISIONING_MINUTES = 10;
@@ -78,6 +78,7 @@ function extractVmName(azureVmId: string): string {
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

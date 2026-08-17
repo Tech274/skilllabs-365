@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { corsHeaders, requireAdmin } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireAdmin } from "../_shared/auth.ts";
 
 
 async function getAzureToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
@@ -21,6 +21,7 @@ async function getAzureToken(tenantId: string, clientId: string, clientSecret: s
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

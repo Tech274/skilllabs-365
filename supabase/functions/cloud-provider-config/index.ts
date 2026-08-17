@@ -1,4 +1,4 @@
-import { corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
 const AWS_SECRETS = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_ROLE_ARN"];
 const AZURE_SECRETS = ["AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_SUBSCRIPTION_ID"];
@@ -10,6 +10,7 @@ function secretsStatus(names: string[]) {
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {

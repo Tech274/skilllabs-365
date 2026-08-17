@@ -1,4 +1,4 @@
-import { corsHeaders, requireUser, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireUser, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { createSession as awsCreate, revokeSession as awsRevoke } from "../_shared/cloud-providers/aws.ts";
 import { createSession as azureCreate, revokeSession as azureRevoke } from "../_shared/cloud-providers/azure.ts";
 import { createSession as gcpCreate, revokeSession as gcpRevoke } from "../_shared/cloud-providers/gcp.ts";
@@ -63,6 +63,7 @@ async function dispatchRevoke(provider: Provider, ref: string | null): Promise<v
 }
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {

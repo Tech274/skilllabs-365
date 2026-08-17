@@ -1,8 +1,9 @@
-import { corsHeaders, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { azureStatusToVmStatus } from "../_shared/vm-state.ts";
 
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

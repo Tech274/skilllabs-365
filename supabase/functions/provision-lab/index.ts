@@ -1,11 +1,8 @@
+import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { mapAzureError } from "../_shared/vm-state.ts";
 
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-};
+
 
 /** Get Azure access token using Service Principal */
 async function getAzureToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
@@ -174,6 +171,7 @@ async function createAzureVM(
 
 
 Deno.serve(async (req) => {
+  const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }

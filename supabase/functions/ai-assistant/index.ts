@@ -1,5 +1,5 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { corsHeaders, requireUser } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireUser } from "../_shared/auth.ts";
 import {
   CIRCUIT_OPEN_MESSAGE,
   DEFAULT_AI_MODEL,
