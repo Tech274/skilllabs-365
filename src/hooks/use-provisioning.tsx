@@ -147,7 +147,7 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
     setState((prev) => ({ ...prev, cancelling: true }));
     try {
       await supabase.functions.invoke("cleanup-idle-labs", {
-        body: { action: "deallocate-vm", vm_id: state.vmId },
+        body: { action: "cancel-provisioning", vm_id: state.vmId },
       });
       toast({ title: "Provisioning Cancelled", description: "VM has been deallocated." });
     } catch {
