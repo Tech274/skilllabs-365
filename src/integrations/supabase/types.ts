@@ -580,6 +580,48 @@ export type Database = {
         }
         Relationships: []
       }
+      export_audit_logs: {
+        Row: {
+          actor_email: string | null
+          actor_id: string
+          actor_role: string | null
+          created_at: string
+          export_kind: string
+          filters: Json
+          format: string
+          id: string
+          ip_address: string | null
+          row_count: number
+          user_agent: string | null
+        }
+        Insert: {
+          actor_email?: string | null
+          actor_id: string
+          actor_role?: string | null
+          created_at?: string
+          export_kind: string
+          filters?: Json
+          format: string
+          id?: string
+          ip_address?: string | null
+          row_count?: number
+          user_agent?: string | null
+        }
+        Update: {
+          actor_email?: string | null
+          actor_id?: string
+          actor_role?: string | null
+          created_at?: string
+          export_kind?: string
+          filters?: Json
+          format?: string
+          id?: string
+          ip_address?: string | null
+          row_count?: number
+          user_agent?: string | null
+        }
+        Relationships: []
+      }
       lab_assignments: {
         Row: {
           assigned_at: string
@@ -996,39 +1038,60 @@ export type Database = {
       provisioning_idempotency: {
         Row: {
           action: string
+          actor_id: string | null
+          actor_type: string
+          attempts: number
           completed_at: string | null
           correlation_id: string | null
           created_at: string
           expires_at: string
           id: string
           idempotency_key: string
+          last_error: string | null
+          last_retried_at: string | null
+          last_retried_by: string | null
           response: Json | null
           status: string
           user_id: string
+          vm_id: string | null
         }
         Insert: {
           action: string
+          actor_id?: string | null
+          actor_type?: string
+          attempts?: number
           completed_at?: string | null
           correlation_id?: string | null
           created_at?: string
           expires_at?: string
           id?: string
           idempotency_key: string
+          last_error?: string | null
+          last_retried_at?: string | null
+          last_retried_by?: string | null
           response?: Json | null
           status?: string
           user_id: string
+          vm_id?: string | null
         }
         Update: {
           action?: string
+          actor_id?: string | null
+          actor_type?: string
+          attempts?: number
           completed_at?: string | null
           correlation_id?: string | null
           created_at?: string
           expires_at?: string
           id?: string
           idempotency_key?: string
+          last_error?: string | null
+          last_retried_at?: string | null
+          last_retried_by?: string | null
           response?: Json | null
           status?: string
           user_id?: string
+          vm_id?: string | null
         }
         Relationships: []
       }
