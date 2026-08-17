@@ -431,8 +431,14 @@ Deno.serve(async (req) => {
         // End the session
         await supabase
           .from("sessions")
-          .update({ ended_at: now.toISOString(), status: "completed" })
+          .update({ ended_at: now.toISOString(), status: "completed", disconnect_reason: "idle_timeout" })
           .eq("id", session.id);
+        await supabase.from("session_events").insert({
+          session_id: session.id,
+          event_type: "idle_timeout",
+          event_data: { reason: "idle_timeout", ended_by: "cleanup-idle-labs" },
+        });
+
 
         if (session.vm_id) {
           // Get VM details
