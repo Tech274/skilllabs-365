@@ -6,7 +6,7 @@ import { notifyConfigIssue } from "../_shared/config-alerts.ts";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import {
-  assertVmProvisioningReady, ProviderConfigError, resolveAzureRuntime, type AzureRuntime,
+  assertVmProvisioningReady, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime, type AzureRuntime,
 } from "../_shared/cloud-providers/azure-runtime.ts";
 
 const SOURCE = "provision-lab";
@@ -393,6 +393,12 @@ Deno.serve(async (req) => {
     let azure: AzureRuntime;
     try {
       azure = await resolveAzureRuntime(supabase, template.provider_account_id);
+      if (!azure.subnetId) {
+        // No subnet configured: reuse an existing VNet or create a lab VNet,
+        // then persist the id back onto the provider account.
+        const regionHint = azure.defaultRegion || "eastus";
+        await ensureAzureSubnet(service, azure, regionHint);
+      }
       assertVmProvisioningReady(azure);
     } catch (e) {
       const message = e instanceof Error ? e.message : "Resource provider not configured";
