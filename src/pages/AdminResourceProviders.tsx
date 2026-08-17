@@ -206,8 +206,7 @@ export default function AdminResourceProviders() {
             icon={Cloud}
             title="No cloud accounts yet"
             description="Add an Azure subscription, AWS account, or another cloud provider to start issuing lab access."
-            actionLabel="Add provider account"
-            onAction={openCreate}
+            hint="Use the Add provider account button above."
           />
         ) : (
           <div className="space-y-8">
