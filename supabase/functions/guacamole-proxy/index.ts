@@ -135,6 +135,21 @@ function randomSuffix(len = 12): string {
   return Array.from(bytes, (b) => b.toString(36).padStart(2, "0")).join("").slice(0, len);
 }
 
+
+/** Record a Guacamole session lifecycle event (start/reconnect/idle/stop). */
+// deno-lint-ignore no-explicit-any -- untyped service client in the edge runtime
+async function logSessionEvent(supabase: any, sessionId: string, eventType: string, data: Record<string, unknown> = {}) {
+  try {
+    await supabase.from("session_events").insert({
+      session_id: sessionId,
+      event_type: eventType,
+      event_data: data,
+    });
+  } catch (e) {
+    console.error("session event log failed:", e instanceof Error ? e.message : e);
+  }
+}
+
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
@@ -261,6 +276,15 @@ Deno.serve(async (req) => {
           await timeline.skipped(SOURCE, "guacamole-connect", "Reconnected to the existing session instead of creating a duplicate", {
             session_id: liveSession.id,
           });
+          await supabase.rpc; // no-op guard for typing
+          const { data: prev } = await supabase
+            .from("sessions").select("reconnects").eq("id", liveSession.id).maybeSingle();
+          await supabase.from("sessions")
+            .update({ reconnects: (prev?.reconnects ?? 0) + 1, last_activity_at: new Date().toISOString() })
+            .eq("id", liveSession.id);
+          await logSessionEvent(supabase, liveSession.id, "reconnect", {
+            reason: "duplicate_connect", vm_id, correlation_id: correlationId,
+          });
           await completeIdempotency(supabase, { key: sessionKey, userId: user.id, action: "guac-create-session", response: reused });
           pendingClaim = null;
           return new Response(JSON.stringify(reused), { status: 200, headers: traceHeaders });
@@ -339,6 +363,9 @@ Deno.serve(async (req) => {
       }
 
       await supabase.from("virtual_machines").update({ status: "running" }).eq("id", vm_id);
+      await logSessionEvent(supabase, session.id, "session_start", {
+        protocol: protocol.toUpperCase(), vm_id, region: vm.region, correlation_id: correlationId,
+      });
 
       const created = {
         session_id: session.id,
@@ -387,6 +414,15 @@ Deno.serve(async (req) => {
       const scoped = await getGuacToken(GUACAMOLE_URL, sess.guac_username, newPassword);
       const clientId = btoa(`${sess.guac_connection_id}\0c\0${dataSource}`);
       const iframeUrl = `${guacBaseUrl}/#/client/${encodeURIComponent(clientId)}?token=${scoped.token}`;
+      const { data: prevSess } = await supabase
+        .from("sessions").select("reconnects").eq("id", session_id).maybeSingle();
+      await supabase.from("sessions")
+        .update({ reconnects: (prevSess?.reconnects ?? 0) + 1, last_activity_at: new Date().toISOString() })
+        .eq("id", session_id);
+      await logSessionEvent(supabase, session_id, "reconnect", {
+        reason: String(body.reason ?? "user_reconnect"), correlation_id: correlationId,
+      });
+
       return new Response(JSON.stringify({ session_id, iframe_url: iframeUrl }), {
         status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -408,9 +444,13 @@ Deno.serve(async (req) => {
         });
       }
 
+      const disconnectReason = String(body.reason ?? "user_ended").slice(0, 120);
       await supabase.from("sessions")
-        .update({ ended_at: new Date().toISOString(), status: "completed" })
+        .update({ ended_at: new Date().toISOString(), status: "completed", disconnect_reason: disconnectReason })
         .eq("id", session_id);
+      await logSessionEvent(supabase, session_id, "session_end", {
+        reason: disconnectReason, correlation_id: correlationId,
+      });
 
       if (sess.guac_username) await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, sess.guac_username);
       if (sess.guac_connection_id) await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, sess.guac_connection_id);
