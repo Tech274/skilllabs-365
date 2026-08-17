@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { Monitor, Terminal, Play, Loader2, Clock, History, CheckCircle2, AlertCircle } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { ProvisioningErrorPanel } from "@/components/ProvisioningErrorPanel";
 import { readFunctionError } from "@/lib/function-error";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
@@ -32,6 +33,7 @@ export default function StudentDashboard() {
   const [loading, setLoading] = useState(true);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
+  const [launchErrorPayloads, setLaunchErrorPayloads] = useState<Record<string, { missing_fields?: string[]; setting?: string; suggestion?: string } | null>>({});
 
   useEffect(() => {
     if (!user) return;
@@ -55,7 +57,10 @@ export default function StudentDashboard() {
         body: { lab_template_id: lab.id },
         headers: idempotencyHeaders(`provision:${lab.id}`),
       });
-      if (error || data?.error) throw new Error(await readFunctionError(error, data));
+      if (error || data?.error) {
+        if (data?.error) setLaunchErrorPayloads((prev) => ({ ...prev, [lab.id]: data }));
+        throw new Error(await readFunctionError(error, data));
+      }
 
       if (data.status === "running") {
         toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
@@ -181,13 +186,10 @@ export default function StudentDashboard() {
                     <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
                   </div>
                   {launchErrors[lab.id] && (
-                    <div className="flex items-start gap-2 rounded-lg bg-destructive/10 border border-destructive/20 p-2.5">
-                      <AlertCircle className="h-3.5 w-3.5 text-destructive mt-0.5 shrink-0" />
-                      <div className="space-y-1">
-                        <p className="text-[11px] text-destructive font-medium">Launch failed</p>
-                        <p className="text-[10px] text-destructive/80 leading-tight">{launchErrors[lab.id]}</p>
-                      </div>
-                    </div>
+                    <ProvisioningErrorPanel
+                      message={launchErrors[lab.id]}
+                      payload={launchErrorPayloads[lab.id]}
+                    />
                   )}
                   {provisioning.isProvisioning && provisioning.labId === lab.id && (
                     <ProvisioningProgress
