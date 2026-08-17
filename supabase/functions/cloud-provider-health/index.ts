@@ -183,10 +183,12 @@ Deno.serve(async (req) => {
     const awsRegion = url.searchParams.get("aws_region") || "us-east-1";
     const azureRegion = url.searchParams.get("azure_region") || "eastus";
 
-    const [awsCheck, azureToken] = await Promise.all([probeAws(awsRegion), probeAzureToken()]);
+    // Credentials live in the Resource Providers registry (service-role read only).
+    const azureRuntime = await tryResolveAzureRuntime(serviceClient(), null);
+    const [awsCheck, azureToken] = await Promise.all([probeAws(awsRegion), probeAzureToken(azureRuntime)]);
     const [armCheck, computeCheck] = await Promise.all([
-      probeAzureArm(azureToken.token),
-      probeAzureCompute(azureToken.token, azureRegion),
+      probeAzureArm(azureToken.token, azureRuntime),
+      probeAzureCompute(azureToken.token, azureRegion, azureRuntime),
     ]);
 
     const checks: Check[] = [awsCheck, azureToken.check, armCheck, computeCheck];
