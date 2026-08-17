@@ -1525,7 +1525,15 @@ export type Database = {
         | "content_admin"
         | "org_exec"
         | "org_manager"
-      cloud_provider: "azure" | "aws" | "gcp"
+      cloud_provider:
+        | "azure"
+        | "aws"
+        | "gcp"
+        | "oci"
+        | "ibm"
+        | "alibaba"
+        | "digitalocean"
+        | "other"
       template_assignee_type: "user" | "org" | "group" | "self_enroll"
       vm_status:
         | "provisioning"
@@ -1683,7 +1691,16 @@ export const Constants = {
         "org_exec",
         "org_manager",
       ],
-      cloud_provider: ["azure", "aws", "gcp"],
+      cloud_provider: [
+        "azure",
+        "aws",
+        "gcp",
+        "oci",
+        "ibm",
+        "alibaba",
+        "digitalocean",
+        "other",
+      ],
       template_assignee_type: ["user", "org", "group", "self_enroll"],
       vm_status: [
         "provisioning",
