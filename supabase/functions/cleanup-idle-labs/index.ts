@@ -2,6 +2,34 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+
+/**
+ * Azure credentials always come from the Resource Providers registry — one VM
+ * may belong to a different subscription than the next, so contexts are
+ * resolved (and cached) per provider account for the lifetime of a request.
+ */
+interface AzureCtx { token: string; subscriptionId: string; resourceGroup: string }
+
+function makeAzureResolver(
+  // deno-lint-ignore no-explicit-any -- service client, untyped in the edge runtime
+  supabase: any,
+) {
+  const cache = new Map<string, Promise<AzureCtx>>();
+  return (accountId?: string | null): Promise<AzureCtx> => {
+    const key = accountId ?? "__default__";
+    let entry = cache.get(key);
+    if (!entry) {
+      entry = (async () => {
+        const rt = await resolveAzureRuntime(supabase, accountId ?? null);
+        const token = await getAzureToken(rt.tenantId, rt.clientId, rt.clientSecret);
+        return { token, subscriptionId: rt.subscriptionId, resourceGroup: rt.resourceGroup };
+      })();
+      cache.set(key, entry);
+    }
+    return entry;
+  };
+}
 
 const SOURCE = "cleanup-idle-labs";
 
@@ -108,16 +136,11 @@ Deno.serve(async (req) => {
 
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 
-    const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID")!;
-    const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID")!;
-    const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET")!;
-    const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID")!;
-    const AZURE_RESOURCE_GROUP = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
-
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
     const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
       auth: { autoRefreshToken: false, persistSession: false },
     });
+    const azureFor = makeAzureResolver(supabase);
 
     // Student-owned cancellation of a provisioning / running VM
     if (action === "cancel-provisioning") {
@@ -125,7 +148,7 @@ Deno.serve(async (req) => {
 
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status, user_id, lab_template_id")
+        .select("id, azure_vm_id, status, user_id, lab_template_id, provider_account_id")
         .eq("id", targetVmId)
         .maybeSingle();
       if (!vm) return errorResponse("VM not found", 404);
@@ -175,8 +198,8 @@ Deno.serve(async (req) => {
 
         if (vm.azure_vm_id) {
           try {
-            const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
-            await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, extractVmName(vm.azure_vm_id));
+            const az = await azureFor(vm.provider_account_id);
+            await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
           } catch (e) {
             console.error("cancel-provisioning: azure delete failed", e);
             await timeline.failed(SOURCE, "azure-delete", e instanceof Error ? e.message : "Azure delete failed");
@@ -201,11 +224,9 @@ Deno.serve(async (req) => {
 
     // Handle targeted stop/delete actions
     if ((action === "stop-vm" || action === "delete-vm") && targetVmId) {
-      const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
-
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status")
+        .select("id, azure_vm_id, status, provider_account_id")
         .eq("id", targetVmId)
         .maybeSingle();
 
@@ -224,7 +245,8 @@ Deno.serve(async (req) => {
       if (action === "stop-vm") {
         if (vm.azure_vm_id) {
           const vmName = extractVmName(vm.azure_vm_id);
-          await deallocateAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+          const az = await azureFor(vm.provider_account_id);
+          await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         }
         await supabase.from("virtual_machines").update({ status: "deallocated" }).eq("id", targetVmId);
         return new Response(JSON.stringify({ success: true, action: "stopped", vm_id: targetVmId }), {
@@ -235,7 +257,8 @@ Deno.serve(async (req) => {
       if (action === "delete-vm") {
         if (vm.azure_vm_id) {
           const vmName = extractVmName(vm.azure_vm_id);
-          await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+          const az = await azureFor(vm.provider_account_id);
+          await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         }
         await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", targetVmId);
         return new Response(JSON.stringify({ success: true, action: "deleted", vm_id: targetVmId }), {
@@ -331,12 +354,10 @@ Deno.serve(async (req) => {
 
     // Handle purge: delete all failed/terminated VM records from database
     if (action === "purge-failed") {
-      const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
-
       // First clean up any Azure resources that might still exist
       const { data: purgeVMs } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status")
+        .select("id, azure_vm_id, status, provider_account_id")
         .in("status", ["failed", "terminated"]);
 
       let purged = 0;
@@ -344,7 +365,12 @@ Deno.serve(async (req) => {
         for (const vm of purgeVMs) {
           if (vm.azure_vm_id) {
             const vmName = extractVmName(vm.azure_vm_id);
-            await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+            try {
+              const az = await azureFor(vm.provider_account_id);
+              await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+            } catch (e) {
+              console.error("purge-failed: azure delete skipped", e);
+            }
           }
           // Delete the DB record entirely
           await supabase.from("virtual_machines").delete().eq("id", vm.id);
@@ -375,7 +401,7 @@ Deno.serve(async (req) => {
     // separately by the stuck-provisioning check (10min timeout)
     const { data: orphanVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, status")
+      .select("id, azure_vm_id, status, provider_account_id")
       .eq("status", "running")
       .not("azure_vm_id", "is", null);
 
@@ -394,13 +420,10 @@ Deno.serve(async (req) => {
     // 3. Find expired VMs
     const { data: expiredVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, status, expires_at")
+      .select("id, azure_vm_id, status, expires_at, provider_account_id")
       .in("status", ["running", "provisioning"])
       .not("azure_vm_id", "is", null)
       .lt("expires_at", now.toISOString());
-
-    // Get Azure token once for all operations
-    const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
 
     // Process idle sessions: end session + deallocate VM
     if (idleSessions?.length) {
@@ -415,13 +438,14 @@ Deno.serve(async (req) => {
           // Get VM details
           const { data: vm } = await supabase
             .from("virtual_machines")
-            .select("azure_vm_id")
+            .select("azure_vm_id, provider_account_id")
             .eq("id", session.vm_id)
             .maybeSingle();
 
           if (vm?.azure_vm_id) {
             const vmName = extractVmName(vm.azure_vm_id);
-            const deallocated = await deallocateAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+            const az = await azureFor(vm.provider_account_id);
+            const deallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
             if (deallocated) {
               await supabase.from("virtual_machines").update({ status: "deallocated" }).eq("id", session.vm_id);
               results.push(`Idle session ${session.id}: deallocated VM ${vmName}`);
@@ -438,7 +462,8 @@ Deno.serve(async (req) => {
         if (!vm.azure_vm_id) continue;
 
         const vmName = extractVmName(vm.azure_vm_id);
-        const deallocated = await deallocateAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+        const az = await azureFor(vm.provider_account_id);
+        const deallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         if (deallocated) {
           await supabase.from("virtual_machines").update({ status: "deallocated" }).eq("id", vm.id);
           results.push(`Orphan VM ${vmName}: deallocated`);
@@ -459,7 +484,8 @@ Deno.serve(async (req) => {
           .eq("status", "active");
 
         const vmName = extractVmName(vm.azure_vm_id);
-        const deleted = await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+        const az = await azureFor(vm.provider_account_id);
+        const deleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         if (deleted) {
           await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", vm.id);
           results.push(`Expired VM ${vmName}: deleted`);
@@ -470,7 +496,7 @@ Deno.serve(async (req) => {
     // 4. Mark VMs stuck in 'provisioning' for 10+ minutes as 'failed'
     const { data: stuckVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, created_at")
+      .select("id, azure_vm_id, created_at, provider_account_id")
       .eq("status", "provisioning")
       .lt("created_at", stuckCutoff);
 
@@ -479,7 +505,8 @@ Deno.serve(async (req) => {
         // If it has an Azure VM, try to clean it up
         if (vm.azure_vm_id) {
           const vmName = extractVmName(vm.azure_vm_id);
-          await deleteAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName);
+          const az = await azureFor(vm.provider_account_id);
+          await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         }
         // End any sessions tied to this VM
         await supabase
@@ -495,9 +522,10 @@ Deno.serve(async (req) => {
 
     // 5. Check Azure quota and send notifications to admins if > 80%
     try {
+      const az = await azureFor(null);
       const quotaRes = await fetch(
-        `https://management.azure.com/subscriptions/${AZURE_SUBSCRIPTION_ID}/providers/Microsoft.Compute/locations/eastus/usages?api-version=2024-03-01`,
-        { headers: { Authorization: `Bearer ${azureToken}` } }
+        `https://management.azure.com/subscriptions/${az.subscriptionId}/providers/Microsoft.Compute/locations/eastus/usages?api-version=2024-03-01`,
+        { headers: { Authorization: `Bearer ${az.token}` } }
       );
       if (quotaRes.ok) {
         const quotaData = await quotaRes.json();

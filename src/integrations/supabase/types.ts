@@ -526,27 +526,6 @@ export type Database = {
         }
         Relationships: []
       }
-      cloud_provider_config: {
-        Row: {
-          config: Json
-          provider: string
-          updated_at: string
-          updated_by: string | null
-        }
-        Insert: {
-          config?: Json
-          provider: string
-          updated_at?: string
-          updated_by?: string | null
-        }
-        Update: {
-          config?: Json
-          provider?: string
-          updated_at?: string
-          updated_by?: string | null
-        }
-        Relationships: []
-      }
       cloud_provider_health_checks: {
         Row: {
           check_name: string
@@ -646,6 +625,8 @@ export type Database = {
           name: string
           os_image: string
           protocol: string
+          provider: Database["public"]["Enums"]["cloud_provider"]
+          provider_account_id: string | null
           region: string
           status: string
           updated_at: string
@@ -663,6 +644,8 @@ export type Database = {
           name: string
           os_image?: string
           protocol: string
+          provider?: Database["public"]["Enums"]["cloud_provider"]
+          provider_account_id?: string | null
           region?: string
           status?: string
           updated_at?: string
@@ -680,12 +663,22 @@ export type Database = {
           name?: string
           os_image?: string
           protocol?: string
+          provider?: Database["public"]["Enums"]["cloud_provider"]
+          provider_account_id?: string | null
           region?: string
           status?: string
           updated_at?: string
           vm_size?: string
         }
-        Relationships: []
+        Relationships: [
+          {
+            foreignKeyName: "lab_templates_provider_account_id_fkey"
+            columns: ["provider_account_id"]
+            isOneToOne: false
+            referencedRelation: "cloud_provider_accounts"
+            referencedColumns: ["id"]
+          },
+        ]
       }
       manual_access_grants: {
         Row: {
@@ -1500,6 +1493,7 @@ export type Database = {
           idle_minutes: number
           lab_template_id: string | null
           private_ip: string | null
+          provider_account_id: string | null
           region: string
           status: Database["public"]["Enums"]["vm_status"]
           updated_at: string
@@ -1514,6 +1508,7 @@ export type Database = {
           idle_minutes?: number
           lab_template_id?: string | null
           private_ip?: string | null
+          provider_account_id?: string | null
           region?: string
           status?: Database["public"]["Enums"]["vm_status"]
           updated_at?: string
@@ -1528,6 +1523,7 @@ export type Database = {
           idle_minutes?: number
           lab_template_id?: string | null
           private_ip?: string | null
+          provider_account_id?: string | null
           region?: string
           status?: Database["public"]["Enums"]["vm_status"]
           updated_at?: string
@@ -1540,6 +1536,13 @@ export type Database = {
             columns: ["lab_template_id"]
             isOneToOne: false
             referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "virtual_machines_provider_account_id_fkey"
+            columns: ["provider_account_id"]
+            isOneToOne: false
+            referencedRelation: "cloud_provider_accounts"
             referencedColumns: ["id"]
           },
         ]

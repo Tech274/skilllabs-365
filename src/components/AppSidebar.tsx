@@ -28,7 +28,6 @@ const adminItems = [
   { title: "Cloud Access", url: "/admin/access-catalogue", icon: KeyRound },
   { title: "Cloud Reports", url: "/admin/cloud-reports", icon: FileText },
   { title: "Resource Providers", url: "/admin/resource-providers", icon: Cloud },
-  { title: "Cloud Providers", url: "/admin/cloud-providers", icon: Cloud },
   { title: "AI Status", url: "/admin/ai-status", icon: Sparkles },
   { title: "Provisioning Export", url: "/admin/provisioning-export", icon: Download },
   { title: "Audit Log", url: "/audit-log", icon: History },

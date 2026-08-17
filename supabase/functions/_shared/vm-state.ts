@@ -67,10 +67,10 @@ export function mapAzureError(raw: string): string {
     return "Azure rejected the request due to insufficient permissions. Please contact your administrator.";
   }
   if (/SubscriptionNotFound|SubscriptionDoesNotHaveServer|DisabledSubscription/i.test(m)) {
-    return "The configured Azure subscription could not be found or is disabled. An administrator must verify AZURE_SUBSCRIPTION_ID (and that the service principal has access to it).";
+    return "The configured Azure subscription could not be found or is disabled. An administrator must verify the Subscription ID on the linked resource provider (Admin → Resource Providers) and that its service principal has access.";
   }
   if (/ResourceGroupNotFound/i.test(m)) {
-    return "The configured Azure resource group does not exist. An administrator must verify AZURE_RESOURCE_GROUP.";
+    return "The configured Azure resource group does not exist. An administrator must verify the Resource Group on the linked resource provider (Admin → Resource Providers).";
   }
   if (/MissingSubscriptionRegistration|SubscriptionNotRegistered/i.test(m)) {
     return "The Azure subscription is not registered for the required resource providers (Microsoft.Compute / Microsoft.Network). An administrator must register them.";

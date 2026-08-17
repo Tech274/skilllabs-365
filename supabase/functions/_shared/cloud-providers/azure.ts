@@ -1,6 +1,6 @@
 // Azure provider adapter — time-boxed RBAC role assignment, returns Azure portal deep link.
-// Required secrets: AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET.
-// Per-template provider_config (or fallback to cloud_provider_config row 'azure'):
+// Credentials come from the linked Resource Provider account (never from env).
+// Per-template provider_config (merged with the Resource Provider account config):
 //   { subscription_id, resource_group?, scope?, role_definition_id, use_pim? }
 // User profile MUST have azure_object_id (Entra ID oid).
 
@@ -9,7 +9,7 @@ interface CreateCtx {
   templateConfig: Record<string, unknown>;
   region: string | null;
   durationMinutes: number;
-  // Resolved by the caller (cloud-access-session) from profile + cloud_provider_config:
+  // Resolved by the caller (cloud-access-session) from profile + resource provider account:
   azureObjectId?: string | null;
   azureDefaults?: Record<string, unknown> | null;
   /** Credentials from the selected resource provider account. */
@@ -26,9 +26,9 @@ interface Result {
 }
 
 async function armToken(creds?: AzureCreds | null): Promise<string> {
-  const tenant = creds?.tenant_id || Deno.env.get("AZURE_TENANT_ID");
-  const clientId = creds?.client_id || Deno.env.get("AZURE_CLIENT_ID");
-  const secret = creds?.client_secret || Deno.env.get("AZURE_CLIENT_SECRET");
+  const tenant = creds?.tenant_id;
+  const clientId = creds?.client_id;
+  const secret = creds?.client_secret;
   if (!tenant || !clientId || !secret) {
     throw new Error("Azure resource provider not configured: add an Azure account under Admin → Resource Providers.");
   }
@@ -56,9 +56,9 @@ function guid(): string {
 function resolveScope(cfg: Record<string, unknown>, defaults: Record<string, unknown> | null): string {
   const explicit = (cfg.scope as string | undefined) || (defaults?.scope as string | undefined);
   if (explicit) return explicit;
-  const sub = (cfg.subscription_id as string | undefined) || (defaults?.subscription_id as string | undefined) || Deno.env.get("AZURE_SUBSCRIPTION_ID");
-  const rg  = (cfg.resource_group as string | undefined) || (defaults?.resource_group as string | undefined) || Deno.env.get("AZURE_RESOURCE_GROUP");
-  if (!sub) throw new Error("Azure provider not configured: subscription_id required (template provider_config, cloud_provider_config, or AZURE_SUBSCRIPTION_ID).");
+  const sub = (cfg.subscription_id as string | undefined) || (defaults?.subscription_id as string | undefined);
+  const rg  = (cfg.resource_group as string | undefined) || (defaults?.resource_group as string | undefined);
+  if (!sub) throw new Error("Azure provider not configured: set a subscription_id on the template provider config or on the Azure account under Admin → Resource Providers.");
   if (rg) return `/subscriptions/${sub}/resourceGroups/${rg}`;
   return `/subscriptions/${sub}`;
 }
@@ -83,8 +83,7 @@ export async function createSession(ctx: CreateCtx): Promise<Result> {
   const usePim = Boolean(cfg.use_pim ?? defaults?.use_pim);
   const tenantId = (cfg.tenant_id as string | undefined)
     || ctx.credentials?.tenant_id
-    || (defaults?.tenant_id as string | undefined)
-    || Deno.env.get("AZURE_TENANT_ID")!;
+    || (defaults?.tenant_id as string | undefined)!;
 
   const token = await armToken(ctx.credentials as AzureCreds | null | undefined);
   const assignmentName = guid();

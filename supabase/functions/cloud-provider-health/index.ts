@@ -1,6 +1,8 @@
 // Realtime cloud provider health probes (AWS STS + Azure ARM).
 // Writes one row per check into public.cloud_provider_health_checks so the
 // admin UI can subscribe over realtime.
+import { tryResolveAzureRuntime, type AzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
 import { corsHeadersFor, corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
 const enc = new TextEncoder();
@@ -84,13 +86,15 @@ async function probeAws(region: string): Promise<Check> {
   }
 }
 
-async function probeAzureToken(): Promise<{ check: Check; token: string | null }> {
-  const tenant = Deno.env.get("AZURE_TENANT_ID");
-  const clientId = Deno.env.get("AZURE_CLIENT_ID");
-  const secret = Deno.env.get("AZURE_CLIENT_SECRET");
+async function probeAzureToken(
+  runtime: AzureRuntime | null,
+): Promise<{ check: Check; token: string | null }> {
+  const tenant = runtime?.tenantId;
+  const clientId = runtime?.clientId;
+  const secret = runtime?.clientSecret;
   const base: Check = { provider: "azure", check_name: "Entra ID token", status: "unconfigured", latency_ms: null, detail: null, region: null };
   if (!tenant || !clientId || !secret) {
-    return { check: { ...base, detail: "AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET not set" }, token: null };
+    return { check: { ...base, detail: "No Azure account with credentials under Admin → Resource Providers" }, token: null };
   }
   const started = Date.now();
   try {
@@ -119,11 +123,11 @@ async function probeAzureToken(): Promise<{ check: Check; token: string | null }
   }
 }
 
-async function probeAzureArm(token: string | null): Promise<Check> {
-  const subscription = Deno.env.get("AZURE_SUBSCRIPTION_ID");
+async function probeAzureArm(token: string | null, runtime: AzureRuntime | null): Promise<Check> {
+  const subscription = runtime?.subscriptionId;
   const base: Check = { provider: "azure", check_name: "ARM subscription", status: "unconfigured", latency_ms: null, detail: null, region: null };
   if (!token) return { ...base, status: "down", detail: "No Entra ID token — token probe failed" };
-  if (!subscription) return { ...base, detail: "AZURE_SUBSCRIPTION_ID not set" };
+  if (!subscription) return { ...base, detail: "Subscription ID not set on the Azure resource provider" };
   const started = Date.now();
   try {
     const resp = await fetch(
@@ -142,8 +146,8 @@ async function probeAzureArm(token: string | null): Promise<Check> {
   }
 }
 
-async function probeAzureCompute(token: string | null, region: string): Promise<Check> {
-  const subscription = Deno.env.get("AZURE_SUBSCRIPTION_ID");
+async function probeAzureCompute(token: string | null, region: string, runtime: AzureRuntime | null): Promise<Check> {
+  const subscription = runtime?.subscriptionId;
   const base: Check = { provider: "azure", check_name: "Compute quota API", status: "unconfigured", latency_ms: null, detail: null, region };
   if (!token || !subscription) return { ...base, detail: "Azure credentials incomplete" };
   const started = Date.now();
@@ -180,10 +184,12 @@ Deno.serve(async (req) => {
     const awsRegion = url.searchParams.get("aws_region") || "us-east-1";
     const azureRegion = url.searchParams.get("azure_region") || "eastus";
 
-    const [awsCheck, azureToken] = await Promise.all([probeAws(awsRegion), probeAzureToken()]);
+    // Credentials live in the Resource Providers registry (service-role read only).
+    const azureRuntime = await tryResolveAzureRuntime(serviceClient(), null);
+    const [awsCheck, azureToken] = await Promise.all([probeAws(awsRegion), probeAzureToken(azureRuntime)]);
     const [armCheck, computeCheck] = await Promise.all([
-      probeAzureArm(azureToken.token),
-      probeAzureCompute(azureToken.token, azureRegion),
+      probeAzureArm(azureToken.token, azureRuntime),
+      probeAzureCompute(azureToken.token, azureRegion, azureRuntime),
     ]);
 
     const checks: Check[] = [awsCheck, azureToken.check, armCheck, computeCheck];

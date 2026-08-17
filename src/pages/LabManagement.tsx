@@ -34,11 +34,12 @@ interface LabForm {
   file_transfer_enabled: boolean;
   region: string;
   status: string;
+  provider_account_id: string;
 }
 
 const emptyForm: LabForm = {
   name: '', description: '', protocol: 'RDP', vm_size: 'Standard_B2s', os_image: 'Windows Server 2022',
-  duration: 120, idle_timeout: 20, clipboard_enabled: true, file_transfer_enabled: false, region: 'All Regions', status: 'draft',
+  duration: 120, idle_timeout: 20, clipboard_enabled: true, file_transfer_enabled: false, region: 'All Regions', status: 'draft', provider_account_id: '',
 };
 
 const statusStyle: Record<string, string> = {
@@ -46,6 +47,15 @@ const statusStyle: Record<string, string> = {
   draft: 'bg-warning/10 text-warning',
   archived: 'bg-muted text-muted-foreground',
 };
+
+interface ProviderAccount {
+  id: string;
+  provider: string;
+  display_name: string;
+  status: string;
+  is_default: boolean;
+  default_region: string | null;
+}
 
 interface InstructorProfile {
   user_id: string;
@@ -74,6 +84,16 @@ export default function LabManagement() {
   const [deletingLab, setDeletingLab] = useState<LabTemplate | null>(null);
   const [genLoading, setGenLoading] = useState(false);
 
+  // Every template must point at a Resource Provider account — provisioning is blocked otherwise.
+  const [providerAccounts, setProviderAccounts] = useState<ProviderAccount[]>([]);
+
+  const fetchProviderAccounts = async () => {
+    const { data } = await supabase.functions.invoke<{ accounts: ProviderAccount[] }>("cloud-provider-accounts", {
+      body: { action: "list" },
+    });
+    setProviderAccounts((data?.accounts ?? []).filter(a => a.provider === "azure" && a.status === "active"));
+  };
+
   const fetchLabs = async () => {
     const { data, error } = await supabase.from("lab_templates").select("*").order("created_at", { ascending: false });
     if (error) {
@@ -84,7 +104,7 @@ export default function LabManagement() {
     setLoading(false);
   };
 
-  useEffect(() => { fetchLabs(); }, []);
+  useEffect(() => { fetchLabs(); fetchProviderAccounts(); }, []);
 
   const openCreate = () => { setEditingLab(null); setForm(emptyForm); setDialogOpen(true); };
 
@@ -95,18 +115,28 @@ export default function LabManagement() {
       vm_size: lab.vm_size, os_image: lab.os_image, duration: lab.duration,
       idle_timeout: lab.idle_timeout, clipboard_enabled: lab.clipboard_enabled,
       file_transfer_enabled: lab.file_transfer_enabled, region: lab.region, status: lab.status,
+      provider_account_id: lab.provider_account_id ?? '',
     });
     setDialogOpen(true);
   };
 
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    if (!form.provider_account_id) {
+      toast({
+        title: "Resource provider required",
+        description: "Pick the Azure account this lab provisions into (Admin → Resource Providers).",
+        variant: "destructive",
+      });
+      return;
+    }
+    const payload = { ...form, provider: "azure" };
     if (editingLab) {
-      const { error } = await supabase.from("lab_templates").update(form).eq("id", editingLab.id);
+      const { error } = await supabase.from("lab_templates").update(payload).eq("id", editingLab.id);
       if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
       toast({ title: "Lab updated", description: `${form.name} has been updated.` });
     } else {
-      const insert: TablesInsert<"lab_templates"> = { ...form };
+      const insert: TablesInsert<"lab_templates"> = { ...payload };
       const { error } = await supabase.from("lab_templates").insert(insert);
       if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
       toast({ title: "Lab created", description: `${form.name} has been created.` });
@@ -297,6 +327,24 @@ export default function LabManagement() {
                   </Button>
                 </div>
                 <Textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Lab description..." rows={2} />
+              </div>
+              <div className="space-y-2">
+                <Label>Resource Provider (Azure account)</Label>
+                <Select value={form.provider_account_id} onValueChange={v => setForm({ ...form, provider_account_id: v })}>
+                  <SelectTrigger><SelectValue placeholder="Select a resource provider account" /></SelectTrigger>
+                  <SelectContent>
+                    {providerAccounts.map(a => (
+                      <SelectItem key={a.id} value={a.id}>
+                        {a.display_name}{a.is_default ? " (default)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                {providerAccounts.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    No active Azure accounts yet — add one under Admin → Resource Providers.
+                  </p>
+                )}
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">

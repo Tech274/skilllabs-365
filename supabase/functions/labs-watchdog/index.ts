@@ -8,6 +8,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { corsHeadersFor, requireAdmin, jsonResponse, errorResponse } from "../_shared/auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, releaseIdempotency } from "../_shared/idempotency.ts";
+import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
 
 const SOURCE = "labs-watchdog";
 const WATCHDOG_USER = "00000000-0000-0000-0000-000000000000";
@@ -57,6 +58,7 @@ interface WatchdogVm {
   azure_vm_id: string | null;
   status: string;
   expires_at: string | null;
+  provider_account_id: string | null;
 }
 
 Deno.serve(async (req) => {
@@ -97,7 +99,7 @@ Deno.serve(async (req) => {
     // 1. Labs past expires_at, plus labs wedged in provisioning far too long.
     const { data: expiredVms } = await supabase
       .from("virtual_machines")
-      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at")
+      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id")
       .in("status", ["provisioning", "starting", "running", "deallocated"])
       .not("expires_at", "is", null)
       .lt("expires_at", nowIso)
@@ -105,7 +107,7 @@ Deno.serve(async (req) => {
 
     const { data: stuckVms } = await supabase
       .from("virtual_machines")
-      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at")
+      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id")
       .eq("status", "provisioning")
       .lt("created_at", stuckCutoff)
       .limit(MAX_PER_RUN);
@@ -142,7 +144,7 @@ Deno.serve(async (req) => {
       if (s.vm_id && !targets.has(s.vm_id)) {
         const { data: vm } = await supabase
           .from("virtual_machines")
-          .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at")
+          .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id")
           .eq("id", s.vm_id)
           .not("status", "in", "(terminated,failed)")
           .maybeSingle();
@@ -150,12 +152,25 @@ Deno.serve(async (req) => {
       }
     }
 
-    let azureToken: string | null = null;
-    const tenant = Deno.env.get("AZURE_TENANT_ID");
-    const clientId = Deno.env.get("AZURE_CLIENT_ID");
-    const clientSecret = Deno.env.get("AZURE_CLIENT_SECRET");
-    const subscription = Deno.env.get("AZURE_SUBSCRIPTION_ID");
-    const resourceGroup = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
+    // Azure credentials always come from the Resource Providers registry, keyed
+    // by the account that provisioned each VM.
+    const azureCache = new Map<string, Promise<{ token: string; subscriptionId: string; resourceGroup: string }>>();
+    const azureFor = (accountId?: string | null) => {
+      const key = accountId ?? "__default__";
+      let entry = azureCache.get(key);
+      if (!entry) {
+        entry = (async () => {
+          const rt = await resolveAzureRuntime(supabase, accountId ?? null);
+          return {
+            token: await getAzureToken(rt.tenantId, rt.clientId, rt.clientSecret),
+            subscriptionId: rt.subscriptionId,
+            resourceGroup: rt.resourceGroup,
+          };
+        })();
+        azureCache.set(key, entry);
+      }
+      return entry;
+    };
 
     for (const vm of targets.values()) {
       // Deterministic key: one cleanup per VM per expiry window, ever.
@@ -193,10 +208,10 @@ Deno.serve(async (req) => {
 
         let azureDeleted = false;
         if (vm.azure_vm_id) {
-          if (tenant && clientId && clientSecret && subscription) {
+          {
             try {
-              azureToken ??= await getAzureToken(tenant, clientId, clientSecret);
-              azureDeleted = await deleteAzureVM(azureToken, subscription, resourceGroup, extractVmName(vm.azure_vm_id));
+              const az = await azureFor(vm.provider_account_id);
+              azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
             } catch (e) {
               await timeline.failed(SOURCE, "azure-delete", e instanceof Error ? e.message : "Azure delete failed");
             }

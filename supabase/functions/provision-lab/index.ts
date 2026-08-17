@@ -5,6 +5,9 @@ import { verifyAzureSubscription, detectConfigIssue } from "../_shared/azure-pre
 import { notifyConfigIssue } from "../_shared/config-alerts.ts";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+import {
+  assertVmProvisioningReady, ProviderConfigError, resolveAzureRuntime, type AzureRuntime,
+} from "../_shared/cloud-providers/azure-runtime.ts";
 
 const SOURCE = "provision-lab";
 
@@ -188,26 +191,11 @@ Deno.serve(async (req) => {
   let idem: { key: string; userId: string } | null = null;
   // deno-lint-ignore no-explicit-any -- untyped service client (no generated DB types in the edge runtime)
   let admin: any = null;
+  const providerCtx: { subscriptionId?: string; resourceGroup?: string; accountName?: string } = {};
 
   try {
-    // Required secrets
-    const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID");
-    const AZURE_CLIENT_ID = Deno.env.get("AZURE_CLIENT_ID");
-    const AZURE_CLIENT_SECRET = Deno.env.get("AZURE_CLIENT_SECRET");
-    const AZURE_SUBSCRIPTION_ID = Deno.env.get("AZURE_SUBSCRIPTION_ID");
-    const AZURE_RESOURCE_GROUP = Deno.env.get("AZURE_RESOURCE_GROUP") || "skilllabs-rg";
-    const AZURE_SUBNET_ID = Deno.env.get("AZURE_SUBNET_ID") || "";
-    const AZURE_VM_ADMIN_USERNAME = Deno.env.get("AZURE_VM_ADMIN_USERNAME") || "labadmin";
-    const AZURE_VM_ADMIN_PASSWORD = Deno.env.get("AZURE_VM_ADMIN_PASSWORD") || "";
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
     const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-
-    if (!AZURE_TENANT_ID) throw new Error("AZURE_TENANT_ID is not configured");
-    if (!AZURE_CLIENT_ID) throw new Error("AZURE_CLIENT_ID is not configured");
-    if (!AZURE_CLIENT_SECRET) throw new Error("AZURE_CLIENT_SECRET is not configured");
-    if (!AZURE_SUBSCRIPTION_ID) throw new Error("AZURE_SUBSCRIPTION_ID is not configured");
-    if (!AZURE_SUBNET_ID) throw new Error("AZURE_SUBNET_ID is not configured");
-    if (!AZURE_VM_ADMIN_PASSWORD) throw new Error("AZURE_VM_ADMIN_PASSWORD is not configured");
     if (!SUPABASE_URL) throw new Error("SUPABASE_URL is not configured");
     if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
 
@@ -218,50 +206,6 @@ Deno.serve(async (req) => {
     const trace = new ProvisioningTimeline(service, { correlationId });
     timeline = trace;
 
-    // Preflight: confirm the subscription exists and the service principal can
-    // reach it before we create any DB row or Azure resource.
-    await trace.start(SOURCE, "preflight", "Validating Azure subscription and service principal access");
-    const preflight = await verifyAzureSubscription({
-      tenantId: AZURE_TENANT_ID,
-      clientId: AZURE_CLIENT_ID,
-      clientSecret: AZURE_CLIENT_SECRET,
-      subscriptionId: AZURE_SUBSCRIPTION_ID,
-      resourceGroup: AZURE_RESOURCE_GROUP,
-    });
-    if (!preflight.ok) {
-      console.error("provision-lab preflight failed:", JSON.stringify(preflight));
-      await trace.failed(SOURCE, "preflight", preflight.message, {
-        code: preflight.code,
-        setting: preflight.setting,
-        step: preflight.step,
-      });
-
-      // Proactively tell admins exactly which setting to update.
-      if (preflight.setting) {
-        await notifyConfigIssue(service, {
-          provider: "azure",
-          code: preflight.code ?? "PreflightFailed",
-          setting: preflight.setting,
-          message: preflight.message,
-          suggestion: preflight.suggestion,
-          context: "lab provisioning preflight",
-        });
-      }
-
-      return new Response(
-        JSON.stringify({
-          correlation_id: correlationId,
-          error: preflight.message,
-          code: preflight.code,
-          setting: preflight.setting,
-          suggestion: preflight.suggestion,
-          details: preflight.details,
-          stage: `preflight:${preflight.step}`,
-        }),
-        { status: 400, headers: traceHeaders },
-      );
-    }
-    await trace.success(SOURCE, "preflight", "Azure subscription and resource group reachable");
 
     const authHeader = req.headers.get("authorization");
     if (!authHeader?.startsWith("Bearer ")) throw new Error("Missing authorization header");
@@ -430,6 +374,96 @@ Deno.serve(async (req) => {
       throw new Error(`Lab template not found: ${templateError?.message || lab_template_id}`);
     }
 
+    // --- Resource Provider ------------------------------------------------
+    // Every lab template must resolve to an active Azure account in the
+    // Resource Providers registry (explicit selection or the provider default).
+    // Without one we refuse to provision — no ambient/legacy credentials exist.
+    if (template.provider && template.provider !== "azure") {
+      return new Response(
+        JSON.stringify({
+          error: `Lab VM provisioning currently supports Azure resource providers only (template is set to ${template.provider}).`,
+          setting: "Lab template → Resource provider",
+          correlation_id: correlationId,
+        }),
+        { status: 400, headers: traceHeaders },
+      );
+    }
+
+    await trace.start(SOURCE, "resource-provider", "Resolving resource provider account for this lab");
+    let azure: AzureRuntime;
+    try {
+      azure = await resolveAzureRuntime(supabase, template.provider_account_id);
+      assertVmProvisioningReady(azure);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Resource provider not configured";
+      const setting = e instanceof ProviderConfigError ? e.setting : "Resource Providers";
+      const suggestion = e instanceof ProviderConfigError ? e.suggestion : undefined;
+      await trace.failed(SOURCE, "resource-provider", message, { setting });
+      await notifyConfigIssue(service, {
+        provider: "azure",
+        code: "ResourceProviderNotConfigured",
+        setting,
+        message,
+        suggestion,
+        context: "lab provisioning",
+      });
+      return new Response(
+        JSON.stringify({ error: message, setting, suggestion, correlation_id: correlationId, stage: "resource-provider" }),
+        { status: 400, headers: traceHeaders },
+      );
+    }
+    providerCtx.subscriptionId = azure.subscriptionId;
+    providerCtx.resourceGroup = azure.resourceGroup;
+    providerCtx.accountName = azure.displayName;
+    await trace.success(SOURCE, "resource-provider", `Using resource provider "${azure.displayName}"`, {
+      account_id: azure.accountId,
+      subscription_id: azure.subscriptionId,
+      resource_group: azure.resourceGroup,
+    });
+
+    // Preflight: confirm the subscription exists and the service principal can
+    // reach it before we create any DB row or Azure resource.
+    await trace.start(SOURCE, "preflight", "Validating Azure subscription and service principal access");
+    const preflight = await verifyAzureSubscription({
+      tenantId: azure.tenantId,
+      clientId: azure.clientId,
+      clientSecret: azure.clientSecret,
+      subscriptionId: azure.subscriptionId,
+      resourceGroup: azure.resourceGroup,
+      accountName: azure.displayName,
+    });
+    if (!preflight.ok) {
+      console.error("provision-lab preflight failed:", JSON.stringify(preflight));
+      await trace.failed(SOURCE, "preflight", preflight.message, {
+        code: preflight.code,
+        setting: preflight.setting,
+        step: preflight.step,
+      });
+      if (preflight.setting) {
+        await notifyConfigIssue(service, {
+          provider: "azure",
+          code: preflight.code ?? "PreflightFailed",
+          setting: preflight.setting,
+          message: preflight.message,
+          suggestion: preflight.suggestion,
+          context: "lab provisioning preflight",
+        });
+      }
+      return new Response(
+        JSON.stringify({
+          correlation_id: correlationId,
+          error: preflight.message,
+          code: preflight.code,
+          setting: preflight.setting,
+          suggestion: preflight.suggestion,
+          details: preflight.details,
+          stage: `preflight:${preflight.step}`,
+        }),
+        { status: 400, headers: traceHeaders },
+      );
+    }
+    await trace.success(SOURCE, "preflight", "Azure subscription and resource group reachable");
+
     // Determine region mapping
     const regionMap: Record<string, string> = {
       "East US": "eastus",
@@ -438,7 +472,7 @@ Deno.serve(async (req) => {
       "West Europe": "westeurope",
       "Southeast Asia": "southeastasia",
     };
-    const azureRegion = regionMap[template.region] || "eastus";
+    const azureRegion = regionMap[template.region] || azure.defaultRegion || "eastus";
 
     // Generate unique VM name
     const vmName = `lab-${template.id.substring(0, 8)}-${Date.now().toString(36)}`;
@@ -449,6 +483,7 @@ Deno.serve(async (req) => {
       .insert({
         user_id: userId,
         lab_template_id: template.id,
+        provider_account_id: azure.accountId,
         region: template.region === "All Regions" ? "East US" : template.region,
         vm_size: template.vm_size,
         status: "provisioning",
@@ -467,20 +502,20 @@ Deno.serve(async (req) => {
 
     // 2. Get Azure auth token
     await trace.start(SOURCE, "azure-auth", "Authenticating with Azure");
-    const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+    const azureToken = await getAzureToken(azure.tenantId, azure.clientId, azure.clientSecret);
     await trace.success(SOURCE, "azure-auth", "Azure service principal authenticated");
 
     // 3. Create Azure VM
     let vmResult: { vmId: string; privateIp: string };
     await trace.start(SOURCE, "vm-create", `Creating Azure VM ${vmName}`);
     try {
-      vmResult = await createAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName, {
+      vmResult = await createAzureVM(azureToken, azure.subscriptionId, azure.resourceGroup, vmName, {
         region: azureRegion,
         vmSize: template.vm_size,
         osImage: template.os_image,
-        adminUsername: AZURE_VM_ADMIN_USERNAME,
-        adminPassword: AZURE_VM_ADMIN_PASSWORD,
-        subnetId: AZURE_SUBNET_ID,
+        adminUsername: azure.adminUsername,
+        adminPassword: azure.adminPassword,
+        subnetId: azure.subnetId,
       });
     } catch (azureError) {
       // Update DB record to failed
@@ -534,8 +569,9 @@ Deno.serve(async (req) => {
     const rawMessage = error instanceof Error ? error.message : "Unknown error";
     const userMessage = mapAzureError(rawMessage);
     const issue = detectConfigIssue(rawMessage, {
-      subscriptionId: Deno.env.get("AZURE_SUBSCRIPTION_ID") ?? undefined,
-      resourceGroup: Deno.env.get("AZURE_RESOURCE_GROUP") ?? undefined,
+      subscriptionId: providerCtx.subscriptionId,
+      resourceGroup: providerCtx.resourceGroup,
+      accountName: providerCtx.accountName,
     });
 
     // A failed attempt must not block a genuine retry with the same key.
