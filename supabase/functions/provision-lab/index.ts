@@ -2,6 +2,11 @@ import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { mapAzureError } from "../_shared/vm-state.ts";
 import { verifyAzureSubscription, detectConfigIssue } from "../_shared/azure-preflight.ts";
+import { notifyConfigIssue } from "../_shared/config-alerts.ts";
+import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
+import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+
+const SOURCE = "provision-lab";
 
 
 
@@ -177,6 +182,12 @@ Deno.serve(async (req) => {
     return new Response(null, { headers: corsHeaders });
   }
 
+  const correlationId = correlationIdFrom(req);
+  const traceHeaders = { ...corsHeaders, ...correlationHeaders(correlationId), "Content-Type": "application/json" };
+  let timeline: ProvisioningTimeline | null = null;
+  let idem: { key: string; userId: string } | null = null;
+  let admin: ReturnType<typeof createClient> | null = null;
+
   try {
     // Required secrets
     const AZURE_TENANT_ID = Deno.env.get("AZURE_TENANT_ID");
@@ -199,8 +210,14 @@ Deno.serve(async (req) => {
     if (!SUPABASE_URL) throw new Error("SUPABASE_URL is not configured");
     if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
 
+    admin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+    });
+    timeline = new ProvisioningTimeline(admin, { correlationId });
+
     // Preflight: confirm the subscription exists and the service principal can
     // reach it before we create any DB row or Azure resource.
+    await timeline.start(SOURCE, "preflight", "Validating Azure subscription and service principal access");
     const preflight = await verifyAzureSubscription({
       tenantId: AZURE_TENANT_ID,
       clientId: AZURE_CLIENT_ID,
@@ -210,8 +227,27 @@ Deno.serve(async (req) => {
     });
     if (!preflight.ok) {
       console.error("provision-lab preflight failed:", JSON.stringify(preflight));
+      await timeline.failed(SOURCE, "preflight", preflight.message, {
+        code: preflight.code,
+        setting: preflight.setting,
+        step: preflight.step,
+      });
+
+      // Proactively tell admins exactly which setting to update.
+      if (preflight.setting) {
+        await notifyConfigIssue(admin, {
+          provider: "azure",
+          code: preflight.code ?? "PreflightFailed",
+          setting: preflight.setting,
+          message: preflight.message,
+          suggestion: preflight.suggestion,
+          context: "lab provisioning preflight",
+        });
+      }
+
       return new Response(
         JSON.stringify({
+          correlation_id: correlationId,
           error: preflight.message,
           code: preflight.code,
           setting: preflight.setting,
@@ -219,23 +255,80 @@ Deno.serve(async (req) => {
           details: preflight.details,
           stage: `preflight:${preflight.step}`,
         }),
-        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+        { status: 400, headers: traceHeaders },
       );
     }
+    await timeline.success(SOURCE, "preflight", "Azure subscription and resource group reachable");
 
     const authHeader = req.headers.get("authorization");
     if (!authHeader?.startsWith("Bearer ")) throw new Error("Missing authorization header");
 
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+    const supabase = admin;
 
     const token = authHeader.replace("Bearer ", "");
     const { data: { user }, error: userError } = await supabase.auth.getUser(token);
     if (userError || !user) throw new Error("Unauthorized");
     const userId = user.id;
 
+    timeline.attach({ userId });
+
     const body = await req.json();
     const { lab_template_id } = body;
     if (!lab_template_id) throw new Error("lab_template_id is required");
+    timeline.attach({ labTemplateId: lab_template_id });
+
+    // --- Idempotency -------------------------------------------------------
+    // 1. Explicit key (header `Idempotency-Key` or body `idempotency_key`):
+    //    replays return the original response instead of provisioning again.
+    const idemKey = idempotencyKeyFrom(req, body);
+    const claim = await claimIdempotency(supabase, {
+      key: idemKey,
+      userId,
+      action: "provision-lab",
+      correlationId,
+    });
+
+    if (claim.outcome === "replay") {
+      await timeline.skipped(SOURCE, "idempotency", "Duplicate request replayed from stored result", { key: idemKey });
+      return new Response(JSON.stringify({ ...claim.response, idempotent_replay: true }), {
+        status: 200,
+        headers: traceHeaders,
+      });
+    }
+    if (claim.outcome === "in_progress") {
+      await timeline.skipped(SOURCE, "idempotency", "Duplicate request ignored while the first one is still running", { key: idemKey });
+      return new Response(
+        JSON.stringify({
+          error: "A provisioning request with this idempotency key is already in progress.",
+          correlation_id: claim.correlationId ?? correlationId,
+          idempotent_replay: true,
+        }),
+        { status: 409, headers: traceHeaders },
+      );
+    }
+    idem = { key: idemKey, userId };
+
+    // 2. Key-independent guard: one in-flight VM per user per lab template, so
+    //    a double click with two different keys still cannot create two VMs.
+    const inFlight = await findInFlightVm(supabase, { userId, labTemplateId: lab_template_id });
+    if (inFlight) {
+      const reuse = {
+        vm_id: inFlight.id,
+        azure_vm_id: inFlight.azure_vm_id,
+        private_ip: inFlight.private_ip,
+        status: inFlight.status,
+        reused_existing: true,
+        correlation_id: correlationId,
+      };
+      timeline.attach({ vmId: inFlight.id });
+      await timeline.skipped(SOURCE, "idempotency", "Existing VM for this lab reused instead of creating a duplicate", {
+        vm_id: inFlight.id,
+        status: inFlight.status,
+      });
+      await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: reuse });
+      idem = null;
+      return new Response(JSON.stringify(reuse), { status: 200, headers: traceHeaders });
+    }
 
     // Budget cap check
     const { data: budgetSetting } = await supabase
@@ -321,6 +414,8 @@ Deno.serve(async (req) => {
       }
     }
 
+    await timeline.success(SOURCE, "budget-check", "Budget cap check passed");
+
     // Fetch lab template
     const { data: template, error: templateError } = await supabase
       .from("lab_templates")
@@ -360,12 +455,21 @@ Deno.serve(async (req) => {
       .single();
 
     if (vmInsertError) throw new Error(`Failed to register VM: ${vmInsertError.message}`);
+    timeline.attach({ vmId: vmRecord.id });
+    await timeline.success(SOURCE, "vm-record", "Lab VM registered and queued for provisioning", {
+      vm_name: vmName,
+      region: azureRegion,
+      vm_size: template.vm_size,
+    });
 
     // 2. Get Azure auth token
+    await timeline.start(SOURCE, "azure-auth", "Authenticating with Azure");
     const azureToken = await getAzureToken(AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET);
+    await timeline.success(SOURCE, "azure-auth", "Azure service principal authenticated");
 
     // 3. Create Azure VM
     let vmResult: { vmId: string; privateIp: string };
+    await timeline.start(SOURCE, "vm-create", `Creating Azure VM ${vmName}`);
     try {
       vmResult = await createAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName, {
         region: azureRegion,
@@ -381,8 +485,17 @@ Deno.serve(async (req) => {
         .from("virtual_machines")
         .update({ status: "failed" })
         .eq("id", vmRecord.id);
+      await timeline.failed(
+        SOURCE,
+        "vm-create",
+        azureError instanceof Error ? mapAzureError(azureError.message) : "Azure VM creation failed",
+      );
       throw azureError;
     }
+    await timeline.success(SOURCE, "vm-create", "Azure VM created, waiting for it to boot", {
+      azure_vm_id: vmResult.vmId,
+      private_ip: vmResult.privateIp,
+    });
 
     // 4. Update VM record with Azure details
     await supabase
@@ -400,21 +513,21 @@ Deno.serve(async (req) => {
     // which calls Azure on demand, updates the row, and recognizes running/failed/deallocated/stopped.
     // The `cleanup-idle-labs` cron also reconciles any VM stuck in 'provisioning' >10 minutes.
 
-    return new Response(
-      JSON.stringify({
-        vm_id: vmRecord.id,
-        azure_vm_id: vmResult.vmId,
-        private_ip: vmResult.privateIp,
-        status: "provisioning",
-        vm_name: vmName,
-      }),
-      {
-        status: 200,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
-    );
+    const result = {
+      vm_id: vmRecord.id,
+      azure_vm_id: vmResult.vmId,
+      private_ip: vmResult.privateIp,
+      status: "provisioning",
+      vm_name: vmName,
+      correlation_id: correlationId,
+    };
+
+    await completeIdempotency(supabase, { key: idem.key, userId, action: "provision-lab", response: result });
+    idem = null;
+
+    return new Response(JSON.stringify(result), { status: 200, headers: traceHeaders });
   } catch (error: unknown) {
-    console.error("provision-lab error:", error);
+    console.error(`provision-lab error [${correlationId}]:`, error);
     const rawMessage = error instanceof Error ? error.message : "Unknown error";
     const userMessage = mapAzureError(rawMessage);
     const issue = detectConfigIssue(rawMessage, {
@@ -422,17 +535,33 @@ Deno.serve(async (req) => {
       resourceGroup: Deno.env.get("AZURE_RESOURCE_GROUP") ?? undefined,
     });
 
+    // A failed attempt must not block a genuine retry with the same key.
+    if (admin && idem) {
+      await releaseIdempotency(admin, { key: idem.key, userId: idem.userId, action: "provision-lab" });
+    }
+
+    if (timeline) await timeline.failed(SOURCE, "provisioning", userMessage, { azure_error: rawMessage, code: issue?.code });
+
+    if (admin && issue?.setting) {
+      await notifyConfigIssue(admin, {
+        provider: "azure",
+        code: issue.code ?? "ProvisioningConfigError",
+        setting: issue.setting,
+        message: userMessage,
+        suggestion: issue.suggestion,
+        context: "lab provisioning",
+      });
+    }
+
     return new Response(
       JSON.stringify({
         error: userMessage,
         azure_error: rawMessage,
         setting: issue?.setting,
         suggestion: issue?.suggestion,
+        correlation_id: correlationId,
       }),
-      {
-        status: 400,
-        headers: { ...corsHeaders, "Content-Type": "application/json" },
-      }
+      { status: 400, headers: traceHeaders },
     );
   }
 });
