@@ -29,6 +29,7 @@ export const CREDENTIAL_FIELDS: Record<string, { key: string; label: string; req
     { key: "tenant_id", label: "Directory (tenant) ID", required: true },
     { key: "client_id", label: "Application (client) ID", required: true },
     { key: "client_secret", label: "Client Secret Value", required: true },
+    { key: "vm_admin_password", label: "VM Admin Password (required for lab VMs)", required: false },
   ],
   gcp: [
     { key: "service_account_json", label: "Service Account JSON", required: true },
