@@ -192,6 +192,7 @@ export default function StudentDashboard() {
                   {provisioning.isProvisioning && provisioning.labId === lab.id && (
                     <ProvisioningProgress
                       startedAt={provisioning.startedAt!}
+                      vmId={provisioning.vmId}
                       onCancel={provisioning.cancelProvisioning}
                       cancelling={provisioning.cancelling}
                     />

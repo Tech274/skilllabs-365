@@ -3,6 +3,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { readFunctionError } from "@/lib/function-error";
 import { useNavigate } from "react-router-dom";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 interface ProvisioningState {
   isProvisioning: boolean;
@@ -149,9 +150,11 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
     try {
       const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
         body: { action: "cancel-provisioning", vm_id: state.vmId },
+        headers: idempotencyHeaders(`cancel:${state.vmId}`),
       });
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
       toast({ title: "Provisioning Cancelled", description: "Your VM has been removed." });
+      if (state.labId) resetIdempotency(`provision:${state.labId}`);
     } catch (err) {
       toast({
         title: "Cancel Failed",
@@ -159,8 +162,9 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
         variant: "destructive",
       });
     }
+    resetIdempotency(`cancel:${state.vmId}`);
     clearProvisioning();
-  }, [state.vmId, clearProvisioning]);
+  }, [state.vmId, state.labId, clearProvisioning]);
 
   return (
     <ProvisioningContext.Provider value={{ ...state, startProvisioning, cancelProvisioning, clearProvisioning }}>

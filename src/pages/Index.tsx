@@ -315,6 +315,7 @@ const Index = () => {
             {provisioning.isProvisioning && (
               <ProvisioningProgress
                 startedAt={provisioning.startedAt!}
+                vmId={provisioning.vmId}
                 onCancel={provisioning.cancelProvisioning}
                 cancelling={provisioning.cancelling}
                 className="mt-4"
