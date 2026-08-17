@@ -29,3 +29,6 @@ verify_jwt = false
 
 [functions.labs-watchdog]
 verify_jwt = false
+
+[functions.capacity-cost-alerts]
+verify_jwt = false
