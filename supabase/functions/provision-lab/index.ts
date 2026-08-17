@@ -5,6 +5,9 @@ import { verifyAzureSubscription, detectConfigIssue } from "../_shared/azure-pre
 import { notifyConfigIssue } from "../_shared/config-alerts.ts";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+import {
+  assertVmProvisioningReady, ProviderConfigError, resolveAzureRuntime, type AzureRuntime,
+} from "../_shared/cloud-providers/azure-runtime.ts";
 
 const SOURCE = "provision-lab";
 
