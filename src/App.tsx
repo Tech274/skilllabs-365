@@ -35,6 +35,7 @@ import AdminResourceProviders from "./pages/AdminResourceProviders";
 import AdminCloudReports from "./pages/AdminCloudReports";
 import AiStatus from "./pages/AiStatus";
 import AdminProvisioningExport from "./pages/AdminProvisioningExport";
+import AdminProvisioningRetries from "./pages/AdminProvisioningRetries";
 
 
 const queryClient = new QueryClient();
@@ -70,7 +71,8 @@ const App = () => (
                 <Route path="/admin/cloud-providers" element={<Navigate to="/admin/resource-providers" replace />} />
                 <Route path="/admin/ai-status" element={<RoleProtectedRoute allowedRoles={["admin"]}><AiStatus /></RoleProtectedRoute>} />
                 <Route path="/admin/cloud-reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminCloudReports /></RoleProtectedRoute>} />
-                <Route path="/admin/provisioning-export" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminProvisioningExport /></RoleProtectedRoute>} />
+                <Route path="/admin/provisioning-export" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><AdminProvisioningExport /></RoleProtectedRoute>} />
+                <Route path="/admin/provisioning-retries" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminProvisioningRetries /></RoleProtectedRoute>} />
                 <Route path="/cloud-access" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
                 <Route path="/cloud-access/:id" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
 
