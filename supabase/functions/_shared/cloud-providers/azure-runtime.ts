@@ -372,3 +372,255 @@ export async function resolveVmAdminPassword(runtime: AzureRuntime): Promise<str
   if (runtime.authMode === "managed_identity") return generateVmPassword();
   return runtime.adminPassword;
 }
+
+// ---------------------------------------------------------------------------
+// Credential validation & rotation (Key Vault / managed identity)
+// ---------------------------------------------------------------------------
+
+export interface CredentialIssue {
+  field: string;
+  label: string;
+  severity: "error" | "warning";
+  message: string;
+}
+
+export interface CredentialValidation {
+  ok: boolean;
+  authMode: AzureRuntime["authMode"];
+  checkedAt: string;
+  issues: CredentialIssue[];
+  details: Record<string, unknown>;
+}
+
+async function vaultToken(runtime: AzureRuntime): Promise<string> {
+  const res = await fetch(`https://login.microsoftonline.com/${runtime.tenantId}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: runtime.clientId,
+      client_secret: runtime.clientSecret,
+      scope: "https://vault.azure.net/.default",
+    }),
+  });
+  if (!res.ok) throw new Error(`Key Vault auth failed [${res.status}]: ${(await res.text()).slice(0, 200)}`);
+  return (await res.json()).access_token as string;
+}
+
+/** Read a Key Vault secret with its attributes (expiry, enabled, updated). */
+export async function inspectKeyVaultSecret(runtime: AzureRuntime, secretName?: string): Promise<{
+  value: string;
+  enabled: boolean;
+  expiresAt: number | null;
+  notBefore: number | null;
+  updatedAt: number | null;
+}> {
+  const name = secretName || runtime.keyVaultSecretName;
+  const token = await vaultToken(runtime);
+  const res = await fetch(`${runtime.keyVaultUri}/secrets/${name}?api-version=7.4`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new ProviderConfigError(
+      `Key Vault secret "${name}" could not be read (${res.status}). Grant the service principal "get" access on secrets.`,
+      `Resource Providers → ${runtime.displayName}`,
+      ADMIN_HINT,
+    );
+  }
+  const body = await res.json();
+  const attrs = body.attributes ?? {};
+  return {
+    value: String(body.value ?? ""),
+    enabled: attrs.enabled !== false,
+    expiresAt: typeof attrs.exp === "number" ? attrs.exp : null,
+    notBefore: typeof attrs.nbf === "number" ? attrs.nbf : null,
+    updatedAt: typeof attrs.updated === "number" ? attrs.updated : null,
+  };
+}
+
+/** Write a new value for the Key Vault secret (rotation). */
+export async function setKeyVaultSecret(
+  runtime: AzureRuntime,
+  value: string,
+  secretName?: string,
+  expiresInDays?: number,
+): Promise<{ expiresAt: number | null }> {
+  const name = secretName || runtime.keyVaultSecretName;
+  const token = await vaultToken(runtime);
+  const exp = expiresInDays && expiresInDays > 0
+    ? Math.floor(Date.now() / 1000) + expiresInDays * 86400
+    : null;
+  const res = await fetch(`${runtime.keyVaultUri}/secrets/${name}?api-version=7.4`, {
+    method: "PUT",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ value, attributes: exp ? { enabled: true, exp } : { enabled: true } }),
+  });
+  if (!res.ok) {
+    throw new ProviderConfigError(
+      `Key Vault secret "${name}" could not be written (${res.status}). Grant the service principal "set" access on secrets.`,
+      `Resource Providers → ${runtime.displayName} → Key Vault`,
+      ADMIN_HINT,
+    );
+  }
+  return { expiresAt: exp };
+}
+
+const EXPIRY_WARN_DAYS = 14;
+
+/**
+ * Validate the credentials a launch will actually use, so an expired Key Vault
+ * secret or a deleted managed identity surfaces as an actionable admin error
+ * *before* any Azure resource is created.
+ */
+export async function validateAzureCredentials(runtime: AzureRuntime): Promise<CredentialValidation> {
+  const issues: CredentialIssue[] = [];
+  const details: Record<string, unknown> = { auth_mode: runtime.authMode };
+
+  // 1. Service principal secret must still authenticate.
+  try {
+    await armToken(runtime);
+  } catch (e) {
+    issues.push({
+      field: "client_secret",
+      label: "Client Secret Value",
+      severity: "error",
+      message: `The service principal could not authenticate — the client secret is likely expired or rotated in Azure. ${
+        e instanceof Error ? e.message : ""
+      }`.trim(),
+    });
+    return { ok: false, authMode: runtime.authMode, checkedAt: new Date().toISOString(), issues, details };
+  }
+
+  if (runtime.authMode === "password") {
+    if (!runtime.adminPassword) {
+      issues.push({
+        field: "vm_admin_password",
+        label: "VM Admin Password",
+        severity: "error",
+        message: "No VM admin password is stored for this account.",
+      });
+    }
+  }
+
+  if (runtime.authMode === "key_vault") {
+    if (!runtime.keyVaultUri) {
+      issues.push({
+        field: "key_vault_uri", label: "Key Vault URI", severity: "error",
+        message: "Key Vault mode is selected but no vault URI is configured.",
+      });
+    } else {
+      try {
+        const secret = await inspectKeyVaultSecret(runtime);
+        details.key_vault_secret = runtime.keyVaultSecretName;
+        details.expires_at = secret.expiresAt ? new Date(secret.expiresAt * 1000).toISOString() : null;
+        details.updated_at = secret.updatedAt ? new Date(secret.updatedAt * 1000).toISOString() : null;
+        const now = Math.floor(Date.now() / 1000);
+        if (!secret.value) {
+          issues.push({
+            field: "key_vault_secret_name", label: "Key Vault secret", severity: "error",
+            message: `Secret "${runtime.keyVaultSecretName}" is empty.`,
+          });
+        }
+        if (!secret.enabled) {
+          issues.push({
+            field: "key_vault_secret_name", label: "Key Vault secret", severity: "error",
+            message: `Secret "${runtime.keyVaultSecretName}" is disabled in Key Vault. Enable it or rotate it here.`,
+          });
+        }
+        if (secret.expiresAt && secret.expiresAt <= now) {
+          issues.push({
+            field: "key_vault_secret_name", label: "Key Vault secret", severity: "error",
+            message: `Secret "${runtime.keyVaultSecretName}" expired on ${
+              new Date(secret.expiresAt * 1000).toLocaleString()
+            }. Rotate it before launching labs.`,
+          });
+        } else if (secret.expiresAt && secret.expiresAt - now < EXPIRY_WARN_DAYS * 86400) {
+          issues.push({
+            field: "key_vault_secret_name", label: "Key Vault secret", severity: "warning",
+            message: `Secret "${runtime.keyVaultSecretName}" expires on ${
+              new Date(secret.expiresAt * 1000).toLocaleString()
+            }. Rotate it soon.`,
+          });
+        }
+        if (secret.notBefore && secret.notBefore > now) {
+          issues.push({
+            field: "key_vault_secret_name", label: "Key Vault secret", severity: "error",
+            message: "The Key Vault secret is not valid yet (notBefore is in the future).",
+          });
+        }
+      } catch (e) {
+        issues.push({
+          field: "key_vault_uri", label: "Key Vault", severity: "error",
+          message: e instanceof Error ? e.message : "Key Vault secret could not be read.",
+        });
+      }
+    }
+  }
+
+  if (runtime.authMode === "managed_identity" && runtime.managedIdentityId) {
+    try {
+      const token = await armToken(runtime);
+      const res = await fetch(
+        `https://management.azure.com${runtime.managedIdentityId}?api-version=2023-01-31`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+      if (!res.ok) {
+        issues.push({
+          field: "managed_identity_id", label: "Managed identity", severity: "error",
+          message: `The user-assigned managed identity could not be read (${res.status}). It may have been deleted or the service principal lacks access.`,
+        });
+      } else {
+        const body = await res.json();
+        details.managed_identity_client_id = body.properties?.clientId ?? null;
+      }
+    } catch (e) {
+      issues.push({
+        field: "managed_identity_id", label: "Managed identity", severity: "error",
+        message: e instanceof Error ? e.message : "Managed identity check failed.",
+      });
+    }
+  }
+
+  return {
+    ok: !issues.some((i) => i.severity === "error"),
+    authMode: runtime.authMode,
+    checkedAt: new Date().toISOString(),
+    issues,
+    details,
+  };
+}
+
+/**
+ * Rotate the VM admin credential for an account. Key Vault mode writes a fresh
+ * secret version; password mode stores a new random password on the account.
+ */
+export async function rotateVmAdminCredential(
+  // deno-lint-ignore no-explicit-any -- untyped service client in the edge runtime
+  admin: any,
+  runtime: AzureRuntime,
+  expiresInDays = 90,
+): Promise<{ mode: string; expiresAt: string | null }> {
+  const password = generateVmPassword();
+
+  if (runtime.authMode === "key_vault") {
+    const { expiresAt } = await setKeyVaultSecret(runtime, password, undefined, expiresInDays);
+    return { mode: "key_vault", expiresAt: expiresAt ? new Date(expiresAt * 1000).toISOString() : null };
+  }
+
+  if (runtime.authMode === "managed_identity") {
+    throw new ProviderConfigError(
+      "Managed identity mode uses ephemeral bootstrap credentials — there is nothing stored to rotate.",
+      `Resource Providers → ${runtime.displayName}`,
+      "Switch to Key Vault mode if you need a rotatable stored secret.",
+    );
+  }
+
+  const { data: row } = await admin
+    .from("cloud_provider_accounts").select("credentials").eq("id", runtime.accountId).maybeSingle();
+  await admin.from("cloud_provider_accounts")
+    .update({ credentials: { ...(row?.credentials ?? {}), vm_admin_password: password } })
+    .eq("id", runtime.accountId);
+  runtime.adminPassword = password;
+  return { mode: "password", expiresAt: null };
+}
+
