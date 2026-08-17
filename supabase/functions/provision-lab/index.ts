@@ -9,6 +9,8 @@ import {
   assertVmProvisioningReady, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime,
   resolveVmAdminPassword, vmProvisioningGaps, type AzureRuntime,
 } from "../_shared/cloud-providers/azure-runtime.ts";
+import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
+import { checkConnectivity } from "../_shared/connectivity-check.ts";
 
 const SOURCE = "provision-lab";
 
@@ -393,16 +395,30 @@ Deno.serve(async (req) => {
     }
 
     await trace.start(SOURCE, "resource-provider", "Resolving resource provider account for this lab");
+    const networkDefaults = await loadAzureNetworkDefaults(service);
     let azure: AzureRuntime;
     let resolvedRuntime: AzureRuntime | null = null;
+    let subnetResolution: { subnetId: string; created: boolean; source: string } | null = null;
     try {
       azure = await resolveAzureRuntime(supabase, template.provider_account_id);
       resolvedRuntime = azure;
-      if (!azure.subnetId) {
-        // No subnet configured: reuse an existing VNet or create a lab VNet,
-        // then persist the id back onto the provider account.
+      if (azure.subnetId) {
+        subnetResolution = { subnetId: azure.subnetId, created: false, source: "configured" };
+      } else {
+        // No subnet configured: reuse an existing VNet or create a lab VNet
+        // (using the admin network defaults), then persist the id back.
         const regionHint = azure.defaultRegion || "eastus";
-        await ensureAzureSubnet(service, azure, regionHint);
+        await trace.start(SOURCE, "subnet-resolve", "Resolving a network subnet for this lab VM");
+        subnetResolution = await ensureAzureSubnet(service, azure, regionHint, networkDefaults);
+        await trace.success(
+          SOURCE,
+          "subnet-resolve",
+          subnetResolution.created
+            ? `Created lab network ${networkDefaults.vnetName} (${networkDefaults.vnetCidr})`
+            : "Reused an existing virtual network subnet",
+          { subnet_id: subnetResolution.subnetId, source: subnetResolution.source,
+            vnet_cidr: networkDefaults.vnetCidr, subnet_cidr: networkDefaults.subnetCidr },
+        );
       }
       assertVmProvisioningReady(azure);
     } catch (e) {
@@ -434,6 +450,8 @@ Deno.serve(async (req) => {
       account_id: azure.accountId,
       subscription_id: azure.subscriptionId,
       resource_group: azure.resourceGroup,
+      subnet_id: azure.subnetId,
+      subnet_source: subnetResolution?.source ?? "configured",
     });
 
     // Preflight: confirm the subscription exists and the service principal can
@@ -556,7 +574,33 @@ Deno.serve(async (req) => {
     await trace.success(SOURCE, "vm-create", "Azure VM created, waiting for it to boot", {
       azure_vm_id: vmResult.vmId,
       private_ip: vmResult.privateIp,
+      subnet_id: azure.subnetId,
     });
+
+    // 3b. Optional post-provisioning connectivity probe (SSH/RDP).
+    if (networkDefaults.connectivityCheckEnabled) {
+      await trace.start(SOURCE, "connectivity-check", "Checking remote access port reachability");
+      const probe = await checkConnectivity(
+        vmResult.privateIp,
+        template.os_image,
+        networkDefaults.connectivityCheckTimeoutMs,
+      );
+      const label = `${probe.protocol.toUpperCase()} ${probe.host ?? "-"}:${probe.port}`;
+      if (!probe.attempted) {
+        await trace.skipped(SOURCE, "connectivity-check", `Skipped — ${probe.error}`, probe);
+      } else if (probe.reachable) {
+        await trace.success(SOURCE, "connectivity-check", `${label} reachable in ${probe.latency_ms}ms`, probe);
+      } else {
+        await trace.failed(
+          SOURCE,
+          "connectivity-check",
+          `${label} not reachable yet (${probe.error}). The VM may still be booting.`,
+          probe,
+        );
+      }
+    } else {
+      await trace.skipped(SOURCE, "connectivity-check", "Connectivity check disabled in platform settings");
+    }
 
     // 4. Update VM record with Azure details
     await supabase
@@ -580,6 +624,8 @@ Deno.serve(async (req) => {
       private_ip: vmResult.privateIp,
       status: "provisioning",
       vm_name: vmName,
+      subnet_id: azure.subnetId,
+      subnet_source: subnetResolution?.source ?? "configured",
       correlation_id: correlationId,
     };
 

@@ -4,6 +4,7 @@
 // (VM provisioning, status polling, cleanup, quota, reporting) must resolve its
 // subscription and service principal from public.cloud_provider_accounts.
 import { resolveAccount, type ProviderAccount } from "./accounts.ts";
+import { DEFAULT_AZURE_NETWORK, type AzureNetworkDefaults } from "../azure-network-settings.ts";
 
 export interface AzureRuntime {
   accountId: string;
@@ -166,8 +167,9 @@ export async function ensureAzureSubnet(
   admin: any,
   runtime: AzureRuntime,
   region: string,
-): Promise<string> {
-  if (runtime.subnetId) return runtime.subnetId;
+  networkDefaults: AzureNetworkDefaults = DEFAULT_AZURE_NETWORK,
+): Promise<{ subnetId: string; created: boolean; source: "configured" | "discovered" | "created" }> {
+  if (runtime.subnetId) return { subnetId: runtime.subnetId, created: false, source: "configured" };
 
   const token = await armToken(runtime);
   const auth = { authorization: `Bearer ${token}` };
@@ -186,14 +188,17 @@ export async function ensureAzureSubnet(
     if (preferred) subnetId = preferred.properties.subnets[0].id;
   }
 
-  // 2. Nothing usable — create a dedicated lab VNet in the account resource group.
+  let created = false;
+
+  // 2. Nothing usable — create a dedicated lab VNet in the configured resource group.
   if (!subnetId) {
-    const rg = runtime.resourceGroup;
+    created = true;
+    const rg = networkDefaults.resourceGroup || runtime.resourceGroup;
     await fetch(
       `https://management.azure.com/subscriptions/${sub}/resourcegroups/${rg}?api-version=2021-04-01`,
       { method: "PUT", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ location: region }) },
     );
-    const vnetName = "skilllabs-vnet";
+    const vnetName = networkDefaults.vnetName;
     const createRes = await fetch(
       `https://management.azure.com/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Network/virtualNetworks/${vnetName}?api-version=${NET_API}`,
       {
@@ -202,8 +207,8 @@ export async function ensureAzureSubnet(
         body: JSON.stringify({
           location: region,
           properties: {
-            addressSpace: { addressPrefixes: ["10.30.0.0/16"] },
-            subnets: [{ name: "default", properties: { addressPrefix: "10.30.1.0/24" } }],
+            addressSpace: { addressPrefixes: [networkDefaults.vnetCidr] },
+            subnets: [{ name: networkDefaults.subnetName, properties: { addressPrefix: networkDefaults.subnetCidr } }],
           },
         }),
       },
@@ -215,7 +220,7 @@ export async function ensureAzureSubnet(
         ADMIN_HINT,
       );
     }
-    subnetId = `/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Network/virtualNetworks/${vnetName}/subnets/default`;
+    subnetId = `/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Network/virtualNetworks/${vnetName}/subnets/${networkDefaults.subnetName}`;
   }
 
   // 3. Persist so future provisions reuse it.
@@ -229,7 +234,7 @@ export async function ensureAzureSubnet(
   } catch { /* non-fatal: provisioning can continue with the resolved id */ }
 
   runtime.subnetId = subnetId;
-  return subnetId;
+  return { subnetId, created, source: created ? "created" : "discovered" };
 }
 
 /** List VNets and their subnets for an Azure account (admin subnet picker). */
