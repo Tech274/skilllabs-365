@@ -2,6 +2,7 @@
 // Writes one row per check into public.cloud_provider_health_checks so the
 // admin UI can subscribe over realtime.
 import { tryResolveAzureRuntime, type AzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
 import { corsHeadersFor, corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
 const enc = new TextEncoder();
