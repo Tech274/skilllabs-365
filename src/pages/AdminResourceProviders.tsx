@@ -36,7 +36,10 @@ interface ProviderAccount {
   last_test_status: string | null;
   last_test_message: string | null;
   last_tested_at: string | null;
+  readiness?: { ready: boolean; missing: { field: string; label: string }[] } | null;
 }
+
+interface SubnetOption { id: string; label: string }
 
 type CredField = { key: string; label: string; required: boolean };
 
@@ -44,8 +47,10 @@ const CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder?: 
   azure: [
     { key: "subscription_id", label: "Subscription ID", placeholder: "00000000-0000-0000-0000-000000000000" },
     { key: "resource_group", label: "Resource Group (optional)", placeholder: "skilllabs-rg" },
-    { key: "subnet_id", label: "Subnet ID (required for lab VMs)", placeholder: "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>" },
     { key: "vm_admin_username", label: "VM Admin Username (optional)", placeholder: "labadmin" },
+    { key: "key_vault_uri", label: "Key Vault URI (Key Vault auth mode)", placeholder: "https://my-vault.vault.azure.net" },
+    { key: "key_vault_secret_name", label: "Key Vault Secret Name (optional)", placeholder: "lab-vm-admin-password" },
+    { key: "managed_identity_id", label: "User-assigned Managed Identity ID (optional)", placeholder: "/subscriptions/.../userAssignedIdentities/<name>" },
     { key: "role_definition_id", label: "Role Definition ID (optional)", placeholder: "Reader by default" },
   ],
   aws: [
@@ -78,6 +83,9 @@ export default function AdminResourceProviders() {
   const [saving, setSaving] = useState(false);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProviderAccount | null>(null);
+  const [subnets, setSubnets] = useState<SubnetOption[]>([]);
+  const [loadingSubnets, setLoadingSubnets] = useState(false);
+  const [formErrors, setFormErrors] = useState<Record<string, string>>({});
 
   const call = async (payload: Record<string, unknown>) => {
     const { data, error } = await supabase.functions.invoke("cloud-provider-accounts", { body: payload });
@@ -107,7 +115,53 @@ export default function AdminResourceProviders() {
     }, {});
   }, [accounts]);
 
-  const openCreate = () => { setForm({ ...emptyForm, config: {}, credentials: {} }); setDialogOpen(true); };
+  const loadSubnets = async () => {
+    if (!form.id) {
+      toast({ title: "Save the account first", description: "Subnets are read using this account's credentials.", variant: "destructive" });
+      return;
+    }
+    setLoadingSubnets(true);
+    try {
+      const data = await call({ action: "list_subnets", id: form.id });
+      const options: SubnetOption[] = [];
+      for (const v of data.vnets ?? []) {
+        for (const sn of v.subnets ?? []) {
+          options.push({ id: sn.id, label: `${v.name} / ${sn.name} — ${sn.addressPrefix ?? "?"} (${v.location})` });
+        }
+      }
+      setSubnets(options);
+      if (!options.length) toast({ title: "No subnets found", description: "Create a virtual network in this subscription first.", variant: "destructive" });
+    } catch (e) {
+      toast({ title: "Could not read subnets", description: (e as Error).message, variant: "destructive" });
+    }
+    setLoadingSubnets(false);
+  };
+
+  const validate = () => {
+    const errors: Record<string, string> = {};
+    if (!form.display_name.trim()) errors.display_name = "Name is required.";
+    if (form.provider === "azure") {
+      const cfg = form.config;
+      const existing = accounts.find((a) => a.id === form.id);
+      const credSet = (k: string) => Boolean(form.credentials[k]?.trim() || existing?.credential_keys?.[k]);
+      if (!cfg.subscription_id?.trim()) errors.subscription_id = "Subscription ID is required.";
+      if (!credSet("tenant_id")) errors.tenant_id = "Directory (tenant) ID is required.";
+      if (!credSet("client_id")) errors.client_id = "Application (client) ID is required.";
+      if (!credSet("client_secret")) errors.client_secret = "Client Secret Value is required.";
+      if (!cfg.subnet_id?.trim()) errors.subnet_id = "Subnet ID is required before labs can launch. Use “Load subnets”.";
+      const mode = cfg.vm_auth_mode || "password";
+      if (mode === "password" && !credSet("vm_admin_password")) {
+        errors.vm_admin_password = "VM Admin Password is required for password auth mode.";
+      }
+      if (mode === "key_vault" && !cfg.key_vault_uri?.trim()) {
+        errors.key_vault_uri = "Key Vault URI is required for Key Vault auth mode.";
+      }
+    }
+    setFormErrors(errors);
+    return Object.keys(errors).length === 0;
+  };
+
+  const openCreate = () => { setForm({ ...emptyForm, config: { vm_auth_mode: "password" }, credentials: {} }); setSubnets([]); setFormErrors({}); setDialogOpen(true); };
 
   const openEdit = (a: ProviderAccount) => {
     setForm({
@@ -121,12 +175,14 @@ export default function AdminResourceProviders() {
       config: Object.fromEntries(Object.entries(a.config ?? {}).map(([k, v]) => [k, String(v ?? "")])),
       credentials: {},
     });
+    setSubnets([]);
+    setFormErrors({});
     setDialogOpen(true);
   };
 
   const save = async () => {
-    if (!form.display_name.trim()) {
-      toast({ title: "Name required", variant: "destructive" });
+    if (!validate()) {
+      toast({ title: "Fix the highlighted fields", description: "Azure lab provisioning needs these values.", variant: "destructive" });
       return;
     }
     setSaving(true);
