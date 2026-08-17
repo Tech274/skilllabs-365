@@ -1,5 +1,9 @@
 import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
+import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+
+const SOURCE = "guacamole-proxy";
 
 
 
@@ -151,6 +155,9 @@ Deno.serve(async (req) => {
 
     const body = await req.json();
     const { action } = body;
+    const correlationId = correlationIdFrom(req);
+    const traceHeaders = { ...corsHeaders, ...correlationHeaders(correlationId), "Content-Type": "application/json" };
+    const timeline = new ProvisioningTimeline(supabase, { correlationId, userId: user.id });
 
     const isAdmin = async () => {
       const { data } = await supabase.rpc("is_platform_admin", { _user_id: user.id });
@@ -167,6 +174,9 @@ Deno.serve(async (req) => {
       const { vm_id } = body;
       if (!vm_id) throw new Error("vm_id is required");
 
+      timeline.attach({ vmId: vm_id });
+      await timeline.start(SOURCE, "guacamole-connect", "Preparing remote desktop connection");
+
       const { data: vm, error: vmError } = await supabase
         .from("virtual_machines")
         .select("*, lab_templates(name, protocol, clipboard_enabled, file_transfer_enabled)")
@@ -178,6 +188,68 @@ Deno.serve(async (req) => {
         return new Response(JSON.stringify({ error: "Forbidden" }), {
           status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
+      }
+
+      timeline.attach({ labTemplateId: vm.lab_template_id });
+
+      // Idempotency: a second click must reuse the live session instead of
+      // creating another Guacamole connection + scoped user for the same VM.
+      const sessionKey = idempotencyKeyFrom(req, { ...body, idempotency_key: body.idempotency_key ?? `guac-session:${vm_id}` });
+      const claim = await claimIdempotency(supabase, {
+        key: sessionKey,
+        userId: user.id,
+        action: "guac-create-session",
+        correlationId,
+      });
+      if (claim.outcome === "replay") {
+        await timeline.skipped(SOURCE, "guacamole-connect", "Duplicate connect request replayed", { key: sessionKey });
+        return new Response(JSON.stringify({ ...claim.response, idempotent_replay: true }), {
+          status: 200, headers: traceHeaders,
+        });
+      }
+      if (claim.outcome === "in_progress") {
+        await timeline.skipped(SOURCE, "guacamole-connect", "Duplicate connect request ignored — one is already running", { key: sessionKey });
+        return new Response(
+          JSON.stringify({ error: "A connection request for this lab is already in progress.", idempotent_replay: true }),
+          { status: 409, headers: traceHeaders },
+        );
+      }
+
+      // Key-independent guard: reuse any active session for this VM.
+      const { data: liveSession } = await supabase
+        .from("sessions")
+        .select("id, guac_connection_id, guac_username")
+        .eq("vm_id", vm_id)
+        .eq("user_id", user.id)
+        .eq("status", "active")
+        .order("started_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (liveSession?.guac_connection_id && liveSession.guac_username) {
+        const rotated = randomSuffix(32);
+        const pwRes = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users/${encodeURIComponent(liveSession.guac_username)}/password?token=${adminToken}`, {
+          method: "PUT", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ newPassword: rotated, oldPassword: "" }),
+        });
+        if (pwRes.ok) {
+          const scoped = await getGuacToken(GUACAMOLE_URL, liveSession.guac_username, rotated);
+          const reusedClientId = btoa(`${liveSession.guac_connection_id}\0c\0${dataSource}`);
+          const reused = {
+            session_id: liveSession.id,
+            iframe_url: `${guacBaseUrl}/#/client/${encodeURIComponent(reusedClientId)}?token=${scoped.token}`,
+            protocol: (labTemplateProtocol(vm) === "ssh" ? "SSH" : "RDP"),
+            vm_ip: vm.private_ip,
+            reused_existing: true,
+            correlation_id: correlationId,
+          };
+          timeline.attach({ sessionId: liveSession.id });
+          await timeline.skipped(SOURCE, "guacamole-connect", "Reconnected to the existing session instead of creating a duplicate", {
+            session_id: liveSession.id,
+          });
+          await completeIdempotency(supabase, { key: sessionKey, userId: user.id, action: "guac-create-session", response: reused });
+          return new Response(JSON.stringify(reused), { status: 200, headers: traceHeaders });
+        }
       }
 
       const labTemplate = Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates;
@@ -251,12 +323,18 @@ Deno.serve(async (req) => {
 
       await supabase.from("virtual_machines").update({ status: "running" }).eq("id", vm_id);
 
-      return new Response(JSON.stringify({
+      const created = {
         session_id: session.id,
         iframe_url: iframeUrl,
         protocol: protocol.toUpperCase(),
         vm_ip: vm.private_ip,
-      }), { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        correlation_id: correlationId,
+      };
+      timeline.attach({ sessionId: session.id });
+      await timeline.success(SOURCE, "guacamole-connect", "Remote desktop connection ready", { protocol: protocol.toUpperCase() });
+      await completeIdempotency(supabase, { key: sessionKey, userId: user.id, action: "guac-create-session", response: created });
+
+      return new Response(JSON.stringify(created), { status: 200, headers: traceHeaders });
     }
 
     if (action === "reconnect") {
@@ -297,6 +375,7 @@ Deno.serve(async (req) => {
     }
 
     if (action === "end-session") {
+      await timeline.start(SOURCE, "session-end", "Ending session and cleaning up gateway resources");
       const { session_id } = body;
       if (!session_id) throw new Error("session_id is required");
 
@@ -318,8 +397,11 @@ Deno.serve(async (req) => {
       if (sess.guac_username) await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, sess.guac_username);
       if (sess.guac_connection_id) await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, sess.guac_connection_id);
 
-      return new Response(JSON.stringify({ success: true }), {
-        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      timeline.attach({ sessionId: session_id });
+      await timeline.success(SOURCE, "session-end", "Session ended, Guacamole user and connection removed");
+
+      return new Response(JSON.stringify({ success: true, correlation_id: correlationId }), {
+        status: 200, headers: traceHeaders,
       });
     }
 
