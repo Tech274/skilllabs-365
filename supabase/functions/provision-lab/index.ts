@@ -191,6 +191,7 @@ Deno.serve(async (req) => {
   let idem: { key: string; userId: string } | null = null;
   // deno-lint-ignore no-explicit-any -- untyped service client (no generated DB types in the edge runtime)
   let admin: any = null;
+  const providerCtx: { subscriptionId?: string; resourceGroup?: string; accountName?: string } = {};
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
