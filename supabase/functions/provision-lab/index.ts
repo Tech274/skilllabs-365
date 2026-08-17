@@ -6,7 +6,7 @@ import { notifyConfigIssue } from "../_shared/config-alerts.ts";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import {
-  assertVmProvisioningReady, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime,
+  assertVmProvisioningReady, ensureAzureResourceGroup, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime,
   resolveVmAdminPassword, vmProvisioningGaps, type AzureRuntime,
 } from "../_shared/cloud-providers/azure-runtime.ts";
 import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
@@ -402,7 +402,22 @@ Deno.serve(async (req) => {
     try {
       azure = await resolveAzureRuntime(supabase, template.provider_account_id);
       resolvedRuntime = azure;
+
+      // Make sure the resource group exists before anything else touches ARM.
+      const rgRegion = azure.defaultRegion || "eastus";
+      await trace.start(SOURCE, "resource-group", "Verifying the Azure resource group");
+      const rgResult = await ensureAzureResourceGroup(service, azure, rgRegion, networkDefaults);
+      await trace.success(
+        SOURCE,
+        "resource-group",
+        rgResult.created
+          ? `Created resource group "${rgResult.resourceGroup}" in ${rgRegion}`
+          : `Resource group "${rgResult.resourceGroup}" exists`,
+        { resource_group: rgResult.resourceGroup, created: rgResult.created },
+      );
+
       if (azure.subnetId) {
+
         subnetResolution = { subnetId: azure.subnetId, created: false, source: "configured" };
       } else {
         // No subnet configured: reuse an existing VNet or create a lab VNet
