@@ -394,8 +394,10 @@ Deno.serve(async (req) => {
 
     await trace.start(SOURCE, "resource-provider", "Resolving resource provider account for this lab");
     let azure: AzureRuntime;
+    let resolvedRuntime: AzureRuntime | null = null;
     try {
       azure = await resolveAzureRuntime(supabase, template.provider_account_id);
+      resolvedRuntime = azure;
       if (!azure.subnetId) {
         // No subnet configured: reuse an existing VNet or create a lab VNet,
         // then persist the id back onto the provider account.
@@ -407,7 +409,7 @@ Deno.serve(async (req) => {
       const message = e instanceof Error ? e.message : "Resource provider not configured";
       const setting = e instanceof ProviderConfigError ? e.setting : "Resource Providers";
       const suggestion = e instanceof ProviderConfigError ? e.suggestion : undefined;
-      const missingFields = azure! ? vmProvisioningGaps(azure).map((g) => g.field) : [];
+      const missingFields = resolvedRuntime ? vmProvisioningGaps(resolvedRuntime).map((g) => g.field) : [];
       await trace.failed(SOURCE, "resource-provider", message, { setting });
       await notifyConfigIssue(service, {
         provider: "azure",

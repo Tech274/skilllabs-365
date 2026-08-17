@@ -2,12 +2,26 @@
 // Credentials never leave the server: reads return a masked map of which keys are set.
 import { corsHeadersFor, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { serviceClient, maskCredentials, testAccount, CREDENTIAL_FIELDS } from "../_shared/cloud-providers/accounts.ts";
+import { azureRuntimeFromAccount, listAzureNetworks, vmProvisioningGaps } from "../_shared/cloud-providers/azure-runtime.ts";
 
 const PROVIDERS = ["aws", "azure", "gcp", "oci", "ibm", "alibaba", "digitalocean", "other"];
 
 function publicRow(row: any) {
   const { credentials, ...rest } = row;
-  return { ...rest, credential_keys: maskCredentials(credentials) };
+  let readiness: { ready: boolean; missing: { field: string; label: string }[] } | null = null;
+  if (row.provider === "azure") {
+    try {
+      const runtime = azureRuntimeFromAccount({ ...row, credentials: credentials ?? {} });
+      const missing = vmProvisioningGaps(runtime);
+      readiness = { ready: missing.length === 0, missing };
+    } catch (e) {
+      readiness = {
+        ready: false,
+        missing: [{ field: "account", label: e instanceof Error ? e.message : "Account incomplete" }],
+      };
+    }
+  }
+  return { ...rest, credential_keys: maskCredentials(credentials), readiness };
 }
 
 function slugify(input: string) {
@@ -86,6 +100,21 @@ Deno.serve(async (req) => {
       const { data, error } = await admin.from("cloud_provider_accounts").update(payload).eq("id", id).select().single();
       if (error) return errorResponse(error.message, 400);
       return jsonResponse({ account: publicRow(data) });
+    }
+
+    if (action === "list_subnets") {
+      const id = String(body.id || "");
+      if (!id) return errorResponse("id is required", 400);
+      const { data: row } = await admin.from("cloud_provider_accounts").select("*").eq("id", id).maybeSingle();
+      if (!row) return errorResponse("Account not found", 404);
+      if (row.provider !== "azure") return errorResponse("Subnet discovery is only available for Azure accounts", 400);
+      try {
+        const runtime = azureRuntimeFromAccount(row as any);
+        const networks = await listAzureNetworks(runtime);
+        return jsonResponse(networks);
+      } catch (e) {
+        return errorResponse(e instanceof Error ? e.message : "Failed to list subnets", 400);
+      }
     }
 
     if (action === "delete") {
