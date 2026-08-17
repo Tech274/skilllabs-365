@@ -197,6 +197,7 @@ export type Database = {
           name: string
           org_id: string | null
           provider: Database["public"]["Enums"]["cloud_provider"]
+          provider_account_id: string | null
           provider_config: Json
           refresh_allowed: boolean
           region: string | null
@@ -216,6 +217,7 @@ export type Database = {
           name: string
           org_id?: string | null
           provider: Database["public"]["Enums"]["cloud_provider"]
+          provider_account_id?: string | null
           provider_config?: Json
           refresh_allowed?: boolean
           region?: string | null
@@ -235,6 +237,7 @@ export type Database = {
           name?: string
           org_id?: string | null
           provider?: Database["public"]["Enums"]["cloud_provider"]
+          provider_account_id?: string | null
           provider_config?: Json
           refresh_allowed?: boolean
           region?: string | null
@@ -250,6 +253,13 @@ export type Database = {
             columns: ["org_id"]
             isOneToOne: false
             referencedRelation: "organizations"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "access_templates_provider_account_id_fkey"
+            columns: ["provider_account_id"]
+            isOneToOne: false
+            referencedRelation: "cloud_provider_accounts"
             referencedColumns: ["id"]
           },
         ]
@@ -458,6 +468,63 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      cloud_provider_accounts: {
+        Row: {
+          config: Json
+          created_at: string
+          created_by: string | null
+          credentials: Json
+          default_region: string | null
+          description: string | null
+          display_name: string
+          id: string
+          is_default: boolean
+          last_test_message: string | null
+          last_test_status: string | null
+          last_tested_at: string | null
+          provider: Database["public"]["Enums"]["cloud_provider"]
+          slug: string
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          config?: Json
+          created_at?: string
+          created_by?: string | null
+          credentials?: Json
+          default_region?: string | null
+          description?: string | null
+          display_name: string
+          id?: string
+          is_default?: boolean
+          last_test_message?: string | null
+          last_test_status?: string | null
+          last_tested_at?: string | null
+          provider: Database["public"]["Enums"]["cloud_provider"]
+          slug: string
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          config?: Json
+          created_at?: string
+          created_by?: string | null
+          credentials?: Json
+          default_region?: string | null
+          description?: string | null
+          display_name?: string
+          id?: string
+          is_default?: boolean
+          last_test_message?: string | null
+          last_test_status?: string | null
+          last_tested_at?: string | null
+          provider?: Database["public"]["Enums"]["cloud_provider"]
+          slug?: string
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
       }
       cloud_provider_config: {
         Row: {
