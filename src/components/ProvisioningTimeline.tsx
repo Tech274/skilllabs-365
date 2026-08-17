@@ -41,7 +41,36 @@ const STEP_LABELS: Record<string, string> = {
   "guacamole-connect": "Opening remote desktop",
   "session-end": "Ending session",
   cancel: "Cancelling lab",
+  "credential-check": "Validating credentials",
+  "resource-group": "Verifying resource group",
 };
+
+/** High-level lifecycle phases derived from the low-level step events. */
+const PHASES = [
+  { key: "queued", label: "Queued", steps: ["auth", "idempotency", "quota", "budget"] },
+  { key: "provisioning", label: "Provisioning", steps: ["preflight", "credential-check", "resource-group", "subnet-resolve", "vm-create"] },
+  { key: "booting", label: "Booting", steps: ["connectivity-check", "vm-status"] },
+  { key: "ready", label: "Ready", steps: ["guacamole-connect", "ready"] },
+] as const;
+
+type PhaseState = { status: "pending" | "running" | "success" | "failed"; at: string | null };
+
+export function derivePhases(events: ProvisioningEvent[]): Record<string, PhaseState> {
+  const out: Record<string, PhaseState> = {};
+  for (const phase of PHASES) {
+    const matches = events.filter((e) => (phase.steps as readonly string[]).includes(e.step));
+    if (!matches.length) { out[phase.key] = { status: "pending", at: null }; continue; }
+    const last = matches[matches.length - 1];
+    const failed = matches.some((e) => e.status === "failed");
+    const running = !failed && matches.some((e) => e.status === "running")
+      && !matches.some((e) => e.step === last.step && e.status === "success");
+    out[phase.key] = {
+      status: failed ? "failed" : running ? "running" : "success",
+      at: last.created_at,
+    };
+  }
+  return out;
+}
 
 function formatDuration(ms: number | null) {
   if (!ms && ms !== 0) return null;
@@ -103,9 +132,45 @@ export function ProvisioningTimeline({ vmId, correlationId, className, limit = 4
     .filter(Boolean)
     .pop() as string | undefined;
 
+  const phases = derivePhases(events);
+  const lastError = [...events].reverse().find((e) => e.status === "failed");
+
   return (
-    <div className={cn("space-y-2 rounded-lg border border-border/60 bg-card/50 p-4", className)}>
+    <div className={cn("space-y-3 rounded-lg border border-border/60 bg-card/50 p-4", className)}>
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Provisioning activity</p>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {PHASES.map((phase) => {
+          const state = phases[phase.key];
+          const meta = state.status === "pending"
+            ? { icon: CircleDashed, className: "text-muted-foreground/50" }
+            : STATUS_META[state.status as keyof typeof STATUS_META];
+          const Icon = meta.icon;
+          return (
+            <div key={phase.key}
+              className={cn(
+                "rounded-md border px-2 py-1.5",
+                state.status === "failed" ? "border-destructive/40 bg-destructive/5"
+                  : state.status === "pending" ? "border-border/40" : "border-border/60 bg-muted/30",
+              )}>
+              <div className="flex items-center gap-1.5">
+                <Icon className={cn("h-3.5 w-3.5 shrink-0", meta.className)} />
+                <span className="text-xs font-medium text-foreground">{phase.label}</span>
+              </div>
+              <p className="mt-0.5 text-[10px] text-muted-foreground">
+                {state.at ? new Date(state.at).toLocaleTimeString() : "—"}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+
+      {lastError?.message && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/5 p-2">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-destructive">Last error</p>
+          <p className="text-xs text-destructive">{lastError.message}</p>
+        </div>
+      )}
       <ol className="space-y-2">
         {events.map((event) => {
           const meta = STATUS_META[event.status] ?? { icon: CircleDashed, className: "text-muted-foreground" };
