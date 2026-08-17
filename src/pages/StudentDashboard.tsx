@@ -65,6 +65,7 @@ export default function StudentDashboard() {
         toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
       }
     } catch (err: any) {
+      resetIdempotency(`provision:${lab.id}`);
       const message = err.message || "Failed to provision VM. Please try again.";
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
       toast({ title: "Launch Failed", description: message, variant: "destructive" });

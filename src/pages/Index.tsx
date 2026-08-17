@@ -166,6 +166,8 @@ const Index = () => {
         toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
       }
     } catch (err: any) {
+      // Failed attempt: next click should be a fresh provisioning operation.
+      resetIdempotency(`provision:${lab.id}`);
       toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
     } finally {
       setLaunchingId(null);

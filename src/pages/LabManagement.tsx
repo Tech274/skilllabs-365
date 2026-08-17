@@ -154,6 +154,8 @@ export default function LabManagement() {
       toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
       navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
     } catch (err: any) {
+      // Failed attempt: next click should be a fresh provisioning operation.
+      resetIdempotency(`provision:${lab.id}`);
       toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
     } finally {
       setLaunchingId(null);
