@@ -2,6 +2,7 @@ import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
 
 const SOURCE = "guacamole-proxy";
 
@@ -286,8 +287,10 @@ Deno.serve(async (req) => {
         if (labTemplate?.file_transfer_enabled) connParams["enable-drive"] = "true";
       }
 
-      const VM_ADMIN_USERNAME = Deno.env.get("AZURE_VM_ADMIN_USERNAME") || "labadmin";
-      const VM_ADMIN_PASSWORD = Deno.env.get("AZURE_VM_ADMIN_PASSWORD") || "";
+      // VM sign-in credentials belong to the Resource Provider account that created the VM.
+      const vmProvider = await resolveAzureRuntime(supabase, vm.provider_account_id ?? null);
+      const VM_ADMIN_USERNAME = vmProvider.adminUsername;
+      const VM_ADMIN_PASSWORD = vmProvider.adminPassword;
 
       const connectionName = `session-${vm_id}-${Date.now()}`;
       const connectionId = await createGuacConnection(guacBaseUrl, adminToken, dataSource, {
