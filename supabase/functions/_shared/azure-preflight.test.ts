@@ -6,14 +6,14 @@ Deno.test("detectConfigIssue maps SubscriptionNotFound to the subscription setti
     `{"error":{"code":"SubscriptionNotFound","message":"The subscription could not be found."}}`,
     { subscriptionId: "dbc298f2-0000-0000-0000-000000000000" },
   );
-  assertEquals(issue?.setting, "AZURE_SUBSCRIPTION_ID");
+  assertStringIncludes(issue!.setting, "Subscription ID");
   assertStringIncludes(issue!.suggestion, "dbc298f2");
 });
 
 Deno.test("detectConfigIssue maps other Azure config errors", () => {
-  assertEquals(detectConfigIssue("AuthorizationFailed").setting, "AZURE_CLIENT_ID / role assignment");
-  assertEquals(detectConfigIssue("ResourceGroupNotFound", { resourceGroup: "rg" })?.setting, "AZURE_RESOURCE_GROUP");
-  assertEquals(detectConfigIssue("AADSTS7000215 invalid_client")?.setting, "AZURE_CLIENT_SECRET");
+  assertStringIncludes(detectConfigIssue("AuthorizationFailed")!.setting, "role assignment");
+  assertStringIncludes(detectConfigIssue("ResourceGroupNotFound", { resourceGroup: "rg" })!.setting, "Resource Group");
+  assertStringIncludes(detectConfigIssue("AADSTS7000215 invalid_client")!.setting, "Client Secret");
   assertEquals(detectConfigIssue("MissingSubscriptionRegistration")?.setting, "Azure resource providers");
   assertEquals(detectConfigIssue("some unrelated failure"), null);
 });
@@ -21,7 +21,7 @@ Deno.test("detectConfigIssue maps other Azure config errors", () => {
 Deno.test("verifyAzureSubscription fails fast without a subscription id", async () => {
   const res = await verifyAzureSubscription({ token: "t" });
   assertEquals(res.ok, false);
-  assertEquals(res.setting, "AZURE_SUBSCRIPTION_ID");
+  assertEquals(res.setting, "Resource Providers → Subscription ID");
 });
 
 Deno.test("verifyAzureSubscription reports SubscriptionNotFound with the id", async () => {
@@ -35,7 +35,7 @@ Deno.test("verifyAzureSubscription reports SubscriptionNotFound with the id", as
     assertEquals(res.ok, false);
     assertEquals(res.step, "subscription");
     assertEquals(res.code, "SubscriptionNotFound");
-    assertEquals(res.setting, "AZURE_SUBSCRIPTION_ID");
+    assertStringIncludes(res.setting!, "Subscription ID");
     assertStringIncludes(res.message, "sub-123");
   } finally {
     globalThis.fetch = original;
