@@ -276,7 +276,7 @@ Deno.serve(async (req) => {
           await timeline.skipped(SOURCE, "guacamole-connect", "Reconnected to the existing session instead of creating a duplicate", {
             session_id: liveSession.id,
           });
-          await supabase.rpc; // no-op guard for typing
+          
           const { data: prev } = await supabase
             .from("sessions").select("reconnects").eq("id", liveSession.id).maybeSingle();
           await supabase.from("sessions")
