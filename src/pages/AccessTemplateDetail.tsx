@@ -52,6 +52,7 @@ export default function AccessTemplateDetail() {
   const [assignDialog, setAssignDialog] = useState(false);
   const [assignUserId, setAssignUserId] = useState<string>("");
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [accounts, setAccounts] = useState<{ id: string; display_name: string; provider: string; status: string; is_default: boolean }[]>([]);
 
   const fetchAll = async () => {
     if (!id) return;
@@ -64,6 +65,11 @@ export default function AccessTemplateDetail() {
       supabase.from("template_assignments").select("*").eq("template_id", id).is("revoked_at", null),
       supabase.from("profiles").select("user_id, display_name, email").limit(500),
     ]);
+    const { data: accRows } = await supabase
+      .from("cloud_provider_accounts")
+      .select("id, display_name, provider, status, is_default")
+      .order("display_name");
+    setAccounts(accRows || []);
     setTpl(tplRes.data || null);
     setBatches(bRes.data || []);
     setWsBatches(wbRes.data || []);
@@ -82,6 +88,15 @@ export default function AccessTemplateDetail() {
     const { error } = await supabase.from("access_templates").update({ status }).eq("id", id);
     if (error) return toast({ title: "Failed", description: error.message, variant: "destructive" });
     toast({ title: `Template ${status}` });
+    fetchAll();
+  };
+
+  const setProviderAccount = async (value: string) => {
+    if (!id) return;
+    const provider_account_id = value === "default" ? null : value;
+    const { error } = await supabase.from("access_templates").update({ provider_account_id }).eq("id", id);
+    if (error) return toast({ title: "Failed", description: error.message, variant: "destructive" });
+    toast({ title: "Resource provider updated" });
     fetchAll();
   };
 
@@ -236,7 +251,24 @@ export default function AccessTemplateDetail() {
               <Button variant="destructive" onClick={() => setDeleteOpen(true)} className="w-full">
                 <Trash2 className="h-4 w-4 mr-1.5" /> Delete
               </Button>
-              <div className="flex items-center justify-between pt-3 mt-2 border-t border-border/40">
+              <div className="pt-3 mt-2 border-t border-border/40 space-y-1.5">
+                <Label className="text-[11px] text-muted-foreground">Resource provider account</Label>
+                <Select
+                  value={tpl.provider_account_id ?? "default"}
+                  onValueChange={setProviderAccount}
+                >
+                  <SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">Provider default</SelectItem>
+                    {accounts.filter((a) => a.provider === tpl.provider).map((a) => (
+                      <SelectItem key={a.id} value={a.id}>
+                        {a.display_name}{a.status !== "active" ? " (disabled)" : ""}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex items-center justify-between">
                 <Label className="text-[11px] text-muted-foreground">Self-enroll</Label>
                 <Switch checked={tpl.self_enroll} onCheckedChange={(v) => toggleField("self_enroll", v)} />
               </div>
