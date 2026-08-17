@@ -40,7 +40,7 @@ const emptyForm: LabForm = {
 };
 
 const statusStyle: Record<string, string> = {
-  active: 'bg-success/10 text-success',
+  published: 'bg-success/10 text-success',
   draft: 'bg-warning/10 text-warning',
   archived: 'bg-muted text-muted-foreground',
 };
@@ -248,7 +248,7 @@ export default function LabManagement() {
                   <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
                   {!lab.clipboard_enabled && <Badge variant="outline" className="text-[10px] text-warning border-warning/30">No Clipboard</Badge>}
                 </div>
-                {lab.status === 'active' && (
+                {lab.status === 'published' && (
                   <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id} onClick={() => handleLaunchLab(lab)}>
                     {launchingId === lab.id ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</> : <><Play className="h-3.5 w-3.5" /> Launch Lab</>}
                   </Button>
@@ -342,7 +342,7 @@ export default function LabManagement() {
                 <Select value={form.status} onValueChange={v => setForm({ ...form, status: v })}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="published">Published</SelectItem>
                     <SelectItem value="draft">Draft</SelectItem>
                     <SelectItem value="archived">Archived</SelectItem>
                   </SelectContent>

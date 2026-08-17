@@ -35,7 +35,7 @@ export default function StudentDashboard() {
     if (!user) return;
     const load = async () => {
       const [labRes, sessionRes] = await Promise.all([
-        supabase.from("lab_templates").select("*").eq("status", "active").order("name"),
+        supabase.from("lab_templates").select("*").eq("status", "published").order("name"),
         supabase.from("sessions").select("*").eq("user_id", user.id).order("started_at", { ascending: false }),
       ]);
       setLabs(labRes.data ?? []);

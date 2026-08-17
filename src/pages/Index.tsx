@@ -174,7 +174,7 @@ const Index = () => {
   useEffect(() => {
     fetchVMs();
     fetchQuotas();
-    supabase.from("lab_templates").select("*").eq("status", "active").order("name").then(({ data }) => {
+    supabase.from("lab_templates").select("*").eq("status", "published").order("name").then(({ data }) => {
       if (data) setLabs(data);
     });
 
