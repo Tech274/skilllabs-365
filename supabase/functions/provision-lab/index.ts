@@ -1,6 +1,7 @@
 import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { mapAzureError } from "../_shared/vm-state.ts";
+import { verifyAzureSubscription, detectConfigIssue } from "../_shared/azure-preflight.ts";
 
 
 
@@ -198,6 +199,30 @@ Deno.serve(async (req) => {
     if (!SUPABASE_URL) throw new Error("SUPABASE_URL is not configured");
     if (!SUPABASE_SERVICE_ROLE_KEY) throw new Error("SUPABASE_SERVICE_ROLE_KEY is not configured");
 
+    // Preflight: confirm the subscription exists and the service principal can
+    // reach it before we create any DB row or Azure resource.
+    const preflight = await verifyAzureSubscription({
+      tenantId: AZURE_TENANT_ID,
+      clientId: AZURE_CLIENT_ID,
+      clientSecret: AZURE_CLIENT_SECRET,
+      subscriptionId: AZURE_SUBSCRIPTION_ID,
+      resourceGroup: AZURE_RESOURCE_GROUP,
+    });
+    if (!preflight.ok) {
+      console.error("provision-lab preflight failed:", JSON.stringify(preflight));
+      return new Response(
+        JSON.stringify({
+          error: preflight.message,
+          code: preflight.code,
+          setting: preflight.setting,
+          suggestion: preflight.suggestion,
+          details: preflight.details,
+          stage: `preflight:${preflight.step}`,
+        }),
+        { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     const authHeader = req.headers.get("authorization");
     if (!authHeader?.startsWith("Bearer ")) throw new Error("Missing authorization header");
 
@@ -391,11 +416,19 @@ Deno.serve(async (req) => {
   } catch (error: unknown) {
     console.error("provision-lab error:", error);
     const rawMessage = error instanceof Error ? error.message : "Unknown error";
-    // mapAzureError imported at top.
     const userMessage = mapAzureError(rawMessage);
+    const issue = detectConfigIssue(rawMessage, {
+      subscriptionId: Deno.env.get("AZURE_SUBSCRIPTION_ID") ?? undefined,
+      resourceGroup: Deno.env.get("AZURE_RESOURCE_GROUP") ?? undefined,
+    });
 
     return new Response(
-      JSON.stringify({ error: userMessage }),
+      JSON.stringify({
+        error: userMessage,
+        azure_error: rawMessage,
+        setting: issue?.setting,
+        suggestion: issue?.suggestion,
+      }),
       {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
