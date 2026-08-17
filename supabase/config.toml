@@ -26,3 +26,6 @@ verify_jwt = false
 
 [functions.cloud-provider-health]
 verify_jwt = false
+
+[functions.labs-watchdog]
+verify_jwt = false
