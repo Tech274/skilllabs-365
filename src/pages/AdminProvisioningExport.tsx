@@ -1,6 +1,6 @@
 import { useCallback, useMemo, useState } from "react";
 import { motion } from "framer-motion";
-import { Download, FileJson, FileSpreadsheet, Loader2, Search } from "lucide-react";
+import { Download, FileJson, FileSpreadsheet, Loader2, Search, ShieldCheck } from "lucide-react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -13,18 +13,24 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 
 interface EventRow {
-  id: string;
   created_at: string;
   correlation_id: string;
-  user_id: string | null;
-  vm_id: string | null;
-  session_id: string | null;
-  lab_template_id: string | null;
   source: string;
   step: string;
   status: string;
   message: string | null;
   duration_ms: number | null;
+  vm_id: string | null;
+  session_id: string | null;
+  lab_template_id: string | null;
+  user_id: string | null;
+  idempotency_key: string;
+  idempotency_status: string;
+  cancellation_outcome: string;
+  attributed_to: string;
+  actor_type: string;
+  attempts: number | string;
+  last_error: string;
   detail: unknown;
 }
 
@@ -34,21 +40,6 @@ const STATUS_VARIANT: Record<string, string> = {
   running: "bg-muted text-muted-foreground border-border",
   skipped: "bg-muted text-muted-foreground border-border",
 };
-
-function toCsv(rows: EventRow[]): string {
-  const headers = [
-    "created_at", "correlation_id", "source", "step", "status", "message",
-    "duration_ms", "vm_id", "session_id", "lab_template_id", "user_id", "detail",
-  ];
-  const escape = (v: unknown) => {
-    const s = v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-  };
-  return [
-    headers.join(","),
-    ...rows.map((r) => headers.map((h) => escape((r as unknown as Record<string, unknown>)[h])).join(",")),
-  ].join("\n");
-}
 
 function download(filename: string, content: string, mime: string) {
   const url = URL.createObjectURL(new Blob([content], { type: mime }));
@@ -64,24 +55,26 @@ export default function AdminProvisioningExport() {
   const [vmId, setVmId] = useState("");
   const [sessionId, setSessionId] = useState("");
   const [loading, setLoading] = useState(false);
+  const [downloading, setDownloading] = useState<"json" | "csv" | null>(null);
   const [rows, setRows] = useState<EventRow[] | null>(null);
+
+  const filters = useMemo(
+    () => ({
+      correlation_id: correlationId.trim() || undefined,
+      vm_id: vmId.trim() || undefined,
+      session_id: sessionId.trim() || undefined,
+    }),
+    [correlationId, vmId, sessionId],
+  );
 
   const runSearch = useCallback(async () => {
     setLoading(true);
     try {
-      let query = supabase
-        .from("provisioning_events")
-        .select("*")
-        .order("created_at", { ascending: true })
-        .limit(2000);
-
-      if (correlationId.trim()) query = query.eq("correlation_id", correlationId.trim());
-      if (vmId.trim()) query = query.eq("vm_id", vmId.trim());
-      if (sessionId.trim()) query = query.eq("session_id", sessionId.trim());
-
-      const { data, error } = await query;
+      const { data, error } = await supabase.functions.invoke("provisioning-export", {
+        body: { ...filters, format: "json" },
+      });
       if (error) throw error;
-      setRows((data ?? []) as EventRow[]);
+      setRows(((data as { rows?: EventRow[] })?.rows ?? []) as EventRow[]);
     } catch (e) {
       toast({
         title: "Search failed",
@@ -91,18 +84,39 @@ export default function AdminProvisioningExport() {
     } finally {
       setLoading(false);
     }
-  }, [correlationId, vmId, sessionId]);
+  }, [filters]);
 
   const stamp = useMemo(() => new Date().toISOString().replace(/[:.]/g, "-"), []);
   const slug = correlationId.trim() || vmId.trim() || sessionId.trim() || "all";
 
-  const exportJson = () => {
-    if (!rows?.length) return;
-    download(`provisioning-${slug}-${stamp}.json`, JSON.stringify(rows, null, 2), "application/json");
-  };
-  const exportCsv = () => {
-    if (!rows?.length) return;
-    download(`provisioning-${slug}-${stamp}.csv`, toCsv(rows), "text/csv");
+  const runExport = async (format: "json" | "csv") => {
+    setDownloading(format);
+    try {
+      const { data, error } = await supabase.functions.invoke("provisioning-export", {
+        body: { ...filters, format },
+      });
+      if (error) throw error;
+      if (format === "csv") {
+        const text = typeof data === "string" ? data : await (data as Blob).text();
+        download(`provisioning-${slug}-${stamp}.csv`, text, "text/csv");
+      } else {
+        const payload = data as { rows?: EventRow[] };
+        download(
+          `provisioning-${slug}-${stamp}.json`,
+          JSON.stringify(payload?.rows ?? [], null, 2),
+          "application/json",
+        );
+      }
+      toast({ title: "Export downloaded", description: "This download has been recorded in the export audit log." });
+    } catch (e) {
+      toast({
+        title: "Export failed",
+        description: e instanceof Error ? e.message : "Could not generate the export.",
+        variant: "destructive",
+      });
+    } finally {
+      setDownloading(null);
+    }
   };
 
   return (
@@ -111,8 +125,17 @@ export default function AdminProvisioningExport() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Provisioning Export</h1>
           <p className="text-sm text-muted-foreground">
-            Pull the full audit timeline for an incident by correlation request ID, lab VM or session, then download it as JSON or CSV.
+            Pull the full audit timeline for an incident — including idempotency key, cancellation outcome and operator
+            or watchdog attribution — then download it as JSON or CSV.
           </p>
+        </div>
+
+        <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
+          <ShieldCheck className="mt-0.5 h-4 w-4 text-primary" />
+          <span>
+            Restricted to admins and instructors. Authorization is enforced server-side and every download is written to
+            the export audit log with the requester, filters and row count.
+          </span>
         </div>
 
         <Card>
@@ -139,11 +162,13 @@ export default function AdminProvisioningExport() {
                 {loading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
                 Search events
               </Button>
-              <Button variant="outline" onClick={exportJson} disabled={!rows?.length}>
-                <FileJson className="mr-2 h-4 w-4" /> Download JSON
+              <Button variant="outline" onClick={() => runExport("json")} disabled={downloading !== null}>
+                {downloading === "json" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileJson className="mr-2 h-4 w-4" />}
+                Download JSON
               </Button>
-              <Button variant="outline" onClick={exportCsv} disabled={!rows?.length}>
-                <FileSpreadsheet className="mr-2 h-4 w-4" /> Download CSV
+              <Button variant="outline" onClick={() => runExport("csv")} disabled={downloading !== null}>
+                {downloading === "csv" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <FileSpreadsheet className="mr-2 h-4 w-4" />}
+                Download CSV
               </Button>
             </div>
           </CardContent>
@@ -177,14 +202,16 @@ export default function AdminProvisioningExport() {
                       <TableHead>Source</TableHead>
                       <TableHead>Step</TableHead>
                       <TableHead>Status</TableHead>
+                      <TableHead>Cancellation</TableHead>
+                      <TableHead>Attribution</TableHead>
+                      <TableHead>Idempotency key</TableHead>
                       <TableHead>Message</TableHead>
                       <TableHead className="text-right">Duration</TableHead>
-                      <TableHead>Correlation</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {rows.map((r) => (
-                      <TableRow key={r.id}>
+                    {rows.map((r, i) => (
+                      <TableRow key={`${r.correlation_id}-${i}`}>
                         <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
                           {new Date(r.created_at).toLocaleString()}
                         </TableCell>
@@ -193,11 +220,20 @@ export default function AdminProvisioningExport() {
                         <TableCell>
                           <Badge variant="outline" className={STATUS_VARIANT[r.status] ?? ""}>{r.status}</Badge>
                         </TableCell>
+                        <TableCell className="text-xs">{r.cancellation_outcome || "—"}</TableCell>
+                        <TableCell className="text-xs">
+                          <span className="capitalize">{r.actor_type || "user"}</span>
+                          <span className="block font-mono text-[10px] text-muted-foreground">
+                            {r.attributed_to || "—"}
+                          </span>
+                        </TableCell>
+                        <TableCell className="font-mono text-[11px] text-muted-foreground">
+                          {r.idempotency_key || "—"}
+                        </TableCell>
                         <TableCell className="max-w-md text-xs">{r.message ?? "—"}</TableCell>
                         <TableCell className="text-right text-xs">
                           {r.duration_ms === null ? "—" : `${r.duration_ms} ms`}
                         </TableCell>
-                        <TableCell className="font-mono text-[11px] text-muted-foreground">{r.correlation_id}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>
