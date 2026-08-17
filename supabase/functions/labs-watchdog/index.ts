@@ -69,8 +69,14 @@ Deno.serve(async (req) => {
   } catch { /* scheduled invocation without body */ }
 
   const dryRun = body.dry_run === true;
-  const auth = await requireAdmin(req);
-  if (auth instanceof Response) return auth;
+
+  // Scheduled runs authenticate with the cron shared secret; humans must be admins.
+  const cronSecret = Deno.env.get("CRON_SHARED_SECRET");
+  const isCron = !!cronSecret && req.headers.get("x-cron-secret") === cronSecret;
+  if (!isCron) {
+    const auth = await requireAdmin(req);
+    if (auth instanceof Response) return auth;
+  }
 
   const correlationId = correlationIdFrom(req);
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
