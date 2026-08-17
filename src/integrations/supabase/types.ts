@@ -885,6 +885,93 @@ export type Database = {
         }
         Relationships: []
       }
+      provisioning_events: {
+        Row: {
+          correlation_id: string
+          created_at: string
+          detail: Json | null
+          duration_ms: number | null
+          id: string
+          lab_template_id: string | null
+          message: string | null
+          session_id: string | null
+          source: string
+          status: string
+          step: string
+          user_id: string | null
+          vm_id: string | null
+        }
+        Insert: {
+          correlation_id: string
+          created_at?: string
+          detail?: Json | null
+          duration_ms?: number | null
+          id?: string
+          lab_template_id?: string | null
+          message?: string | null
+          session_id?: string | null
+          source: string
+          status?: string
+          step: string
+          user_id?: string | null
+          vm_id?: string | null
+        }
+        Update: {
+          correlation_id?: string
+          created_at?: string
+          detail?: Json | null
+          duration_ms?: number | null
+          id?: string
+          lab_template_id?: string | null
+          message?: string | null
+          session_id?: string | null
+          source?: string
+          status?: string
+          step?: string
+          user_id?: string | null
+          vm_id?: string | null
+        }
+        Relationships: []
+      }
+      provisioning_idempotency: {
+        Row: {
+          action: string
+          completed_at: string | null
+          correlation_id: string | null
+          created_at: string
+          expires_at: string
+          id: string
+          idempotency_key: string
+          response: Json | null
+          status: string
+          user_id: string
+        }
+        Insert: {
+          action: string
+          completed_at?: string | null
+          correlation_id?: string | null
+          created_at?: string
+          expires_at?: string
+          id?: string
+          idempotency_key: string
+          response?: Json | null
+          status?: string
+          user_id: string
+        }
+        Update: {
+          action?: string
+          completed_at?: string | null
+          correlation_id?: string | null
+          created_at?: string
+          expires_at?: string
+          id?: string
+          idempotency_key?: string
+          response?: Json | null
+          status?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       question_bank: {
         Row: {
           answer: string
