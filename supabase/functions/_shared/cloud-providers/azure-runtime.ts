@@ -115,3 +115,97 @@ export async function tryResolveAzureRuntime(
     return null;
   }
 }
+
+const NET_API = "2023-09-01";
+
+async function armToken(runtime: AzureRuntime): Promise<string> {
+  const res = await fetch(`https://login.microsoftonline.com/${runtime.tenantId}/oauth2/v2.0/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: runtime.clientId,
+      client_secret: runtime.clientSecret,
+      scope: "https://management.azure.com/.default",
+    }),
+  });
+  if (!res.ok) throw new Error(`Azure auth failed [${res.status}]: ${(await res.text()).slice(0, 300)}`);
+  return (await res.json()).access_token as string;
+}
+
+/**
+ * Resolve a usable subnet for lab VMs when the provider record has none:
+ * reuse an existing VNet in the target region, otherwise create a dedicated
+ * lab VNet. The discovered id is persisted back onto the provider account so
+ * later provisions skip the lookup.
+ */
+export async function ensureAzureSubnet(
+  // deno-lint-ignore no-explicit-any -- untyped service client in the edge runtime
+  admin: any,
+  runtime: AzureRuntime,
+  region: string,
+): Promise<string> {
+  if (runtime.subnetId) return runtime.subnetId;
+
+  const token = await armToken(runtime);
+  const auth = { authorization: `Bearer ${token}` };
+  const sub = runtime.subscriptionId;
+
+  // 1. Look for an existing VNet with a subnet (prefer the target region).
+  const listRes = await fetch(
+    `https://management.azure.com/subscriptions/${sub}/providers/Microsoft.Network/virtualNetworks?api-version=${NET_API}`,
+    { headers: auth },
+  );
+  let subnetId = "";
+  if (listRes.ok) {
+    const vnets = (await listRes.json()).value ?? [];
+    const withSubnets = vnets.filter((v: any) => (v.properties?.subnets ?? []).length > 0);
+    const preferred = withSubnets.find((v: any) => v.location === region) ?? withSubnets[0];
+    if (preferred) subnetId = preferred.properties.subnets[0].id;
+  }
+
+  // 2. Nothing usable — create a dedicated lab VNet in the account resource group.
+  if (!subnetId) {
+    const rg = runtime.resourceGroup;
+    await fetch(
+      `https://management.azure.com/subscriptions/${sub}/resourcegroups/${rg}?api-version=2021-04-01`,
+      { method: "PUT", headers: { ...auth, "content-type": "application/json" }, body: JSON.stringify({ location: region }) },
+    );
+    const vnetName = "skilllabs-vnet";
+    const createRes = await fetch(
+      `https://management.azure.com/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Network/virtualNetworks/${vnetName}?api-version=${NET_API}`,
+      {
+        method: "PUT",
+        headers: { ...auth, "content-type": "application/json" },
+        body: JSON.stringify({
+          location: region,
+          properties: {
+            addressSpace: { addressPrefixes: ["10.30.0.0/16"] },
+            subnets: [{ name: "default", properties: { addressPrefix: "10.30.1.0/24" } }],
+          },
+        }),
+      },
+    );
+    if (!createRes.ok) {
+      throw new ProviderConfigError(
+        `Resource provider "${runtime.displayName}" has no Subnet ID and automatic network setup failed: ${(await createRes.text()).slice(0, 300)}`,
+        `Resource Providers → ${runtime.displayName}`,
+        ADMIN_HINT,
+      );
+    }
+    subnetId = `/subscriptions/${sub}/resourceGroups/${rg}/providers/Microsoft.Network/virtualNetworks/${vnetName}/subnets/default`;
+  }
+
+  // 3. Persist so future provisions reuse it.
+  try {
+    const { data: row } = await admin
+      .from("cloud_provider_accounts").select("config").eq("id", runtime.accountId).maybeSingle();
+    await admin
+      .from("cloud_provider_accounts")
+      .update({ config: { ...(row?.config ?? {}), subnet_id: subnetId } })
+      .eq("id", runtime.accountId);
+  } catch { /* non-fatal: provisioning can continue with the resolved id */ }
+
+  runtime.subnetId = subnetId;
+  return subnetId;
+}
