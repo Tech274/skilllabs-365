@@ -6,6 +6,7 @@ import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
+import { readFunctionError } from "@/lib/function-error";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/hooks/use-toast";
@@ -132,8 +133,7 @@ const Index = () => {
       const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
         body: { action: "purge-failed" },
       });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      if (error || data?.error) throw new Error(await readFunctionError(error, data));
       toast({
         title: "Purge Complete",
         description: `${data.count} failed/terminated VM records removed from the database.`,
@@ -153,8 +153,7 @@ const Index = () => {
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
       });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      if (error || data?.error) throw new Error(await readFunctionError(error, data));
 
       if (data.status === "running") {
         toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
