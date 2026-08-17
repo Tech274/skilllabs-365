@@ -1,6 +1,6 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
-import { Clock, Server, Bell, Shield, Save, DollarSign, Loader2, Network } from "lucide-react";
+import { Clock, Server, Bell, Shield, Save, DollarSign, Loader2, Network, Gauge, Plus, Trash2, PlayCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -44,6 +44,17 @@ export default function Settings() {
     connectivity_check_enabled: false,
     connectivity_check_timeout_ms: 5000,
   });
+  const [capacity, setCapacity] = useState<{
+    enabled: boolean; max_active_sessions: number; warn_at_percent: number; daily_spend_limit_usd: number;
+    regions: { region: string; max_active_vms: number | null; daily_spend_limit_usd: number | null }[];
+  }>({
+    enabled: true,
+    max_active_sessions: 25,
+    warn_at_percent: 80,
+    daily_spend_limit_usd: 50,
+    regions: [],
+  });
+  const [evaluating, setEvaluating] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
@@ -51,7 +62,8 @@ export default function Settings() {
       supabase.from("platform_settings").select("key, value").eq("key", "budget_cap").maybeSingle(),
       supabase.from("platform_settings").select("key, value").eq("key", "per_lab_cost_alert").maybeSingle(),
       supabase.from("platform_settings").select("key, value").eq("key", "azure_network_defaults").maybeSingle(),
-    ]).then(([budgetData, labAlertData, networkData]) => {
+      supabase.from("platform_settings").select("key, value").eq("key", "capacity_cost_alerts").maybeSingle(),
+    ]).then(([budgetData, labAlertData, networkData, capacityData]) => {
       if (budgetData.data?.value) {
         const v = budgetData.data.value as any;
         setBudgetEnabled(v.enabled ?? false);
@@ -66,6 +78,10 @@ export default function Settings() {
       if (networkData.data?.value) {
         const v = networkData.data.value as any;
         setNetwork((prev) => ({ ...prev, ...v }));
+      }
+      if (capacityData.data?.value) {
+        const v = capacityData.data.value as any;
+        setCapacity((prev) => ({ ...prev, ...v, regions: Array.isArray(v.regions) ? v.regions : [] }));
       }
     });
   }, []);
@@ -86,6 +102,10 @@ export default function Settings() {
           { key: "azure_network_defaults", value: network as any, updated_at: new Date().toISOString() },
           { onConflict: "key" }
         ),
+        supabase.from("platform_settings").upsert(
+          { key: "capacity_cost_alerts", value: capacity as any, updated_at: new Date().toISOString() },
+          { onConflict: "key" }
+        ),
       ]);
       const error = results.find(r => r.error)?.error;
       if (error) throw error;
@@ -94,6 +114,23 @@ export default function Settings() {
       toast({ title: "Save failed", description: err.message, variant: "destructive" });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const runAlertCheck = async () => {
+    setEvaluating(true);
+    try {
+      const { data, error } = await supabase.functions.invoke("capacity-cost-alerts", { body: {} });
+      if (error) throw error;
+      const raised = (data as any)?.raised ?? 0;
+      toast({
+        title: raised ? `${raised} alert(s) raised` : "No thresholds breached",
+        description: `Active sessions: ${(data as any)?.metrics?.active_sessions ?? 0}.`,
+      });
+    } catch (err: any) {
+      toast({ title: "Alert check failed", description: err.message, variant: "destructive" });
+    } finally {
+      setEvaluating(false);
     }
   };
 
@@ -116,6 +153,7 @@ export default function Settings() {
             <TabsTrigger value="vm" className="gap-1.5"><Server className="h-3.5 w-3.5" /> VM Limits</TabsTrigger>
             <TabsTrigger value="budget" className="gap-1.5"><DollarSign className="h-3.5 w-3.5" /> Budget</TabsTrigger>
             <TabsTrigger value="network" className="gap-1.5"><Network className="h-3.5 w-3.5" /> Network</TabsTrigger>
+            <TabsTrigger value="capacity" className="gap-1.5"><Gauge className="h-3.5 w-3.5" /> Capacity &amp; Cost</TabsTrigger>
             <TabsTrigger value="notifications" className="gap-1.5"><Bell className="h-3.5 w-3.5" /> Notifications</TabsTrigger>
             <TabsTrigger value="security" className="gap-1.5"><Shield className="h-3.5 w-3.5" /> Security</TabsTrigger>
           </TabsList>
@@ -351,6 +389,98 @@ export default function Settings() {
                   </div>
                 )}
               </div>
+            </motion.div>
+          </TabsContent>
+
+          {/* Capacity & Cost alerts */}
+          <TabsContent value="capacity" className="mt-6">
+            <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
+              className="rounded-xl border border-border bg-card p-6 space-y-6 max-w-3xl">
+              <div className="flex items-center justify-between">
+                <div>
+                  <Label className="text-base font-semibold">Capacity &amp; cost alerts</Label>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Notify admins when active sessions approach limits or estimated spend exceeds a threshold.
+                  </p>
+                </div>
+                <Switch checked={capacity.enabled}
+                  onCheckedChange={(v) => setCapacity((p) => ({ ...p, enabled: v }))} />
+              </div>
+
+              <div className="grid gap-4 sm:grid-cols-3">
+                <div className="space-y-1.5">
+                  <Label>Max concurrent sessions</Label>
+                  <Input type="number" min={1} value={capacity.max_active_sessions}
+                    onChange={(e) => setCapacity((p) => ({ ...p, max_active_sessions: Number(e.target.value) }))} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Warn at (% of limit)</Label>
+                  <Input type="number" min={10} max={100} value={capacity.warn_at_percent}
+                    onChange={(e) => setCapacity((p) => ({ ...p, warn_at_percent: Number(e.target.value) }))} />
+                </div>
+                <div className="space-y-1.5">
+                  <Label>Daily spend limit (USD)</Label>
+                  <Input type="number" min={0} step="1" value={capacity.daily_spend_limit_usd}
+                    onChange={(e) => setCapacity((p) => ({ ...p, daily_spend_limit_usd: Number(e.target.value) }))} />
+                </div>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-sm font-semibold">Per-region thresholds</Label>
+                  <Button type="button" variant="outline" size="sm" className="gap-1.5"
+                    onClick={() => setCapacity((p) => ({
+                      ...p,
+                      regions: [...p.regions, { region: "eastus", max_active_vms: 10, daily_spend_limit_usd: 25 }],
+                    }))}>
+                    <Plus className="h-3.5 w-3.5" /> Add region
+                  </Button>
+                </div>
+                {capacity.regions.length === 0 && (
+                  <p className="text-xs text-muted-foreground">
+                    No region rules yet — platform-wide thresholds above still apply.
+                  </p>
+                )}
+                {capacity.regions.map((rule, idx) => (
+                  <div key={idx} className="grid gap-3 sm:grid-cols-[1fr_1fr_1fr_auto] items-end rounded-lg border border-border p-3">
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Region</Label>
+                      <Input value={rule.region}
+                        onChange={(e) => setCapacity((p) => ({
+                          ...p,
+                          regions: p.regions.map((r, i) => i === idx ? { ...r, region: e.target.value } : r),
+                        }))} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Max active VMs</Label>
+                      <Input type="number" min={1} value={rule.max_active_vms ?? ""}
+                        onChange={(e) => setCapacity((p) => ({
+                          ...p,
+                          regions: p.regions.map((r, i) => i === idx
+                            ? { ...r, max_active_vms: e.target.value ? Number(e.target.value) : null } : r),
+                        }))} />
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label className="text-xs">Daily spend (USD)</Label>
+                      <Input type="number" min={0} value={rule.daily_spend_limit_usd ?? ""}
+                        onChange={(e) => setCapacity((p) => ({
+                          ...p,
+                          regions: p.regions.map((r, i) => i === idx
+                            ? { ...r, daily_spend_limit_usd: e.target.value ? Number(e.target.value) : null } : r),
+                        }))} />
+                    </div>
+                    <Button type="button" variant="ghost" size="icon"
+                      onClick={() => setCapacity((p) => ({ ...p, regions: p.regions.filter((_, i) => i !== idx) }))}>
+                      <Trash2 className="h-4 w-4 text-destructive" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+
+              <Button type="button" variant="outline" className="gap-2" onClick={runAlertCheck} disabled={evaluating}>
+                {evaluating ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+                Run check now
+              </Button>
             </motion.div>
           </TabsContent>
 

@@ -291,6 +291,54 @@ export type Database = {
         }
         Relationships: []
       }
+      admin_audit_logs: {
+        Row: {
+          action: string
+          actor_email: string | null
+          actor_id: string | null
+          actor_type: string
+          changes: Json
+          correlation_id: string | null
+          created_at: string
+          entity_id: string | null
+          entity_label: string | null
+          entity_type: string
+          id: string
+          message: string | null
+          outcome: string
+        }
+        Insert: {
+          action: string
+          actor_email?: string | null
+          actor_id?: string | null
+          actor_type?: string
+          changes?: Json
+          correlation_id?: string | null
+          created_at?: string
+          entity_id?: string | null
+          entity_label?: string | null
+          entity_type: string
+          id?: string
+          message?: string | null
+          outcome?: string
+        }
+        Update: {
+          action?: string
+          actor_email?: string | null
+          actor_id?: string | null
+          actor_type?: string
+          changes?: Json
+          correlation_id?: string | null
+          created_at?: string
+          entity_id?: string | null
+          entity_label?: string | null
+          entity_type?: string
+          id?: string
+          message?: string | null
+          outcome?: string
+        }
+        Relationships: []
+      }
       ai_alert_deliveries: {
         Row: {
           alert_status: string
@@ -422,6 +470,45 @@ export type Database = {
           scope?: string
           scope_id?: string | null
           updated_at?: string
+        }
+        Relationships: []
+      }
+      capacity_cost_alerts: {
+        Row: {
+          created_at: string
+          id: string
+          kind: string
+          message: string
+          metric: string
+          notified: number
+          region: string | null
+          severity: string
+          threshold: number
+          value: number
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          kind: string
+          message: string
+          metric: string
+          notified?: number
+          region?: string | null
+          severity?: string
+          threshold: number
+          value: number
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          kind?: string
+          message?: string
+          metric?: string
+          notified?: number
+          region?: string | null
+          severity?: string
+          threshold?: number
+          value?: number
         }
         Relationships: []
       }
@@ -1243,6 +1330,7 @@ export type Database = {
       sessions: {
         Row: {
           connection_quality: string
+          disconnect_reason: string | null
           disconnects: number
           ended_at: string | null
           guac_connection_id: string | null
@@ -1251,6 +1339,7 @@ export type Database = {
           idle_minutes: number
           lab_template_id: string | null
           last_activity_at: string | null
+          reconnects: number
           region: string
           started_at: string
           status: string
@@ -1259,6 +1348,7 @@ export type Database = {
         }
         Insert: {
           connection_quality?: string
+          disconnect_reason?: string | null
           disconnects?: number
           ended_at?: string | null
           guac_connection_id?: string | null
@@ -1267,6 +1357,7 @@ export type Database = {
           idle_minutes?: number
           lab_template_id?: string | null
           last_activity_at?: string | null
+          reconnects?: number
           region?: string
           started_at?: string
           status?: string
@@ -1275,6 +1366,7 @@ export type Database = {
         }
         Update: {
           connection_quality?: string
+          disconnect_reason?: string | null
           disconnects?: number
           ended_at?: string | null
           guac_connection_id?: string | null
@@ -1283,6 +1375,7 @@ export type Database = {
           idle_minutes?: number
           lab_template_id?: string | null
           last_activity_at?: string | null
+          reconnects?: number
           region?: string
           started_at?: string
           status?: string

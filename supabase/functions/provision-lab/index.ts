@@ -1,3 +1,4 @@
+import { recordAudit } from "../_shared/admin-audit.ts";
 import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { mapAzureError } from "../_shared/vm-state.ts";
@@ -7,6 +8,7 @@ import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../
 import { claimIdempotency, completeIdempotency, findInFlightVm, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import {
   assertVmProvisioningReady, ensureAzureResourceGroup, ensureAzureSubnet, ProviderConfigError, resolveAzureRuntime,
+  validateAzureCredentials,
   resolveVmAdminPassword, vmProvisioningGaps, type AzureRuntime,
 } from "../_shared/cloud-providers/azure-runtime.ts";
 import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
@@ -196,7 +198,10 @@ Deno.serve(async (req) => {
   let idem: { key: string; userId: string } | null = null;
   // deno-lint-ignore no-explicit-any -- untyped service client (no generated DB types in the edge runtime)
   let admin: any = null;
-  const providerCtx: { subscriptionId?: string; resourceGroup?: string; accountName?: string } = {};
+  const providerCtx: {
+    subscriptionId?: string; resourceGroup?: string; accountName?: string;
+    userId?: string; templateId?: string; templateName?: string;
+  } = {};
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -461,6 +466,9 @@ Deno.serve(async (req) => {
     providerCtx.subscriptionId = azure.subscriptionId;
     providerCtx.resourceGroup = azure.resourceGroup;
     providerCtx.accountName = azure.displayName;
+    providerCtx.userId = userId;
+    providerCtx.templateId = template.id;
+    providerCtx.templateName = template.name;
     await trace.success(SOURCE, "resource-provider", `Using resource provider "${azure.displayName}"`, {
       account_id: azure.accountId,
       subscription_id: azure.subscriptionId,
@@ -511,6 +519,43 @@ Deno.serve(async (req) => {
       );
     }
     await trace.success(SOURCE, "preflight", "Azure subscription and resource group reachable");
+
+    // Credential freshness: an expired Key Vault secret or a deleted managed
+    // identity must fail here with an actionable message, not mid-deployment.
+    await trace.start(SOURCE, "credential-check", "Validating VM credentials");
+    const credentials = await validateAzureCredentials(azure);
+    if (!credentials.ok) {
+      const blocking = credentials.issues.filter((i) => i.severity === "error");
+      const message = `Resource provider "${azure.displayName}" has outdated credentials: ${
+        blocking.map((i) => i.message).join(" ")
+      }`;
+      await trace.failed(SOURCE, "credential-check", message, { issues: credentials.issues });
+      await recordAudit(service, {
+        actorId: userId, action: "lab.launch", entityType: "lab_template",
+        entityId: template.id, entityLabel: template.name, outcome: "blocked",
+        correlationId, message, changes: { issues: blocking, auth_mode: credentials.authMode },
+      });
+      return new Response(
+        JSON.stringify({
+          error: message,
+          setting: `Resource Providers → ${azure.displayName}`,
+          suggestion: "Open Admin → Resource Providers, run \"Validate credentials\" and rotate the secret.",
+          missing_fields: blocking.map((i) => i.field),
+          issues: credentials.issues,
+          correlation_id: correlationId,
+          stage: "credential-check",
+        }),
+        { status: 400, headers: traceHeaders },
+      );
+    }
+    await trace.success(
+      SOURCE,
+      "credential-check",
+      credentials.issues.length
+        ? `Credentials usable — ${credentials.issues.map((i) => i.message).join(" ")}`
+        : `Credentials valid (${credentials.authMode})`,
+      credentials.details,
+    );
 
     // Determine region mapping
     const regionMap: Record<string, string> = {
@@ -647,6 +692,14 @@ Deno.serve(async (req) => {
     await completeIdempotency(supabase, { key: idem.key, userId, action: "provision-lab", response: result });
     idem = null;
 
+    await recordAudit(supabase, {
+      actorId: userId, action: "lab.launch", entityType: "lab_template",
+      entityId: template.id, entityLabel: template.name, outcome: "success",
+      correlationId,
+      changes: { vm_id: vmRecord.id, region: azureRegion, provider_account: azure.displayName, subnet_id: azure.subnetId },
+      message: `Launched lab VM ${vmName}`,
+    });
+
     return new Response(JSON.stringify(result), { status: 200, headers: traceHeaders });
   } catch (error: unknown) {
     console.error(`provision-lab error [${correlationId}]:`, error);
@@ -661,6 +714,15 @@ Deno.serve(async (req) => {
     // A failed attempt must not block a genuine retry with the same key.
     if (admin && idem) {
       await releaseIdempotency(admin, { key: idem.key, userId: idem.userId, action: "provision-lab" });
+    }
+
+    if (admin) {
+      await recordAudit(admin, {
+        actorId: providerCtx.userId ?? null, action: "lab.launch", entityType: "lab_template",
+        entityId: providerCtx.templateId ?? null, entityLabel: providerCtx.templateName ?? null,
+        outcome: "failed", correlationId, message: userMessage,
+        changes: { azure_error: rawMessage.slice(0, 500), code: issue?.code ?? null },
+      });
     }
 
     if (timeline) await timeline.failed(SOURCE, "provisioning", userMessage, { azure_error: rawMessage, code: issue?.code });

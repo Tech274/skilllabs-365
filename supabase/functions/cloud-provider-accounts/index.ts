@@ -2,7 +2,11 @@
 // Credentials never leave the server: reads return a masked map of which keys are set.
 import { corsHeadersFor, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { serviceClient, maskCredentials, testAccount, CREDENTIAL_FIELDS } from "../_shared/cloud-providers/accounts.ts";
-import { azureRuntimeFromAccount, listAzureNetworks, vmProvisioningGaps } from "../_shared/cloud-providers/azure-runtime.ts";
+import {
+  azureRuntimeFromAccount, listAzureNetworks, rotateVmAdminCredential,
+  validateAzureCredentials, vmProvisioningGaps,
+} from "../_shared/cloud-providers/azure-runtime.ts";
+import { diffRecords, recordAudit } from "../_shared/admin-audit.ts";
 
 const PROVIDERS = ["aws", "azure", "gcp", "oci", "ibm", "alibaba", "digitalocean", "other"];
 
@@ -83,6 +87,12 @@ Deno.serve(async (req) => {
         }
         const { data, error } = await admin.from("cloud_provider_accounts").insert(payload).select().single();
         if (error) return errorResponse(error.message, 400);
+        await recordAudit(admin, {
+          actorId: userId, action: "provider.create", entityType: "cloud_provider_account",
+          entityId: data.id, entityLabel: data.display_name,
+          changes: diffRecords({}, { ...payload, credentials: undefined, credential_keys: Object.keys(cleaned) }),
+          message: `Created ${provider} resource provider "${display_name}"`,
+        });
         return jsonResponse({ account: publicRow(data) });
       }
 
@@ -99,6 +109,23 @@ Deno.serve(async (req) => {
       }
       const { data, error } = await admin.from("cloud_provider_accounts").update(payload).eq("id", id).select().single();
       if (error) return errorResponse(error.message, 400);
+      await recordAudit(admin, {
+        actorId: userId, action: "provider.update", entityType: "cloud_provider_account",
+        entityId: id, entityLabel: data.display_name,
+        changes: {
+          ...diffRecords(
+            { ...current, credentials: undefined, config: undefined },
+            { ...data, credentials: undefined, config: undefined },
+          ),
+          config: diffRecords(
+            (current.config ?? {}) as Record<string, unknown>,
+            (data.config ?? {}) as Record<string, unknown>,
+          ),
+          credentials_changed: Object.keys(cleaned),
+          credentials_cleared: Array.isArray(body.clear_credential_keys) ? body.clear_credential_keys : [],
+        },
+        message: `Updated resource provider "${data.display_name}"`,
+      });
       return jsonResponse({ account: publicRow(data) });
     }
 
@@ -125,8 +152,15 @@ Deno.serve(async (req) => {
       if ((count ?? 0) > 0) {
         return errorResponse(`This account is used by ${count} access template(s). Reassign them first.`, 409);
       }
+      const { data: doomed } = await admin
+        .from("cloud_provider_accounts").select("display_name, provider").eq("id", id).maybeSingle();
       const { error } = await admin.from("cloud_provider_accounts").delete().eq("id", id);
       if (error) return errorResponse(error.message, 400);
+      await recordAudit(admin, {
+        actorId: userId, action: "provider.delete", entityType: "cloud_provider_account",
+        entityId: id, entityLabel: doomed?.display_name ?? id,
+        message: `Deleted resource provider "${doomed?.display_name ?? id}"`,
+      });
       return jsonResponse({ success: true });
     }
 
@@ -158,7 +192,61 @@ Deno.serve(async (req) => {
           last_tested_at: new Date().toISOString(),
         }).eq("id", id);
       }
+      await recordAudit(admin, {
+        actorId: userId, action: "provider.test", entityType: "cloud_provider_account",
+        entityId: id, entityLabel: String(body.display_name ?? id ?? provider),
+        outcome: result.ok ? "success" : "failed", message: result.message.slice(0, 500),
+      });
       return jsonResponse({ result });
+    }
+
+    if (action === "validate_credentials" || action === "rotate_credential") {
+      const id = String(body.id || "");
+      if (!id) return errorResponse("id is required", 400);
+      const { data: row } = await admin.from("cloud_provider_accounts").select("*").eq("id", id).maybeSingle();
+      if (!row) return errorResponse("Account not found", 404);
+      if (row.provider !== "azure") {
+        return errorResponse("Credential validation is currently available for Azure accounts only", 400);
+      }
+
+      try {
+        const runtime = azureRuntimeFromAccount(row as any);
+
+        if (action === "validate_credentials") {
+          const validation = await validateAzureCredentials(runtime);
+          await admin.from("cloud_provider_accounts").update({
+            last_test_status: validation.ok ? "ok" : "failed",
+            last_test_message: validation.ok
+              ? "Credentials validated"
+              : validation.issues.map((i) => i.message).join(" ").slice(0, 500),
+            last_tested_at: new Date().toISOString(),
+          }).eq("id", id);
+          await recordAudit(admin, {
+            actorId: userId, action: "provider.validate_credentials", entityType: "cloud_provider_account",
+            entityId: id, entityLabel: row.display_name,
+            outcome: validation.ok ? "success" : "failed",
+            changes: { auth_mode: validation.authMode, issues: validation.issues },
+            message: validation.ok ? "Credentials valid" : validation.issues.map((i) => i.message).join(" | "),
+          });
+          return jsonResponse({ validation });
+        }
+
+        const rotation = await rotateVmAdminCredential(admin, runtime, Number(body.expires_in_days) || 90);
+        await recordAudit(admin, {
+          actorId: userId, action: "provider.rotate_credential", entityType: "cloud_provider_account",
+          entityId: id, entityLabel: row.display_name,
+          changes: { mode: rotation.mode, expires_at: rotation.expiresAt },
+          message: `Rotated the VM admin credential (${rotation.mode})`,
+        });
+        return jsonResponse({ rotation });
+      } catch (e) {
+        const message = e instanceof Error ? e.message : "Credential operation failed";
+        await recordAudit(admin, {
+          actorId: userId, action: `provider.${action}`, entityType: "cloud_provider_account",
+          entityId: id, entityLabel: row.display_name, outcome: "failed", message,
+        });
+        return errorResponse(message, 400);
+      }
     }
 
     return errorResponse(`Unknown action: ${action}`, 400);

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 import {
-  Plus, Cloud, ShieldCheck, ShieldAlert, Loader2, Trash2, Pencil, PlugZap, Star,
+  Plus, Cloud, ShieldCheck, ShieldAlert, Loader2, Trash2, Pencil, PlugZap, Star, KeyRound,
 } from "lucide-react";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { EmptyState } from "@/components/EmptyState";
@@ -81,6 +81,7 @@ export default function AdminResourceProviders() {
   const [dialogOpen, setDialogOpen] = useState(false);
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
+  const [credBusyId, setCredBusyId] = useState<string | null>(null);
   const [testingId, setTestingId] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ProviderAccount | null>(null);
   const [subnets, setSubnets] = useState<SubnetOption[]>([]);
@@ -225,6 +226,40 @@ export default function AdminResourceProviders() {
     setTestingId(null);
   };
 
+  const validateCreds = async (id: string) => {
+    setCredBusyId(id);
+    try {
+      const data = await call({ action: "validate_credentials", id });
+      const v = data?.validation;
+      toast({
+        title: v?.ok ? "Credentials valid" : "Credentials need attention",
+        description: v?.issues?.length
+          ? v.issues.map((i: { message: string }) => i.message).join(" ")
+          : `Auth mode: ${v?.authMode ?? "unknown"}`,
+        variant: v?.ok ? undefined : "destructive",
+      });
+      await load();
+    } catch (e) {
+      toast({ title: "Validation failed", description: (e as Error).message, variant: "destructive" });
+    }
+    setCredBusyId(null);
+  };
+
+  const rotateCreds = async (id: string) => {
+    setCredBusyId(id);
+    try {
+      const data = await call({ action: "rotate_credential", id });
+      toast({
+        title: "Credential rotated",
+        description: `New VM admin secret stored (${data?.rotation?.mode}).`,
+      });
+      await load();
+    } catch (e) {
+      toast({ title: "Rotation failed", description: (e as Error).message, variant: "destructive" });
+    }
+    setCredBusyId(null);
+  };
+
   const remove = async () => {
     if (!deleteTarget) return;
     try {
@@ -351,6 +386,19 @@ export default function AdminResourceProviders() {
                                 {testingId === a.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <PlugZap className="h-3.5 w-3.5" />}
                                 Test
                               </Button>
+                              {a.provider === "azure" && (
+                                <>
+                                  <Button size="sm" variant="outline" className="gap-1" disabled={credBusyId === a.id}
+                                    onClick={() => validateCreds(a.id)}>
+                                    {credBusyId === a.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ShieldCheck className="h-3.5 w-3.5" />}
+                                    Validate credentials
+                                  </Button>
+                                  <Button size="sm" variant="outline" className="gap-1" disabled={credBusyId === a.id}
+                                    onClick={() => rotateCreds(a.id)}>
+                                    <KeyRound className="h-3.5 w-3.5" /> Rotate password
+                                  </Button>
+                                </>
+                              )}
                               <Button size="sm" variant="outline" className="gap-1" onClick={() => openEdit(a)}>
                                 <Pencil className="h-3.5 w-3.5" /> Edit
                               </Button>
