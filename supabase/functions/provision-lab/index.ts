@@ -562,8 +562,9 @@ Deno.serve(async (req) => {
     const rawMessage = error instanceof Error ? error.message : "Unknown error";
     const userMessage = mapAzureError(rawMessage);
     const issue = detectConfigIssue(rawMessage, {
-      subscriptionId: Deno.env.get("AZURE_SUBSCRIPTION_ID") ?? undefined,
-      resourceGroup: Deno.env.get("AZURE_RESOURCE_GROUP") ?? undefined,
+      subscriptionId: providerCtx.subscriptionId,
+      resourceGroup: providerCtx.resourceGroup,
+      accountName: providerCtx.accountName,
     });
 
     // A failed attempt must not block a genuine retry with the same key.
