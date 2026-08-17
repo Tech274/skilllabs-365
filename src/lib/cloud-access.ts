@@ -8,7 +8,7 @@ export type TemplateAssignment = Tables<"template_assignments">;
 export type AccessSession = Tables<"access_sessions">;
 export type AccessSessionEvent = Tables<"access_session_events">;
 
-export type CloudProvider = "azure" | "aws" | "gcp";
+export type CloudProvider = "azure" | "aws" | "gcp" | "oci" | "ibm" | "alibaba" | "digitalocean" | "other";
 
 export const PROVIDER_META: Record<CloudProvider, { label: string; color: string; bg: string; tagline: string; implemented: boolean }> = {
   aws: {
@@ -32,12 +32,52 @@ export const PROVIDER_META: Record<CloudProvider, { label: string; color: string
     tagline: "Google Cloud Platform",
     implemented: false,
   },
+  oci: {
+    label: "OCI",
+    color: "text-red-400",
+    bg: "bg-red-500/10 border-red-500/30",
+    tagline: "Oracle Cloud Infrastructure",
+    implemented: false,
+  },
+  ibm: {
+    label: "IBM Cloud",
+    color: "text-blue-400",
+    bg: "bg-blue-500/10 border-blue-500/30",
+    tagline: "IBM Cloud",
+    implemented: false,
+  },
+  alibaba: {
+    label: "Alibaba",
+    color: "text-amber-400",
+    bg: "bg-amber-500/10 border-amber-500/30",
+    tagline: "Alibaba Cloud",
+    implemented: false,
+  },
+  digitalocean: {
+    label: "DigitalOcean",
+    color: "text-cyan-400",
+    bg: "bg-cyan-500/10 border-cyan-500/30",
+    tagline: "DigitalOcean",
+    implemented: false,
+  },
+  other: {
+    label: "Other",
+    color: "text-muted-foreground",
+    bg: "bg-muted/40 border-border",
+    tagline: "Custom cloud provider",
+    implemented: false,
+  },
 };
 
 export const PROVIDER_ICON: Record<CloudProvider, typeof Cloud> = {
   aws: Server,
   azure: Cloud,
   gcp: Cloud,
+  oci: Cloud,
+  ibm: Cloud,
+  alibaba: Cloud,
+  digitalocean: Cloud,
+  other: Cloud,
 };
 
 export const TEMPLATE_STATUS_STYLE: Record<string, string> = {
