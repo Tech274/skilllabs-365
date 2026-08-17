@@ -12,6 +12,7 @@ export interface ProvisioningEvent {
   status: "running" | "success" | "failed" | "skipped";
   message: string | null;
   duration_ms: number | null;
+  detail: Record<string, unknown> | null;
 }
 
 interface ProvisioningTimelineProps {
@@ -34,6 +35,8 @@ const STEP_LABELS: Record<string, string> = {
   auth: "Verifying access",
   preflight: "Checking Azure subscription",
   "vm-create": "Creating virtual machine",
+  "subnet-resolve": "Resolving network subnet",
+  "connectivity-check": "Checking remote access (SSH/RDP)",
   "azure-delete": "Removing Azure resources",
   "guacamole-connect": "Opening remote desktop",
   "session-end": "Ending session",
@@ -55,7 +58,7 @@ export function ProvisioningTimeline({ vmId, correlationId, className, limit = 4
     const load = async () => {
       let query = supabase
         .from("provisioning_events")
-        .select("id, created_at, correlation_id, source, step, status, message, duration_ms")
+        .select("id, created_at, correlation_id, source, step, status, message, duration_ms, detail")
         .order("created_at", { ascending: true })
         .limit(limit);
       query = correlationId ? query.eq("correlation_id", correlationId) : query.eq("vm_id", vmId!);
@@ -90,6 +93,16 @@ export function ProvisioningTimeline({ vmId, correlationId, className, limit = 4
 
   if (events.length === 0) return null;
 
+  const subnetId = events
+    .map((e) => (e.detail as { subnet_id?: string } | null)?.subnet_id)
+    .filter(Boolean)
+    .pop() as string | undefined;
+  const subnetSource = events
+    .map((e) => (e.detail as { subnet_source?: string; source?: string } | null)?.subnet_source
+      ?? (e.step === "subnet-resolve" ? (e.detail as { source?: string } | null)?.source : undefined))
+    .filter(Boolean)
+    .pop() as string | undefined;
+
   return (
     <div className={cn("space-y-2 rounded-lg border border-border/60 bg-card/50 p-4", className)}>
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Provisioning activity</p>
@@ -119,6 +132,14 @@ export function ProvisioningTimeline({ vmId, correlationId, className, limit = 4
           );
         })}
       </ol>
+      {subnetId && (
+        <div className="rounded-md border border-border/60 bg-muted/40 p-2">
+          <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+            Subnet ARM ID{subnetSource ? ` (${subnetSource})` : ""}
+          </p>
+          <p className="break-all font-mono text-[11px] text-foreground">{subnetId}</p>
+        </div>
+      )}
       <p className="pt-1 font-mono text-[10px] text-muted-foreground">ref: {events[0].correlation_id}</p>
     </div>
   );
