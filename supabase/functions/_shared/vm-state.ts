@@ -66,9 +66,19 @@ export function mapAzureError(raw: string): string {
   if (/AuthorizationFailed|Forbidden|insufficient privileges/i.test(m)) {
     return "Azure rejected the request due to insufficient permissions. Please contact your administrator.";
   }
+  if (/SubscriptionNotFound|SubscriptionDoesNotHaveServer|DisabledSubscription/i.test(m)) {
+    return "The configured Azure subscription could not be found or is disabled. An administrator must verify AZURE_SUBSCRIPTION_ID (and that the service principal has access to it).";
+  }
+  if (/ResourceGroupNotFound/i.test(m)) {
+    return "The configured Azure resource group does not exist. An administrator must verify AZURE_RESOURCE_GROUP.";
+  }
+  if (/MissingSubscriptionRegistration|SubscriptionNotRegistered/i.test(m)) {
+    return "The Azure subscription is not registered for the required resource providers (Microsoft.Compute / Microsoft.Network). An administrator must register them.";
+  }
   if (/Azure auth failed|AADSTS|invalid_client/i.test(m)) {
     return "Azure authentication failed. Please contact your administrator.";
   }
+
   if (/SubnetIsFull|PrivateIPAddressIsAlreadyUsed|NetworkingInternalOperationError/i.test(m)) {
     return "The lab network is at capacity. Please ask an administrator to free addresses or expand the subnet.";
   }
