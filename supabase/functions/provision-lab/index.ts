@@ -198,7 +198,10 @@ Deno.serve(async (req) => {
   let idem: { key: string; userId: string } | null = null;
   // deno-lint-ignore no-explicit-any -- untyped service client (no generated DB types in the edge runtime)
   let admin: any = null;
-  const providerCtx: { subscriptionId?: string; resourceGroup?: string; accountName?: string } = {};
+  const providerCtx: {
+    subscriptionId?: string; resourceGroup?: string; accountName?: string;
+    userId?: string; templateId?: string; templateName?: string;
+  } = {};
 
   try {
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -463,6 +466,9 @@ Deno.serve(async (req) => {
     providerCtx.subscriptionId = azure.subscriptionId;
     providerCtx.resourceGroup = azure.resourceGroup;
     providerCtx.accountName = azure.displayName;
+    providerCtx.userId = userId;
+    providerCtx.templateId = template.id;
+    providerCtx.templateName = template.name;
     await trace.success(SOURCE, "resource-provider", `Using resource provider "${azure.displayName}"`, {
       account_id: azure.accountId,
       subscription_id: azure.subscriptionId,
