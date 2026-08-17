@@ -502,13 +502,13 @@ Deno.serve(async (req) => {
     let vmResult: { vmId: string; privateIp: string };
     await trace.start(SOURCE, "vm-create", `Creating Azure VM ${vmName}`);
     try {
-      vmResult = await createAzureVM(azureToken, AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, vmName, {
+      vmResult = await createAzureVM(azureToken, azure.subscriptionId, azure.resourceGroup, vmName, {
         region: azureRegion,
         vmSize: template.vm_size,
         osImage: template.os_image,
-        adminUsername: AZURE_VM_ADMIN_USERNAME,
-        adminPassword: AZURE_VM_ADMIN_PASSWORD,
-        subnetId: AZURE_SUBNET_ID,
+        adminUsername: azure.adminUsername,
+        adminPassword: azure.adminPassword,
+        subnetId: azure.subnetId,
       });
     } catch (azureError) {
       // Update DB record to failed
