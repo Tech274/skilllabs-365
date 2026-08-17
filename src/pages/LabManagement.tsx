@@ -130,7 +130,7 @@ export default function LabManagement() {
       });
       return;
     }
-    const payload = { ...form, provider: "azure" };
+    const payload = { ...form, provider: "azure" as const };
     if (editingLab) {
       const { error } = await supabase.from("lab_templates").update(payload).eq("id", editingLab.id);
       if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
