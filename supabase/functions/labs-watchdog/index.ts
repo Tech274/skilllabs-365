@@ -208,15 +208,11 @@ Deno.serve(async (req) => {
 
         let azureDeleted = false;
         if (vm.azure_vm_id) {
-          {
-            try {
-              const az = await azureFor(vm.provider_account_id);
-              azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
-            } catch (e) {
-              await timeline.failed(SOURCE, "azure-delete", e instanceof Error ? e.message : "Azure delete failed");
-            }
-          } else {
-            await timeline.skipped(SOURCE, "azure-delete", "Azure credentials not configured");
+          try {
+            const az = await azureFor(vm.provider_account_id);
+            azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
+          } catch (e) {
+            await timeline.failed(SOURCE, "azure-delete", e instanceof Error ? e.message : "Azure delete failed");
           }
         }
 
