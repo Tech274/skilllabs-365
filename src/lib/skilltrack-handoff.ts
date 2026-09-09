@@ -18,6 +18,15 @@ export type SkillTrackHandoff = {
 
 const KEYS = ["handoff", "email", "phone", "sku", "cert", "lead", "invoice"] as const;
 
+type HandoffField = (typeof KEYS)[number];
+
+/** Minimal supabase-like client for soft insert (table may be missing). */
+type SoftSupabase = {
+  from: (table: string) => {
+    insert: (values: Record<string, string | null>) => PromiseLike<unknown>;
+  };
+};
+
 function trim(v: string | null | undefined): string | undefined {
   const t = (v || "").trim();
   return t || undefined;
@@ -29,7 +38,9 @@ export function parseHandoffSearch(search: string | URLSearchParams): Omit<Skill
   const out: Omit<SkillTrackHandoff, "capturedAt"> = {};
   for (const k of KEYS) {
     const v = trim(sp.get(k));
-    if (v) (out as any)[k] = v;
+    if (v) {
+      out[k as HandoffField] = v;
+    }
   }
   return out;
 }
@@ -66,7 +77,7 @@ export function clearStoredHandoff() {
 
 /** Soft-log handoff (table optional — ignore if missing). */
 export async function logHandoffEvent(
-  supabase: { from: (t: string) => any },
+  supabase: SoftSupabase,
   payload: SkillTrackHandoff & { user_id?: string | null },
 ) {
   try {

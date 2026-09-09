@@ -27,6 +27,13 @@ import { MessageCircle } from "lucide-react";
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
 
+type GrantRow = {
+  active?: boolean;
+  certification_slug?: string | null;
+  asset_id?: string | null;
+  note?: string | null;
+};
+
 export default function StudentDashboard() {
   const { user } = useAuth();
   const navigate = useNavigate();
@@ -50,13 +57,13 @@ export default function StudentDashboard() {
       ]);
       setLabs(labRes.data ?? []);
       setSessions(sessionRes.data ?? []);
-      const active = (grants || []).filter((g: any) => g.active !== false);
+      const active = (grants || []).filter((g: GrantRow) => g.active !== false);
       const cert = (handoff?.cert || "").toLowerCase();
       if (!cert) {
         setHasLabGrant(active.length > 0);
       } else {
         const matched = active.filter(
-          (g: any) =>
+          (g: GrantRow) =>
             (g.certification_slug || "").toLowerCase() === cert ||
             (g.asset_id || "").toLowerCase().includes(cert) ||
             (g.note || "").toLowerCase().includes(cert),
@@ -67,7 +74,7 @@ export default function StudentDashboard() {
       setLoading(false);
     };
     load();
-  }, [user]);
+  }, [user, handoff?.cert]);
 
   const handleLaunchLab = async (lab: LabTemplate) => {
     if (hasLabGrant === false) {
@@ -93,9 +100,9 @@ export default function StudentDashboard() {
         provisioning.startProvisioning(lab.id, lab.name, data.vm_id);
         toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       resetIdempotency(`provision:${lab.id}`);
-      const message = err.message || "Failed to provision VM. Please try again.";
+      const message = err instanceof Error ? err.message : "Failed to provision VM. Please try again.";
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
       toast({ title: "Launch Failed", description: message, variant: "destructive" });
     } finally {
