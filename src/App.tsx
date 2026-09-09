@@ -39,6 +39,7 @@ import AdminAuditLog from "./pages/AdminAuditLog";
 import AdminSessionLifecycle from "./pages/AdminSessionLifecycle";
 import AdminProvisioningRetries from "./pages/AdminProvisioningRetries";
 import AdminProvisioningStatus from "./pages/AdminProvisioningStatus";
+import { SkillTrackHandoffCapture } from "./components/SkillTrackHandoffCapture";
 
 
 const queryClient = new QueryClient();
@@ -52,6 +53,7 @@ const App = () => (
         <BrowserRouter>
           <AuthProvider>
             <ProvisioningProvider>
+              <SkillTrackHandoffCapture />
               <Routes>
                 <Route path="/login" element={<Login />} />
                 <Route path="/signup" element={<Signup />} />
