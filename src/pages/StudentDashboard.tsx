@@ -20,9 +20,19 @@ import { useProvisioning } from "@/hooks/use-provisioning";
 import { estimateLabCost } from "@/lib/azure-pricing";
 import { DollarSign } from "lucide-react";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
+import { listGrants } from "@/lib/manual-grants.functions";
+import { HUB_WHATSAPP_UPSELL, readStoredHandoff } from "@/lib/skilltrack-handoff";
+import { MessageCircle } from "lucide-react";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
+
+type GrantRow = {
+  active?: boolean;
+  certification_slug?: string | null;
+  asset_id?: string | null;
+  note?: string | null;
+};
 
 export default function StudentDashboard() {
   const { user } = useAuth();
@@ -34,22 +44,43 @@ export default function StudentDashboard() {
   const [launchingId, setLaunchingId] = useState<string | null>(null);
   const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
   const [launchErrorPayloads, setLaunchErrorPayloads] = useState<Record<string, { missing_fields?: string[]; setting?: string; suggestion?: string } | null>>({});
+  const [hasLabGrant, setHasLabGrant] = useState<boolean | null>(null);
+  const handoff = readStoredHandoff();
 
   useEffect(() => {
     if (!user) return;
     const load = async () => {
-      const [labRes, sessionRes] = await Promise.all([
+      const [labRes, sessionRes, grants] = await Promise.all([
         supabase.from("lab_templates").select("*").eq("status", "published").order("name"),
         supabase.from("sessions").select("*").eq("user_id", user.id).order("started_at", { ascending: false }),
+        listGrants({ userId: user.id }).catch(() => []),
       ]);
       setLabs(labRes.data ?? []);
       setSessions(sessionRes.data ?? []);
+      const active = (grants || []).filter((g: GrantRow) => g.active !== false);
+      const cert = (handoff?.cert || "").toLowerCase();
+      if (!cert) {
+        setHasLabGrant(active.length > 0);
+      } else {
+        const matched = active.filter(
+          (g: GrantRow) =>
+            (g.certification_slug || "").toLowerCase() === cert ||
+            (g.asset_id || "").toLowerCase().includes(cert) ||
+            (g.note || "").toLowerCase().includes(cert),
+        );
+        // Prefer cert-scoped; fall back to any active grant so Ops can use a blanket unlock.
+        setHasLabGrant(matched.length > 0 || active.length > 0);
+      }
       setLoading(false);
     };
     load();
-  }, [user]);
+  }, [user, handoff?.cert]);
 
   const handleLaunchLab = async (lab: LabTemplate) => {
+    if (hasLabGrant === false) {
+      toast({ title: "Lab access pending", description: "Ops must grant Hub access after payment.", variant: "destructive" });
+      return;
+    }
     setLaunchingId(lab.id);
     setLaunchErrors((prev) => ({ ...prev, [lab.id]: "" }));
     try {
@@ -69,9 +100,9 @@ export default function StudentDashboard() {
         provisioning.startProvisioning(lab.id, lab.name, data.vm_id);
         toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
       }
-    } catch (err: any) {
+    } catch (err: unknown) {
       resetIdempotency(`provision:${lab.id}`);
-      const message = err.message || "Failed to provision VM. Please try again.";
+      const message = err instanceof Error ? err.message : "Failed to provision VM. Please try again.";
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
       toast({ title: "Launch Failed", description: message, variant: "destructive" });
     } finally {
@@ -105,6 +136,44 @@ export default function StudentDashboard() {
           <h1 className="text-2xl font-semibold text-foreground">My Dashboard</h1>
           <p className="text-sm text-muted-foreground mt-1">Your labs and session history</p>
         </div>
+
+
+        {(handoff?.handoff === "skilltrack" || hasLabGrant === false) && (
+          <Card className={hasLabGrant ? "border-primary/30" : "border-amber-500/40"}>
+            <CardContent className="p-4 flex flex-col sm:flex-row sm:items-center gap-3 justify-between">
+              <div className="text-sm">
+                {hasLabGrant ? (
+                  <>
+                    <p className="font-medium text-foreground">Labs unlocked</p>
+                    <p className="text-muted-foreground text-xs mt-0.5">
+                      SkillTrack handoff{handoff?.cert ? ` · cert ${handoff.cert}` : ""}
+                      {handoff?.sku ? ` · sku ${handoff.sku}` : ""}. Ops grant is active.
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="font-medium text-foreground">Lab access pending</p>
+                    <p className="text-muted-foreground text-xs mt-0.5">
+                      Sign-in worked{handoff?.email ? ` as ${handoff.email}` : ""}. After payment,
+                      Ops grants access in Access Catalogue (manual this cut). Message us if you
+                      already paid.
+                    </p>
+                  </>
+                )}
+              </div>
+              {!hasLabGrant && (
+                <a
+                  href={HUB_WHATSAPP_UPSELL}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center justify-center rounded-md border border-border px-3 py-2 text-sm font-medium hover:bg-muted"
+                >
+                  <MessageCircle className="h-4 w-4 mr-1.5" /> WhatsApp for access
+                </a>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* KPI Cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
