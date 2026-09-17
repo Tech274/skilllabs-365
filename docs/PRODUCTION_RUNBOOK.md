@@ -26,7 +26,10 @@ Never put a service-role key, Azure credential or Guacamole password in a `VITE_
 | `AZURE_RESOURCE_GROUP` | provisioning, cleanup | default `skilllabs-rg` |
 | `AZURE_SUBNET_ID` | provisioning | fully-qualified resource ID |
 | `AZURE_VM_ADMIN_PASSWORD` (+ optional `AZURE_VM_ADMIN_USERNAME`) | provisioning | |
-| `GUACAMOLE_URL`, `GUACAMOLE_ADMIN_USERNAME`, `GUACAMOLE_ADMIN_PASSWORD` | guacamole-proxy, cleanup | gateway admin, never sent to the browser |
+| `GUACAMOLE_URL`, `GUACAMOLE_ADMIN_USERNAME`, `GUACAMOLE_ADMIN_PASSWORD` | guacamole-proxy, cleanup | **AWS** Guac admin API (legacy single-gateway vars). Never sent to the browser. |
+| `GUACAMOLE_AWS_PUBLIC_URL` (optional) | guacamole-proxy | Browser iframe origin for AWS labs. Default `https://guac.skillhub365.co.in`. Alias: `GUACAMOLE_PUBLIC_URL`. |
+| `GUACAMOLE_AZURE_URL`, `GUACAMOLE_AZURE_ADMIN_USERNAME`, `GUACAMOLE_AZURE_ADMIN_PASSWORD` | guacamole-proxy | **Azure** Guac admin API (second gateway). Until set, Azure labs fall back to legacy `GUACAMOLE_*` (AWS Guac). |
+| `GUACAMOLE_AZURE_PUBLIC_URL` (optional) | guacamole-proxy | Browser iframe origin for Azure labs. Default `https://guac-azure.skillhub365.co.in` **only when** `GUACAMOLE_AZURE_URL` is set (keeps token host paired with admin API). |
 | `LOVABLE_API_KEY` | ai-assistant, ai-chat, ai-health | AI gateway |
 | `AI_ALERT_WEBHOOK_URL` (optional) | ai-alerts | outbound alerting |
 | `ALLOWED_ORIGINS` (optional) | all | extra CORS origins, comma separated (custom domains) |
@@ -40,6 +43,11 @@ Never put a service-role key, Azure credential or Guacamole password in a `VITE_
 > subnet ID, security group ID, and VM admin password on the AWS provider account.
 > Optional: AMI ID, key pair, VPC ID (auto-filled from subnet). IAM needs EC2
 > Run/Describe/Stop/Terminate, SSM GetParameter (AMI), and Service Quotas read.
+>
+> **Dual Guacamole:** Connect picks the Guac public host from the VM's cloud
+> provider (`cloud_provider_accounts.provider` / template `provider`):
+> `aws` → `guac.skillhub365.co.in`, `azure` → `guac-azure.skillhub365.co.in`.
+> See § Guacamole failures for admin-API pairing and fallbacks.
 
 ## 3. Deploying database migrations
 
@@ -167,14 +175,17 @@ Manual pre-go-live checks:
 3. Lower the budget cap in Platform Settings (blocks new provisioning immediately).
 
 ### Guacamole failures
-1. Check `GUACAMOLE_URL` reachability and admin credentials.
+1. Check the **provider-matched** admin API: AWS labs → `GUACAMOLE_URL`; Azure labs → `GUACAMOLE_AZURE_URL` (falls back to `GUACAMOLE_URL` until Azure Guac is deployed).
 2. Run `clear-guacamole` to drop stale connections, then reconnect.
 3. If the gateway container is down, restart the Docker stack; sessions reconnect on next launch.
-4. **Public gateway (`guac.skillhub365.co.in`)** — iframe HTML on `/guacamole/` must be HTTPS. Guacamole also needs a tunnel:
+4. **Dual public gateways (Hub map):**
+   - **AWS labs** → `https://guac.skillhub365.co.in` (existing EC2 `3.6.228.159`) — do not remove.
+   - **Azure labs** → `https://guac-azure.skillhub365.co.in` (Azure Guac VM; Hub supports the map before the VM exists). Until `GUACAMOLE_AZURE_URL` is set, Connect keeps Azure iframes on the AWS public host so tokens stay valid.
+5. iframe HTML on `/guacamole/` must be HTTPS. Guacamole also needs a tunnel:
    - Preferred: WebSocket at `/guacamole/websocket-tunnel` with nginx `Upgrade` / `Connection` headers.
    - Fallback: HTTP tunnel at `/guacamole/tunnel` (Guacamole returns 400 without a query string — that is expected for a bare probe).
-   - If the UI loads but the session immediately errors/reconnects, verify nginx proxies both tunnel paths to the Guacamole servlet and that guacd can reach the lab VM **private IP:22/3389** on the lab VNet.
-5. Hub `guacamole-proxy` create-session cannot TCP-probe private lab IPs from the edge runtime (reachability-precheck is skipped). SSH readiness is only guaranteed once guacd can open the port — prefer a short settle after Azure reports the VM running, and fail closed in the Hub UI instead of reminting sessions forever.
+   - If the UI loads but the session immediately errors/reconnects, verify nginx proxies both tunnel paths to the Guacamole servlet and that guacd can reach the lab VM **private IP:22/3389** on the lab VNet / VPC.
+6. Hub `guacamole-proxy` create-session cannot TCP-probe private lab IPs from the edge runtime (reachability-precheck is skipped). SSH readiness is only guaranteed once guacd can open the port — prefer a short settle after the cloud reports the VM running, and fail closed in the Hub UI instead of reminting sessions forever.
 
 ### AI outages
 1. `/admin/ai-status` shows provider health, 24h latency/failure graph and breaker state.

@@ -3,6 +3,13 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+import { resolveAwsRuntime } from "../_shared/cloud-providers/aws-runtime.ts";
+import {
+  buildPublicIframeUrl,
+  normalizeGuacCloudProvider,
+  resolveGuacAdminEndpoint,
+  type GuacCloudProvider,
+} from "../_shared/guac-hosts.ts";
 
 const SOURCE = "guacamole-proxy";
 
@@ -26,32 +33,20 @@ interface GuacConnection {
 }
 
 
-/** Browser-facing Guac origin. Never expose http://IP:port to the iframe. */
-function toPublicIframeBase(apiBaseUrl: string): string {
-  const raw = (Deno.env.get("GUACAMOLE_PUBLIC_URL") || "https://guac.skillhub365.co.in").trim().replace(/\/+$/, "");
-  const publicBase = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-  try {
-    const api = new URL(apiBaseUrl);
-    const pub = new URL(publicBase);
-    // Force https for browser
-    pub.protocol = "https:";
-    const apiPath = api.pathname.replace(/\/+$/, "") || "";
-    let pubPath = pub.pathname.replace(/\/+$/, "") || "";
-    // Preserve /guacamole suffix when API base has it and public URL is origin-only
-    if (apiPath.endsWith("/guacamole") && !pubPath.endsWith("/guacamole")) {
-      pubPath = `${pubPath}/guacamole`.replace(/\/+/g, "/");
-    } else if (!pubPath && apiPath) {
-      pubPath = apiPath;
-    }
-    return `${pub.origin}${pubPath}`;
-  } catch {
-    return "https://guac.skillhub365.co.in/guacamole";
+/** Resolve aws|azure for a VM via provider account, else lab template provider. */
+// deno-lint-ignore no-explicit-any
+async function resolveVmCloudProvider(supabase: any, vm: any): Promise<GuacCloudProvider> {
+  if (vm?.provider_account_id) {
+    const { data: acct } = await supabase
+      .from("cloud_provider_accounts")
+      .select("provider")
+      .eq("id", vm.provider_account_id)
+      .maybeSingle();
+    if (acct?.provider) return normalizeGuacCloudProvider(acct.provider);
   }
-}
-
-function buildPublicIframeUrl(apiBaseUrl: string, clientId: string, token: string): string {
-  const base = toPublicIframeBase(apiBaseUrl);
-  return `${base}/#/client/${encodeURIComponent(clientId)}?token=${token}`;
+  const tpl = Array.isArray(vm?.lab_templates) ? vm.lab_templates[0] : vm?.lab_templates;
+  if (tpl?.provider) return normalizeGuacCloudProvider(tpl.provider);
+  return "aws";
 }
 
 function buildGuacBaseCandidates(rawUrl: string): string[] {
@@ -188,17 +183,17 @@ Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
-  const GUACAMOLE_URL = Deno.env.get("GUACAMOLE_URL");
-  const GUACAMOLE_ADMIN_USERNAME = Deno.env.get("GUACAMOLE_ADMIN_USERNAME");
-  const GUACAMOLE_ADMIN_PASSWORD = Deno.env.get("GUACAMOLE_ADMIN_PASSWORD");
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
   let guacBaseUrl: string | undefined;
   let adminToken: string | undefined;
+  let guacAdminUrl: string | undefined;
+  let guacPublicBase: string | undefined;
+  let cloudProvider: GuacCloudProvider = "aws";
 
   try {
-    if (!GUACAMOLE_URL || !GUACAMOLE_ADMIN_USERNAME || !GUACAMOLE_ADMIN_PASSWORD || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
       throw new Error("Missing required server configuration");
     }
 
@@ -224,11 +219,24 @@ Deno.serve(async (req) => {
       return !!data;
     };
 
-    // Authenticate admin to Guacamole (server-side only)
-    const auth = await getGuacToken(GUACAMOLE_URL, GUACAMOLE_ADMIN_USERNAME, GUACAMOLE_ADMIN_PASSWORD);
-    adminToken = auth.token;
-    guacBaseUrl = auth.baseUrl;
-    const dataSource = await getDataSource(guacBaseUrl, adminToken);
+    /** Authenticate to the Guac admin API for this cloud (aws vs azure). */
+    const bindGuacForProvider = async (provider: GuacCloudProvider) => {
+      cloudProvider = provider;
+      const endpoint = resolveGuacAdminEndpoint(provider);
+      if (!endpoint.adminUrl || !endpoint.adminUsername || !endpoint.adminPassword) {
+        throw new Error(
+          provider === "azure"
+            ? "Missing Guacamole Azure admin configuration (set GUACAMOLE_AZURE_URL + ADMIN_* or legacy GUACAMOLE_*)"
+            : "Missing Guacamole admin configuration (GUACAMOLE_URL + GUACAMOLE_ADMIN_*)",
+        );
+      }
+      guacAdminUrl = endpoint.adminUrl;
+      guacPublicBase = endpoint.publicBase;
+      const auth = await getGuacToken(endpoint.adminUrl, endpoint.adminUsername, endpoint.adminPassword);
+      adminToken = auth.token;
+      guacBaseUrl = auth.baseUrl;
+      return await getDataSource(guacBaseUrl, adminToken);
+    };
 
     if (action === "create-session") {
       const { vm_id } = body;
@@ -239,7 +247,7 @@ Deno.serve(async (req) => {
 
       const { data: vm, error: vmError } = await supabase
         .from("virtual_machines")
-        .select("*, lab_templates(name, protocol, clipboard_enabled, file_transfer_enabled)")
+        .select("*, lab_templates(name, protocol, provider, clipboard_enabled, file_transfer_enabled)")
         .eq("id", vm_id).maybeSingle();
       if (vmError || !vm) throw new Error(`VM not found: ${vmError?.message || vm_id}`);
       if (!vm.private_ip) throw new Error("VM has no private IP assigned");
@@ -251,6 +259,9 @@ Deno.serve(async (req) => {
       }
 
       timeline.attach({ labTemplateId: vm.lab_template_id });
+
+      const vmCloud = await resolveVmCloudProvider(supabase, vm);
+      const dataSource = await bindGuacForProvider(vmCloud);
 
       // Idempotency: a second click must reuse the live session instead of
       // creating another Guacamole connection + scoped user for the same VM.
@@ -296,14 +307,15 @@ Deno.serve(async (req) => {
           body: JSON.stringify({ newPassword: rotated, oldPassword: "" }),
         });
         if (pwRes.ok) {
-          const scoped = await getGuacToken(GUACAMOLE_URL, liveSession.guac_username, rotated);
+          const scoped = await getGuacToken(guacAdminUrl!, liveSession.guac_username, rotated);
           const reusedClientId = btoa(`${liveSession.guac_connection_id}\0c\0${dataSource}`);
           const reused = {
             session_id: liveSession.id,
-            iframe_url: buildPublicIframeUrl(guacBaseUrl, reusedClientId, scoped.token),
+            iframe_url: buildPublicIframeUrl(guacBaseUrl, guacPublicBase!, reusedClientId, scoped.token),
             protocol: (labTemplateProtocol(vm) === "ssh" ? "SSH" : "RDP"),
             vm_ip: vm.private_ip,
             region: vm.region ?? null,
+            cloud_provider: cloudProvider,
             reused_existing: true,
             correlation_id: correlationId,
           };
@@ -391,9 +403,17 @@ Deno.serve(async (req) => {
       }
 
       // VM sign-in credentials belong to the Resource Provider account that created the VM.
-      const vmProvider = await resolveAzureRuntime(supabase, vm.provider_account_id ?? null);
-      const VM_ADMIN_USERNAME = vmProvider.adminUsername;
-      const VM_ADMIN_PASSWORD = vmProvider.adminPassword;
+      let VM_ADMIN_USERNAME: string;
+      let VM_ADMIN_PASSWORD: string;
+      if (vmCloud === "aws") {
+        const aws = await resolveAwsRuntime(supabase, vm.provider_account_id ?? null);
+        VM_ADMIN_USERNAME = aws.adminUsername;
+        VM_ADMIN_PASSWORD = aws.adminPassword;
+      } else {
+        const azure = await resolveAzureRuntime(supabase, vm.provider_account_id ?? null);
+        VM_ADMIN_USERNAME = azure.adminUsername;
+        VM_ADMIN_PASSWORD = azure.adminPassword;
+      }
 
       const connectionName = `session-${vm_id}-${Date.now()}`;
       const connectionId = await createGuacConnection(guacBaseUrl, adminToken, dataSource, {
@@ -414,7 +434,7 @@ Deno.serve(async (req) => {
       // Get a scoped token by logging in as the scoped user
       let scopedToken: string;
       try {
-        const scopedAuth = await getGuacToken(GUACAMOLE_URL, scopedUsername, scopedPassword);
+        const scopedAuth = await getGuacToken(guacAdminUrl!, scopedUsername, scopedPassword);
         scopedToken = scopedAuth.token;
       } catch (e) {
         await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, scopedUsername);
@@ -423,7 +443,7 @@ Deno.serve(async (req) => {
       }
 
       const clientId = btoa(`${connectionId}\0c\0${dataSource}`);
-      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, clientId, scopedToken);
+      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, guacPublicBase!, clientId, scopedToken);
 
       const { data: session, error: sessionError } = await supabase
         .from("sessions")
@@ -452,6 +472,7 @@ Deno.serve(async (req) => {
         protocol: protocol.toUpperCase(),
         vm_ip: vm.private_ip,
         region: vm.region ?? null,
+        cloud_provider: cloudProvider,
         correlation_id: correlationId,
       };
       timeline.attach({ sessionId: session.id });
@@ -481,6 +502,16 @@ Deno.serve(async (req) => {
         throw new Error("Session has no Guacamole connection metadata");
       }
 
+      let reconnectProvider: GuacCloudProvider = "aws";
+      if (sess.vm_id) {
+        const { data: reconnectVm } = await supabase
+          .from("virtual_machines")
+          .select("provider_account_id, lab_templates(provider)")
+          .eq("id", sess.vm_id).maybeSingle();
+        if (reconnectVm) reconnectProvider = await resolveVmCloudProvider(supabase, reconnectVm);
+      }
+      const dataSource = await bindGuacForProvider(reconnectProvider);
+
       // Rotate password and issue a fresh scoped token
       const newPassword = randomSuffix(32);
       const updRes = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users/${encodeURIComponent(sess.guac_username)}/password?token=${adminToken}`, {
@@ -491,9 +522,9 @@ Deno.serve(async (req) => {
         const txt = await updRes.text();
         throw new Error(`Failed to rotate scoped user password [${updRes.status}]: ${txt}`);
       }
-      const scoped = await getGuacToken(GUACAMOLE_URL, sess.guac_username, newPassword);
+      const scoped = await getGuacToken(guacAdminUrl!, sess.guac_username, newPassword);
       const clientId = btoa(`${sess.guac_connection_id}\0c\0${dataSource}`);
-      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, clientId, scoped.token);
+      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, guacPublicBase!, clientId, scoped.token);
       const { data: prevSess } = await supabase
         .from("sessions").select("reconnects").eq("id", session_id).maybeSingle();
       await supabase.from("sessions")
@@ -503,7 +534,10 @@ Deno.serve(async (req) => {
         reason: String(body.reason ?? "user_reconnect"), correlation_id: correlationId,
       });
 
-      return new Response(JSON.stringify({ session_id, iframe_url: iframeUrl, region: sess.region ?? null, vm_id: sess.vm_id ?? null }), {
+      return new Response(JSON.stringify({
+        session_id, iframe_url: iframeUrl, region: sess.region ?? null, vm_id: sess.vm_id ?? null,
+        cloud_provider: cloudProvider,
+      }), {
         status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
@@ -515,7 +549,7 @@ Deno.serve(async (req) => {
 
       const { data: sess } = await supabase
         .from("sessions")
-        .select("user_id, guac_connection_id, guac_username")
+        .select("user_id, guac_connection_id, guac_username, vm_id")
         .eq("id", session_id).maybeSingle();
       if (!sess) throw new Error("Session not found");
       if (sess.user_id !== user.id && !(await isAdmin())) {
@@ -523,6 +557,16 @@ Deno.serve(async (req) => {
           status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+
+      let endProvider: GuacCloudProvider = "aws";
+      if (sess.vm_id) {
+        const { data: endVm } = await supabase
+          .from("virtual_machines")
+          .select("provider_account_id, lab_templates(provider)")
+          .eq("id", sess.vm_id).maybeSingle();
+        if (endVm) endProvider = await resolveVmCloudProvider(supabase, endVm);
+      }
+      const dataSource = await bindGuacForProvider(endProvider);
 
       const disconnectReason = String(body.reason ?? "user_ended").slice(0, 120);
       await supabase.from("sessions")
@@ -532,8 +576,8 @@ Deno.serve(async (req) => {
         reason: disconnectReason, correlation_id: correlationId,
       });
 
-      if (sess.guac_username) await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, sess.guac_username);
-      if (sess.guac_connection_id) await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, sess.guac_connection_id);
+      if (sess.guac_username) await deleteScopedGuacUser(guacBaseUrl!, adminToken!, dataSource, sess.guac_username);
+      if (sess.guac_connection_id) await deleteGuacConnection(guacBaseUrl!, adminToken!, dataSource, sess.guac_connection_id);
 
       timeline.attach({ sessionId: session_id });
       await timeline.success(SOURCE, "session-end", "Session ended, Guacamole user and connection removed");
