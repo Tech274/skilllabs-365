@@ -151,7 +151,7 @@ Manual pre-go-live checks:
 - [ ] Student sees only `published` labs.
 - [ ] Student launches a lab, VM reaches `running`, Guacamole connects.
 - [ ] Student cancels a provisioning lab — only their VM is affected, another student's VM is untouched (403).
-- [ ] Ending a session removes the Guacamole user + connection and updates VM state.
+- [ ] Ending / reminting **Connect** drops the Guacamole connection only — VM stays `running` (disconnect ≠ deallocate). Remint Connect targets the same VM. Soft-expiry / idle cleanup / intentional `stop-vm` are what deallocate. See `docs/CONNECT_SESSION_LIFECYCLE.md`.
 - [ ] Idle/expired cleanup deallocates or deletes the expected VMs.
 - [ ] Admin pages load: Virtual Machines, Sessions, Session Audit Log, Cost Analytics, AI Status, Cloud Providers.
 - [ ] AI assistant degrades gracefully (503 + retry hint) when the key/quota/provider is unavailable.
