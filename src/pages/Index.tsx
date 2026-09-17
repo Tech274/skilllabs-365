@@ -2,16 +2,14 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { VMStatus } from "@/lib/types";
-import { Server, Users, Activity, Clock, Globe, Zap, Loader2, AlertTriangle, Cpu, Trash2, Play, Monitor, Terminal } from "lucide-react";
+import { Server, Activity, Clock, Globe, Loader2, AlertTriangle, Cpu, Trash2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { readFunctionError } from "@/lib/function-error";
-import { Link, useNavigate } from "react-router-dom";
+import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/hooks/use-toast";
-import { Badge } from "@/components/ui/badge";
-import type { Tables } from "@/integrations/supabase/types";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -36,11 +34,6 @@ import {
 } from "recharts";
 import { Progress } from "@/components/ui/progress";
 import { AiInsightCard } from "@/components/AiInsightCard";
-import { ProvisioningProgress } from "@/components/ProvisioningProgress";
-import { useProvisioning } from "@/hooks/use-provisioning";
-import { estimateLabCost } from "@/lib/azure-pricing";
-import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency"
-import { fetchTokenizedGuacUrl, stashGuacReady } from "@/lib/guac-connect";
 
 interface QuotaItem {
   name: string;
@@ -60,11 +53,8 @@ interface VMRow {
   labName?: string;
 }
 
-type LabTemplate = Tables<"lab_templates">;
 
 const Index = () => {
-  const navigate = useNavigate();
-  const provisioning = useProvisioning();
   const [vms, setVms] = useState<VMRow[]>([]);
   const [vmLoading, setVmLoading] = useState(true);
   const [quotas, setQuotas] = useState<Record<string, QuotaItem[]>>({});
@@ -72,8 +62,6 @@ const Index = () => {
   const [vmStatusCounts, setVmStatusCounts] = useState<Record<string, number>>({});
   const [purging, setPurging] = useState(false);
   const quotaAlertShown = useRef(false);
-  const [labs, setLabs] = useState<LabTemplate[]>([]);
-  const [launchingId, setLaunchingId] = useState<string | null>(null);
 
   const fetchVMs = useCallback(async () => {
     const { data, error } = await supabase
@@ -149,46 +137,10 @@ const Index = () => {
     }
   };
 
-  const handleLaunchLab = async (lab: LabTemplate) => {
-    setLaunchingId(lab.id);
-    try {
-      const { data, error } = await supabase.functions.invoke("provision-lab", {
-        body: { lab_template_id: lab.id },
-        headers: idempotencyHeaders(`provision:${lab.id}`),
-      });
-      if (error || data?.error) throw new Error(await readFunctionError(error, data));
-
-      if (data.status === "running") {
-        // Already running: mint tokenized Guac before navigation (same gate as cold start).
-        try {
-          const guac = await fetchTokenizedGuacUrl(data.vm_id);
-          stashGuacReady(data.vm_id, guac);
-        } catch (gateErr) {
-          console.warn("Guac gate for running VM:", gateErr);
-          // LabSession will retry create-session; do not block navigation forever.
-        }
-        toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
-        navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
-      } else {
-        // Delegate polling to global provisioning context
-        provisioning.startProvisioning(lab.id, lab.name, data.vm_id);
-        toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
-      }
-    } catch (err: any) {
-      // Failed attempt: next click should be a fresh provisioning operation.
-      resetIdempotency(`provision:${lab.id}`);
-      toast({ title: "Launch Failed", description: err.message || "Failed to provision VM.", variant: "destructive" });
-    } finally {
-      setLaunchingId(null);
-    }
-  };
 
   useEffect(() => {
     fetchVMs();
     fetchQuotas();
-    supabase.from("lab_templates").select("*").eq("status", "published").order("name").then(({ data }) => {
-      if (data) setLabs(data);
-    });
 
     const channel = supabase
       .channel("dashboard-vm-changes")
@@ -289,50 +241,6 @@ const Index = () => {
           title="AI Platform Insights"
           buttonLabel="Analyze"
         />
-
-        {/* Quick Launch */}
-        {labs.length > 0 && (
-          <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-border bg-card p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Play className="h-4 w-4 text-primary" />
-              <h3 className="text-sm font-medium text-foreground">Quick Launch</h3>
-              <span className="text-[10px] text-muted-foreground ml-1">Test lab provisioning directly</span>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              {labs.map((lab) => (
-                <Button
-                  key={lab.id}
-                  variant="outline"
-                  size="sm"
-                  className="gap-2"
-                  disabled={launchingId === lab.id}
-                  onClick={() => handleLaunchLab(lab)}
-                >
-                  {launchingId === lab.id ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : lab.protocol.toUpperCase() === "RDP" ? (
-                    <Monitor className="h-3.5 w-3.5" />
-                  ) : (
-                    <Terminal className="h-3.5 w-3.5" />
-                  )}
-                  {lab.name}
-                  <Badge variant="outline" className="text-[9px] font-mono ml-1">{lab.vm_size}</Badge>
-                  <span className="text-[10px] text-muted-foreground font-mono">{estimateLabCost(lab.vm_size, lab.duration)}</span>
-                </Button>
-              ))}
-            </div>
-            {provisioning.isProvisioning && (
-              <ProvisioningProgress
-                startedAt={provisioning.startedAt!}
-                vmId={provisioning.vmId}
-                showTechnicalTrace
-                onCancel={provisioning.cancelProvisioning}
-                cancelling={provisioning.cancelling}
-                className="mt-4"
-              />
-            )}
-          </motion.div>
-        )}
 
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">

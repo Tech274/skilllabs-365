@@ -3,6 +3,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Search,
   RotateCcw,
@@ -13,6 +14,7 @@ import {
   X,
   Server,
   Info,
+  Monitor,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/types";
@@ -80,6 +82,7 @@ function formatDateTime(iso: string | null | undefined): string {
 }
 
 export default function VirtualMachines() {
+  const navigate = useNavigate();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [vms, setVms] = useState<VMRow[]>([]);
@@ -427,7 +430,7 @@ export default function VirtualMachines() {
               <code className="text-[10px]">virtual_machines</code> yet.
             </p>
             <p>
-              Actions: <span className="font-medium text-foreground">Stop / Delete</span> via{" "}
+              Actions: <span className="font-medium text-foreground">Connect / Stop / Delete</span> via{" "}
               <code className="text-[10px]">cleanup-idle-labs</code>. Start / Reset / Heartbeat are not
               shown (no backend support).
             </p>
@@ -631,6 +634,25 @@ export default function VirtualMachines() {
                       </td>
                       <td className="px-5 py-3">
                         <div className="flex gap-1">
+                          {["running", "idle"].includes(vm.status) && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  className="p-1.5 rounded hover:bg-primary/10 text-primary transition-colors disabled:opacity-40"
+                                  title="Connect (admin)"
+                                  disabled={actionLoading === vm.id}
+                                  onClick={() =>
+                                    navigate(
+                                      `/labs/session/${vm.lab_template_id || vm.id}?vm_id=${vm.id}`,
+                                    )
+                                  }
+                                >
+                                  <Monitor className="h-3.5 w-3.5" />
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent>Connect (admin)</TooltipContent>
+                            </Tooltip>
+                          )}
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <button

@@ -41,15 +41,18 @@ export function MetricCard({ title, value, subtitle, icon: Icon, trend, variant 
       initial={{ opacity: 0, y: 12 }}
       animate={{ opacity: 1, y: 0 }}
       className={cn(
-        "rounded-xl border border-border bg-card p-5 transition-all hover:border-primary/30",
+        "rounded-xl border border-border bg-card p-5 transition-all hover:border-primary/30 min-h-[108px]",
         glowMap[variant]
       )}
     >
       <div className="flex items-start justify-between">
-        <div className="space-y-1">
+        <div className="space-y-1 min-h-[3.25rem]">
           <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">{title}</p>
           <p className="text-2xl font-semibold text-foreground font-mono">{value}</p>
-          {subtitle && <p className="text-xs text-muted-foreground">{subtitle}</p>}
+          {/* Always reserve subtitle line so cards with/without subtitle share height */}
+          <p className={cn("text-xs", subtitle ? "text-muted-foreground" : "invisible")}>
+            {subtitle || "\u00A0"}
+          </p>
           {trend && (
             <p className={cn("text-xs font-medium", trend.value > 0 ? "text-success" : "text-destructive")}>
               {trend.value > 0 ? '↑' : '↓'} {Math.abs(trend.value)}% {trend.label}
