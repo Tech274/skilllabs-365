@@ -4,6 +4,11 @@ import { toast } from "@/hooks/use-toast";
 import { readFunctionError } from "@/lib/function-error";
 import { useNavigate } from "react-router-dom";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
+import {
+  learnerConnectHoldCopy,
+  stashGuacReady,
+  waitForRunningAndTokenizedGuac,
+} from "@/lib/guac-connect";
 
 interface ProvisioningState {
   isProvisioning: boolean;
@@ -115,33 +120,29 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
       cancelling: false,
     });
 
-    pollRef.current = setInterval(async () => {
+    // Gate: stay on calm panel until Hub running AND guacamole-proxy returns a tokenized URL.
+    // Do not navigate to /labs/session early (avoids Guacamole native login wall).
+    (async () => {
       try {
-        const { data: statusData } = await supabase.functions.invoke("check-vm-status", {
-          body: { vm_id: vmId },
+        const guac = await waitForRunningAndTokenizedGuac({
+          vmId,
+          timeoutMs: 120_000,
+          pollMs: 4_000,
         });
-        const vmStatus = statusData?.status;
-        if (vmStatus === "running") {
-          clearProvisioning();
-          toast({ title: "✅ VM Ready", description: `${labName} is ready to use.` });
-          sendBrowserNotification("Lab Ready", `${labName} is ready to use.`);
-          playReadyChime();
-          navigate(`/labs/session/${labId}?vm_id=${vmId}`);
-        } else if (vmStatus === "failed" || vmStatus === "terminated" || vmStatus === "deallocated") {
-          clearProvisioning();
-          toast({ title: "Launch Failed", description: `VM entered ${vmStatus} state.`, variant: "destructive" });
-          sendBrowserNotification("Lab Launch Failed", `${labName} failed to provision.`);
-          playFailChime();
-        }
-      } catch {
-        // Ignore poll errors
+        stashGuacReady(vmId, guac);
+        clearProvisioning();
+        toast({ title: "Lab ready", description: `${labName} is ready — opening your secure desktop.` });
+        sendBrowserNotification("Lab Ready", `${labName} is ready to use.`);
+        playReadyChime();
+        navigate(`/labs/session/${labId}?vm_id=${vmId}`);
+      } catch (err) {
+        clearProvisioning();
+        const masked = learnerConnectHoldCopy(err instanceof Error ? err.message : null);
+        toast({ title: "Still getting ready", description: masked, variant: "destructive" });
+        sendBrowserNotification("Lab not ready yet", masked);
+        playFailChime();
       }
-    }, 10000);
-
-    timeoutRef.current = setTimeout(() => {
-      clearProvisioning();
-      toast({ title: "Provisioning Timeout", description: "VM took too long. Please try again.", variant: "destructive" });
-    }, 180000);
+    })();
   }, [clearProvisioning, navigate]);
 
   const cancelProvisioning = useCallback(async () => {
