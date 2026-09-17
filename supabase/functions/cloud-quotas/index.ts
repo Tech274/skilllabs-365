@@ -6,6 +6,9 @@
  *   { action: "sync", provider: "azure"|"aws" }  → refresh that provider
  *
  * Azure: Microsoft.Compute + Microsoft.Network location usages (real).
+ * Sync keeps the **full VM family set** Azure returns (*Family keys) — not BS-only —
+ * plus cores / virtualMachines / Public IPs. Per-family limit/usage/remaining is in
+ * each region row so Ops can pick Launch Lab SKU fallbacks with eyes open.
  * AWS: Service Quotas API not wired — records not_connected stub.
  * Home region: Azure centralindia (NOT southindia); AWS ap-south-1.
  */
@@ -80,22 +83,38 @@ const AZURE_VM_SIZE_META: Record<string, { vcpus: number; familyKey: string; fam
   Standard_B4ms: { vcpus: 4, familyKey: "standardBSFamily", familyLabel: "Standard BS Family vCPUs" },
   Standard_D2s_v3: { vcpus: 2, familyKey: "standardDSv3Family", familyLabel: "Standard DSv3 Family vCPUs" },
   Standard_D4s_v3: { vcpus: 4, familyKey: "standardDSv3Family", familyLabel: "Standard DSv3 Family vCPUs" },
+  Standard_D2s_v5: { vcpus: 2, familyKey: "standardDSv5Family", familyLabel: "Standard DSv5 Family vCPUs" },
+  Standard_D4s_v5: { vcpus: 4, familyKey: "standardDSv5Family", familyLabel: "Standard DSv5 Family vCPUs" },
   Standard_D2as_v5: { vcpus: 2, familyKey: "standardDASv5Family", familyLabel: "Standard DASv5 Family vCPUs" },
   Standard_D4as_v5: { vcpus: 4, familyKey: "standardDASv5Family", familyLabel: "Standard DASv5 Family vCPUs" },
   Standard_E2s_v3: { vcpus: 2, familyKey: "standardESv3Family", familyLabel: "Standard ESv3 Family vCPUs" },
   Standard_F2s_v2: { vcpus: 2, familyKey: "standardFSv2Family", familyLabel: "Standard FSv2 Family vCPUs" },
 };
 
-const COMPUTE_KEYS = new Set([
-  "cores",
+/** Lab-relevant families (always prefer; sync still keeps every *Family Azure returns). */
+const LAB_RELEVANT_FAMILY_KEYS = [
   "standardBSFamily",
   "standardDSv2Family",
   "standardDSv3Family",
+  "standardDSv5Family",
   "standardDASv5Family",
   "standardESv3Family",
   "standardFSv2Family",
-  "virtualMachines",
-]);
+] as const;
+const LAB_RELEVANT_SET = new Set<string>(LAB_RELEVANT_FAMILY_KEYS);
+
+function isAzureFamilyUsageKey(key: string): boolean {
+  return /Family$/i.test(key || "");
+}
+
+/** Persist every *Family Azure returns + cores / virtualMachines (not BS-only). */
+function shouldKeepComputeUsage(key: string, skuFamilyKey?: string): boolean {
+  if (!key) return false;
+  if (key === "cores" || key === "virtualMachines") return true;
+  if (isAzureFamilyUsageKey(key)) return true;
+  if (skuFamilyKey && key === skuFamilyKey) return true;
+  return false;
+}
 
 type Metric = {
   name: string;
@@ -105,11 +124,23 @@ type Metric = {
   unit: string;
 };
 
+type FamilyQuota = {
+  key: string;
+  name: string;
+  currentUsage: number;
+  limit: number;
+  remaining: number;
+  unit: string;
+  labsFit: number;
+  labRelevant: boolean;
+};
+
 type RegionRow = {
   region: string;
   displayName: string;
   isHome: boolean;
   metrics: Metric[];
+  families: FamilyQuota[];
   labsFit: number;
   limitingFactor: string | null;
   syncOk: boolean;
@@ -152,6 +183,31 @@ function deriveSku(vmSizes: string[]) {
 function remaining(m: Metric | undefined): number {
   if (!m || m.limit <= 0) return 0;
   return Math.max(0, m.limit - m.currentUsage);
+}
+
+function buildFamilies(metrics: Metric[], skuVcpus: number): FamilyQuota[] {
+  const vcpus = Math.max(1, skuVcpus);
+  const rows: FamilyQuota[] = [];
+  for (const m of metrics) {
+    if (!isAzureFamilyUsageKey(m.key)) continue;
+    const rem = remaining(m);
+    rows.push({
+      key: m.key,
+      name: m.name || m.key,
+      currentUsage: m.currentUsage,
+      limit: m.limit,
+      remaining: rem,
+      unit: m.unit || "Count",
+      labsFit: m.limit > 0 ? Math.floor(rem / vcpus) : 0,
+      labRelevant: LAB_RELEVANT_SET.has(m.key),
+    });
+  }
+  rows.sort((a, b) => {
+    if (a.labRelevant !== b.labRelevant) return a.labRelevant ? -1 : 1;
+    if (b.remaining !== a.remaining) return b.remaining - a.remaining;
+    return a.key.localeCompare(b.key);
+  });
+  return rows;
 }
 
 function calcLabsFit(metrics: Metric[], sku: { vcpus: number; familyKey: string }) {
@@ -221,6 +277,7 @@ async function fetchAzureRegion(
       displayName: AZURE_REGION_LABELS[region] || region,
       isHome: region === AZURE_HOME,
       metrics: [],
+      families: [],
       labsFit: 0,
       limitingFactor: null,
       syncOk: false,
@@ -232,7 +289,8 @@ async function fetchAzureRegion(
   const metrics: Metric[] = [];
   for (const usage of computeJson.value || []) {
     const key = usage.name?.value || "";
-    if (!COMPUTE_KEYS.has(key) && key !== sku.familyKey) continue;
+    // Full family set from Azure — not a BS-only allowlist
+    if (!shouldKeepComputeUsage(key, sku.familyKey)) continue;
     metrics.push({
       name: usage.name?.localizedValue || key,
       key,
@@ -258,11 +316,13 @@ async function fetchAzureRegion(
   }
 
   const { labsFit, limitingFactor } = calcLabsFit(metrics, sku);
+  const families = buildFamilies(metrics, sku.vcpus);
   return {
     region,
     displayName: AZURE_REGION_LABELS[region] || region,
     isHome: region === AZURE_HOME,
     metrics,
+    families,
     labsFit,
     limitingFactor,
     syncOk: true,
@@ -296,10 +356,14 @@ async function syncAzure(supabase: any) {
   const okCount = regions.filter((r) => r.syncOk).length;
   const failCount = regions.length - okCount;
   const status = okCount > 0 ? "ok" : "fail";
+  const familyKeys = new Set<string>();
+  for (const r of regions) {
+    for (const f of r.families) familyKeys.add(f.key);
+  }
   const reason = failCount === 0
-    ? `Synced ${okCount} regions (home=${AZURE_HOME})`
+    ? `Synced ${okCount} regions (home=${AZURE_HOME}); ${familyKeys.size} VM families`
     : okCount > 0
-    ? `Partial sync: ${okCount} ok, ${failCount} failed`
+    ? `Partial sync: ${okCount} ok, ${failCount} failed; ${familyKeys.size} VM families`
     : `All region syncs failed`;
 
   const snapshot = {
@@ -309,6 +373,15 @@ async function syncAzure(supabase: any) {
     sku,
     account: { id: azure.accountId, displayName: azure.displayName, subscriptionId: azure.subscriptionId },
     regions,
+    familyKeys: [...familyKeys].sort(),
+    labRelevantFamilies: [...LAB_RELEVANT_FAMILY_KEYS],
+    provisionFallbackChain: [
+      "Standard_B2s",
+      "Standard_B2ms",
+      "Standard_D2s_v3",
+      "Standard_D2s_v5",
+      "Standard_D2as_v5",
+    ],
     mode: "live" as const,
   };
 
@@ -355,6 +428,7 @@ async function syncAws(supabase: any) {
     displayName: AWS_REGION_LABELS[region] || region,
     isHome: region === AWS_HOME,
     metrics: [],
+    families: [],
     labsFit: 0,
     limitingFactor: "AWS quotas not connected",
     syncOk: false,
@@ -370,6 +444,7 @@ async function syncAws(supabase: any) {
       ? { id: awsAccount.id, displayName: awsAccount.display_name, defaultRegion: awsAccount.default_region }
       : null,
     regions,
+    familyKeys: [] as string[],
     mode: "stub" as const,
     gap: reason,
   };

@@ -32,11 +32,16 @@ import { useAuth } from "@/hooks/use-auth";
 import {
   AZURE_HOME_REGION,
   AWS_HOME_REGION,
+  PROVISION_FALLBACK_CHAIN,
+  buildFamilyQuotaRows,
   calcLabsFit,
+  collectFamilyKeys,
   findMetric,
   formatSyncAgo,
   rankBankableRegions,
   remaining,
+  zeroCapacityCopy,
+  type FamilyQuotaRow,
   type QuotaMetric,
   type QuotaProvider,
   type RegionQuotaRow,
@@ -94,19 +99,28 @@ const emptyRequestForm = {
 
 function normalizeRegions(raw: RegionQuotaRow[] | undefined, sku: SkuNeeds | undefined): RegionQuotaRow[] {
   if (!raw?.length) return [];
+  const needs = sku || {
+    vmSize: "Standard_B2s",
+    vcpus: 2,
+    familyKey: "standardBSFamily",
+    familyLabel: "Standard BS Family vCPUs",
+    source: "assumption" as const,
+    sampleCount: 0,
+  };
   return raw.map((r) => {
-    if (typeof r.labsFit === "number" && r.limitingFactor !== undefined) return r;
     const metrics = (r.metrics || []) as QuotaMetric[];
-    const needs = sku || {
-      vmSize: "Standard_B2s",
-      vcpus: 2,
-      familyKey: "standardBSFamily",
-      familyLabel: "Standard BS Family vCPUs",
-      source: "assumption" as const,
-      sampleCount: 0,
-    };
-    const { labsFit, limitingFactor } = calcLabsFit(metrics, needs);
-    return { ...r, metrics, labsFit, limitingFactor };
+    let labsFit = r.labsFit;
+    let limitingFactor = r.limitingFactor;
+    if (typeof labsFit !== "number" || limitingFactor === undefined) {
+      const calc = calcLabsFit(metrics, needs);
+      labsFit = calc.labsFit;
+      limitingFactor = calc.limitingFactor;
+    }
+    const families: FamilyQuotaRow[] =
+      r.families && r.families.length > 0
+        ? r.families
+        : buildFamilyQuotaRows(metrics, needs.vcpus);
+    return { ...r, metrics, families, labsFit, limitingFactor };
   });
 }
 
@@ -124,6 +138,8 @@ export default function AdminCloudQuotas() {
   const [saving, setSaving] = useState(false);
   const [form, setForm] = useState(emptyRequestForm);
   const [statusFilter, setStatusFilter] = useState<"all" | "draft" | "submitted" | "done">("all");
+  const [regionFilter, setRegionFilter] = useState<string>("all");
+  const [familyFilter, setFamilyFilter] = useState<string>("all");
 
   const callQuotas = async (body: Record<string, unknown>) => {
     const { data, error } = await supabase.functions.invoke("cloud-quotas", { body });
@@ -181,6 +197,48 @@ export default function AdminCloudQuotas() {
   const top5 = useMemo(() => rankBankableRegions(regions, 5), [regions]);
   const homeRegion = provider === "azure" ? AZURE_HOME_REGION : AWS_HOME_REGION;
   const isStub = active?.snapshot?.mode === "stub" || active?.last_status === "not_connected";
+  const familyKeys = useMemo(() => collectFamilyKeys(regions), [regions]);
+  const filteredRegions = useMemo(() => {
+    return regions.filter((r) => {
+      if (regionFilter !== "all" && r.region !== regionFilter) return false;
+      if (familyFilter !== "all") {
+        const has = (r.families || []).some((f) => f.key === familyFilter)
+          || (r.metrics || []).some((m) => m.key === familyFilter);
+        if (!has) return false;
+      }
+      return true;
+    });
+  }, [regions, regionFilter, familyFilter]);
+  const familyTableRows = useMemo(() => {
+    const rows: Array<{
+      region: string;
+      displayName: string;
+      isHome: boolean;
+      family: FamilyQuotaRow;
+    }> = [];
+    for (const r of filteredRegions) {
+      for (const f of r.families || []) {
+        if (familyFilter !== "all" && f.key !== familyFilter) continue;
+        rows.push({ region: r.region, displayName: r.displayName, isHome: r.isHome, family: f });
+      }
+    }
+    rows.sort((a, b) => {
+      if (a.isHome !== b.isHome) return a.isHome ? -1 : 1;
+      if (a.family.labRelevant !== b.family.labRelevant) return a.family.labRelevant ? -1 : 1;
+      if (b.family.remaining !== a.family.remaining) return b.family.remaining - a.family.remaining;
+      return a.family.key.localeCompare(b.family.key) || a.region.localeCompare(b.region);
+    });
+    return rows;
+  }, [filteredRegions, familyFilter]);
+  const zeroHomeCopy = useMemo(() => {
+    const home = regions.find((r) => r.isHome) || regions.find((r) => r.region === homeRegion);
+    if (!home) return null;
+    return zeroCapacityCopy({
+      labsFit: home.labsFit,
+      limitingFactor: home.limitingFactor,
+      familyLabel: sku?.familyLabel || sku?.familyKey,
+    });
+  }, [regions, homeRegion, sku]);
 
   const filteredRequests = useMemo(() => {
     return requests.filter((r) => {
@@ -348,7 +406,11 @@ export default function AdminCloudQuotas() {
           </Button>
         </div>
 
-        <Tabs value={provider} onValueChange={(v) => setProvider(v as QuotaProvider)}>
+        <Tabs value={provider} onValueChange={(v) => {
+            setProvider(v as QuotaProvider);
+            setRegionFilter("all");
+            setFamilyFilter("all");
+          }}>
           <TabsList>
             <TabsTrigger value="azure" className="gap-2">
               <Cloud className="h-3.5 w-3.5" /> Azure
@@ -458,8 +520,37 @@ export default function AdminCloudQuotas() {
             ) : (
               <p className="text-sm text-muted-foreground">Sync to populate SKU needs.</p>
             )}
+            <div className="mt-4 pt-3 border-t border-border">
+              <p className="text-[11px] uppercase tracking-wider text-muted-foreground mb-2">
+                Launch Lab / provision fallback chain
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {PROVISION_FALLBACK_CHAIN.map((s) => (
+                  <Badge
+                    key={s.vmSize}
+                    variant={sku?.familyKey === s.familyKey ? "default" : "outline"}
+                    className="font-mono text-[10px]"
+                    title={s.familyLabel}
+                  >
+                    {s.vmSize} → {s.familyKey}
+                  </Badge>
+                ))}
+              </div>
+            </div>
           </CardContent>
         </Card>
+
+        {zeroHomeCopy && provider === "azure" && (
+          <Card className="border-destructive/40 bg-destructive/5">
+            <CardContent className="py-4 flex gap-3 items-start">
+              <AlertTriangle className="h-4 w-4 text-destructive mt-0.5 shrink-0" />
+              <div className="text-sm space-y-1">
+                <p className="font-medium text-foreground">Home region capacity is zero</p>
+                <p className="text-muted-foreground text-xs leading-relaxed">{zeroHomeCopy}</p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {isStub && (
           <Card className="border-warning/40 bg-warning/5">
@@ -515,10 +606,173 @@ export default function AdminCloudQuotas() {
                     </div>
                     <p className="text-sm font-medium">{r.displayName}</p>
                     <p className="text-[11px] font-mono text-muted-foreground">{r.region}</p>
-                    <p className="text-2xl font-semibold tabular-nums">{r.labsFit}</p>
-                    <p className="text-[10px] text-muted-foreground">labs fit · limit: {r.limitingFactor || "—"}</p>
+                    <p className={cn("text-2xl font-semibold tabular-nums", r.labsFit <= 0 && "text-destructive")}>{r.labsFit}</p>
+                    <p className="text-[10px] text-muted-foreground">
+                      labs fit · limit: {r.limitingFactor || "—"}
+                      {r.labsFit <= 0 ? " · no capacity" : ""}
+                    </p>
                   </div>
                 ))}
+              </div>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Region + family filters */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base">Region & family filters</CardTitle>
+            <CardDescription>
+              Narrow family quotas and the region table. Home stays{" "}
+              <span className="font-mono">{homeRegion}</span>.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-wrap gap-3">
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">Region</Label>
+              <Select value={regionFilter} onValueChange={setRegionFilter}>
+                <SelectTrigger className="w-[200px] h-8 text-xs">
+                  <SelectValue placeholder="All regions" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All regions</SelectItem>
+                  {[...regions]
+                    .sort((a, b) => {
+                      if (a.isHome !== b.isHome) return a.isHome ? -1 : 1;
+                      return a.region.localeCompare(b.region);
+                    })
+                    .map((r) => (
+                      <SelectItem key={r.region} value={r.region}>
+                        {r.displayName}{r.isHome ? " (home)" : ""}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs text-muted-foreground">VM family</Label>
+              <Select value={familyFilter} onValueChange={setFamilyFilter}>
+                <SelectTrigger className="w-[260px] h-8 text-xs font-mono">
+                  <SelectValue placeholder="All families" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All families</SelectItem>
+                  {familyKeys.map((k) => (
+                    <SelectItem key={k} value={k} className="font-mono text-xs">
+                      {k}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {(regionFilter !== "all" || familyFilter !== "all") && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="self-end h-8"
+                onClick={() => {
+                  setRegionFilter("all");
+                  setFamilyFilter("all");
+                }}
+              >
+                Clear filters
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Per-family capacity — full Azure family set */}
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="text-base flex items-center gap-2">
+              <Cpu className="h-4 w-4 text-primary" /> VM family quotas
+            </CardTitle>
+            <CardDescription>
+              Full Azure Compute *Family set from sync (not BS-only). Limit / used / remaining +
+              family-only labsFit at SKU vCPU. Lab-relevant families (BS, DSv3, DSv5, DASv5, …) listed first.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {familyTableRows.length === 0 ? (
+              <EmptyState
+                icon={Cpu}
+                title="No family quotas"
+                description={
+                  provider === "azure"
+                    ? "Run Sync now to pull full Azure Compute family usages for bankable regions."
+                    : "AWS family quotas are not connected."
+                }
+              />
+            ) : (
+              <div className="overflow-x-auto rounded-lg border border-border">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Region</TableHead>
+                      <TableHead>Family</TableHead>
+                      <TableHead>Used / Limit</TableHead>
+                      <TableHead className="text-right">Remaining</TableHead>
+                      <TableHead className="text-right">Labs fit</TableHead>
+                      <TableHead>Notes</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {familyTableRows.map(({ region, displayName, isHome, family: f }) => {
+                      const pct = f.limit > 0 ? Math.round((f.currentUsage / f.limit) * 100) : 0;
+                      const zeroNote = zeroCapacityCopy({
+                        labsFit: f.labsFit,
+                        remaining: f.remaining,
+                        familyLabel: f.name || f.key,
+                      });
+                      return (
+                        <TableRow key={`${region}:${f.key}`} className={cn(isHome && "bg-primary/5")}>
+                          <TableCell>
+                            <div className="flex items-center gap-2">
+                              <div>
+                                <p className="text-sm font-medium">{displayName}</p>
+                                <p className="text-[11px] font-mono text-muted-foreground">{region}</p>
+                              </div>
+                              {isHome && <Badge variant="outline" className="text-[10px]">Home</Badge>}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="space-y-1">
+                              <p className="font-mono text-xs">{f.key}</p>
+                              <p className="text-[11px] text-muted-foreground">{f.name}</p>
+                              {f.labRelevant && (
+                                <Badge variant="secondary" className="text-[10px]">Lab relevant</Badge>
+                              )}
+                            </div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="space-y-1 min-w-[120px]">
+                              <div className="flex justify-between text-[11px] font-mono">
+                                <span>{f.currentUsage}/{f.limit}</span>
+                                <span className="text-muted-foreground">{pct}%</span>
+                              </div>
+                              <Progress value={pct} className="h-1.5" />
+                            </div>
+                          </TableCell>
+                          <TableCell className={cn(
+                            "text-right font-mono tabular-nums font-semibold",
+                            f.remaining <= 0 && "text-destructive",
+                          )}>
+                            {f.remaining}
+                          </TableCell>
+                          <TableCell className={cn(
+                            "text-right font-semibold tabular-nums",
+                            f.labsFit <= 0 && "text-destructive",
+                          )}>
+                            {f.labsFit}
+                          </TableCell>
+                          <TableCell className="text-[11px] text-muted-foreground max-w-[280px]">
+                            {zeroNote || (f.labRelevant ? "In provision fallback set" : "—")}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })}
+                  </TableBody>
+                </Table>
               </div>
             )}
           </CardContent>
@@ -529,15 +783,16 @@ export default function AdminCloudQuotas() {
           <CardHeader className="pb-2">
             <CardTitle className="text-base">Full region table</CardTitle>
             <CardDescription>
-              Used / limit / remaining + how many lab VMs fit for the SKU basis above.
+              Used / limit / remaining for the SKU-basis family + cores + public IP, and how many lab VMs fit.
+              Filtered by region/family selectors above.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {regions.length === 0 ? (
+            {filteredRegions.length === 0 ? (
               <EmptyState
                 icon={Server}
                 title="No region snapshot"
-                description="Sync this provider to populate the region table."
+                description="Sync this provider to populate the region table, or clear filters."
               />
             ) : (
               <div className="overflow-x-auto rounded-lg border border-border">
@@ -554,13 +809,15 @@ export default function AdminCloudQuotas() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {[...regions]
+                    {[...filteredRegions]
                       .sort((a, b) => {
                         if (a.isHome !== b.isHome) return a.isHome ? -1 : 1;
                         return b.labsFit - a.labsFit;
                       })
                       .map((r) => {
-                        const familyKey = sku?.familyKey || "standardBSFamily";
+                        const familyKey = familyFilter !== "all"
+                          ? familyFilter
+                          : (sku?.familyKey || "standardBSFamily");
                         const family = findMetric(r.metrics || [], familyKey);
                         const cores = findMetric(r.metrics || [], "cores");
                         const pip = findMetric(r.metrics || [], "PublicIPAddresses")
@@ -569,11 +826,14 @@ export default function AdminCloudQuotas() {
                           m && m.limit > 0 ? Math.round((m.currentUsage / m.limit) * 100) : 0;
                         const cell = (m?: QuotaMetric) => {
                           if (!m) return <span className="text-muted-foreground">—</span>;
+                          const rem = remaining(m);
                           return (
                             <div className="space-y-1 min-w-[120px]">
                               <div className="flex justify-between text-[11px] font-mono">
                                 <span>{m.currentUsage}/{m.limit}</span>
-                                <span className="text-muted-foreground">rem {remaining(m)}</span>
+                                <span className={cn("text-muted-foreground", rem <= 0 && "text-destructive")}>
+                                  rem {rem}
+                                </span>
                               </div>
                               <Progress value={pct(m)} className="h-1.5" />
                             </div>
@@ -593,7 +853,17 @@ export default function AdminCloudQuotas() {
                             <TableCell>{cell(family)}</TableCell>
                             <TableCell>{cell(cores)}</TableCell>
                             <TableCell>{cell(pip)}</TableCell>
-                            <TableCell className="text-right font-semibold tabular-nums">{r.labsFit}</TableCell>
+                            <TableCell className={cn(
+                              "text-right font-semibold tabular-nums",
+                              r.labsFit <= 0 && "text-destructive",
+                            )}>
+                              {r.labsFit}
+                              {r.labsFit <= 0 && (
+                                <p className="text-[10px] font-normal text-destructive/90 max-w-[160px] ml-auto leading-snug mt-1">
+                                  No capacity for SKU basis
+                                </p>
+                              )}
+                            </TableCell>
                             <TableCell className="text-xs text-muted-foreground max-w-[140px] truncate">
                               {r.limitingFactor || "—"}
                             </TableCell>
