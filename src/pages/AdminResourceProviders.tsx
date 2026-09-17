@@ -54,7 +54,12 @@ const CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder?: 
     { key: "role_definition_id", label: "Role Definition ID (optional)", placeholder: "Reader by default" },
   ],
   aws: [
-    { key: "default_role_arn", label: "Default Role ARN", placeholder: "arn:aws:iam::123456789012:role/LabAccess" },
+    { key: "vpc_id", label: "VPC ID (optional — auto-filled from subnet)", placeholder: "vpc-…" },
+    { key: "security_group_id", label: "Security Group ID", placeholder: "sg-…" },
+    { key: "ami_id", label: "AMI ID (optional — defaults to Ubuntu 22.04 via SSM)", placeholder: "ami-…" },
+    { key: "key_name", label: "EC2 Key Pair name (optional)", placeholder: "skilllabs-lab" },
+    { key: "vm_admin_username", label: "VM Admin Username (optional)", placeholder: "ubuntu" },
+    { key: "default_role_arn", label: "Default Role ARN (console federation)", placeholder: "arn:aws:iam::123456789012:role/LabAccess" },
     { key: "external_id", label: "External ID (optional)" },
   ],
   gcp: [
@@ -125,13 +130,17 @@ export default function AdminResourceProviders() {
     try {
       const data = await call({ action: "list_subnets", id: form.id });
       const options: SubnetOption[] = [];
+      const vpcBySubnet: Record<string, string> = {};
       for (const v of data.vnets ?? []) {
         for (const sn of v.subnets ?? []) {
           options.push({ id: sn.id, label: `${v.name} / ${sn.name} — ${sn.addressPrefix ?? "?"} (${v.location})` });
+          if (v.id) vpcBySubnet[sn.id] = String(v.id);
+          if (sn.vpc_id) vpcBySubnet[sn.id] = String(sn.vpc_id);
         }
       }
       setSubnets(options);
-      if (!options.length) toast({ title: "No subnets found", description: "Create a virtual network in this subscription first.", variant: "destructive" });
+      setForm((prev) => ({ ...prev, config: { ...prev.config, __vpc_by_subnet: JSON.stringify(vpcBySubnet) } }));
+      if (!options.length) toast({ title: "No subnets found", description: "Create a virtual network / VPC in this account first.", variant: "destructive" });
     } catch (e) {
       toast({ title: "Could not read subnets", description: (e as Error).message, variant: "destructive" });
     }
@@ -158,6 +167,17 @@ export default function AdminResourceProviders() {
         errors.key_vault_uri = "Key Vault URI is required for Key Vault auth mode.";
       }
     }
+    if (form.provider === "aws") {
+      const cfg = form.config;
+      const existing = accounts.find((a) => a.id === form.id);
+      const credSet = (k: string) => Boolean(form.credentials[k]?.trim() || existing?.credential_keys?.[k]);
+      if (!credSet("access_key_id")) errors.access_key_id = "Access Key ID is required.";
+      if (!credSet("secret_access_key")) errors.secret_access_key = "Secret Access Key is required.";
+      if (!form.default_region?.trim()) errors.default_region = "Default region is required (e.g. ap-south-1).";
+      if (!cfg.subnet_id?.trim()) errors.subnet_id = "Subnet ID is required before labs can launch. Use “Load subnets”.";
+      if (!cfg.security_group_id?.trim()) errors.security_group_id = "Security Group ID is required for lab VMs.";
+      if (!credSet("vm_admin_password")) errors.vm_admin_password = "VM Admin Password is required for lab user-data bootstrap.";
+    }
     setFormErrors(errors);
     return Object.keys(errors).length === 0;
   };
@@ -183,7 +203,7 @@ export default function AdminResourceProviders() {
 
   const save = async () => {
     if (!validate()) {
-      toast({ title: "Fix the highlighted fields", description: "Azure lab provisioning needs these values.", variant: "destructive" });
+      toast({ title: "Fix the highlighted fields", description: "Lab provisioning needs these values.", variant: "destructive" });
       return;
     }
     setSaving(true);
@@ -197,7 +217,7 @@ export default function AdminResourceProviders() {
         default_region: form.default_region,
         status: form.status,
         is_default: form.is_default,
-        config: form.config,
+        config: Object.fromEntries(Object.entries(form.config).filter(([k]) => k !== "__vpc_by_subnet")),
         credentials: form.credentials,
       });
       toast({ title: form.id ? "Provider updated" : "Provider added" });
@@ -478,55 +498,72 @@ export default function AdminResourceProviders() {
                 <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Configuration</p>
 
                 {form.provider === "azure" && (
-                  <>
-                    <div className="space-y-1.5">
-                      <Label className="text-xs">VM access mode</Label>
+                  <div className="space-y-1.5">
+                    <Label className="text-xs">VM access mode</Label>
+                    <Select
+                      value={form.config.vm_auth_mode || "password"}
+                      onValueChange={(v) => setForm({ ...form, config: { ...form.config, vm_auth_mode: v } })}
+                    >
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="password">Stored VM admin password</SelectItem>
+                        <SelectItem value="key_vault">Key Vault secret</SelectItem>
+                        <SelectItem value="managed_identity">Managed identity (no stored password)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-[11px] text-muted-foreground">
+                      Managed identity attaches an identity to each lab VM and uses an ephemeral bootstrap
+                      credential that is never stored. Key Vault reads the password at provision time.
+                    </p>
+                  </div>
+                )}
+
+                {(form.provider === "azure" || form.provider === "aws") && (
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-xs">Subnet</Label>
+                      <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={loadSubnets} disabled={loadingSubnets || !form.id}>
+                        {loadingSubnets ? <Loader2 className="h-3 w-3 animate-spin" /> : <PlugZap className="h-3 w-3" />}
+                        Load subnets
+                      </Button>
+                    </div>
+                    {subnets.length > 0 ? (
                       <Select
-                        value={form.config.vm_auth_mode || "password"}
-                        onValueChange={(v) => setForm({ ...form, config: { ...form.config, vm_auth_mode: v } })}
+                        value={form.config.subnet_id ?? ""}
+                        onValueChange={(v) => {
+                          let vpcId = form.config.vpc_id ?? "";
+                          try {
+                            const map = JSON.parse(form.config.__vpc_by_subnet || "{}") as Record<string, string>;
+                            if (map[v]) vpcId = map[v];
+                          } catch { /* ignore */ }
+                          setForm({
+                            ...form,
+                            config: {
+                              ...form.config,
+                              subnet_id: v,
+                              ...(form.provider === "aws" ? { vpc_id: vpcId } : {}),
+                            },
+                          });
+                        }}
                       >
-                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectTrigger><SelectValue placeholder={form.provider === "aws" ? "Select a VPC / subnet" : "Select a VNet / subnet"} /></SelectTrigger>
                         <SelectContent>
-                          <SelectItem value="password">Stored VM admin password</SelectItem>
-                          <SelectItem value="key_vault">Key Vault secret</SelectItem>
-                          <SelectItem value="managed_identity">Managed identity (no stored password)</SelectItem>
+                          {subnets.map((sn) => (
+                            <SelectItem key={sn.id} value={sn.id}>{sn.label}</SelectItem>
+                          ))}
                         </SelectContent>
                       </Select>
-                      <p className="text-[11px] text-muted-foreground">
-                        Managed identity attaches an identity to each lab VM and uses an ephemeral bootstrap
-                        credential that is never stored. Key Vault reads the password at provision time.
-                      </p>
-                    </div>
-
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <Label className="text-xs">Subnet</Label>
-                        <Button size="sm" variant="outline" className="h-7 gap-1 text-[11px]" onClick={loadSubnets} disabled={loadingSubnets}>
-                          {loadingSubnets ? <Loader2 className="h-3 w-3 animate-spin" /> : <PlugZap className="h-3 w-3" />}
-                          Load subnets
-                        </Button>
-                      </div>
-                      {subnets.length > 0 ? (
-                        <Select
-                          value={form.config.subnet_id ?? ""}
-                          onValueChange={(v) => setForm({ ...form, config: { ...form.config, subnet_id: v } })}
-                        >
-                          <SelectTrigger><SelectValue placeholder="Select a VNet / subnet" /></SelectTrigger>
-                          <SelectContent>
-                            {subnets.map((sn) => (
-                              <SelectItem key={sn.id} value={sn.id}>{sn.label}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      ) : null}
-                      <Input
-                        value={form.config.subnet_id ?? ""}
-                        placeholder="/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>"
-                        onChange={(e) => setForm({ ...form, config: { ...form.config, subnet_id: e.target.value } })}
-                      />
-                      {formErrors.subnet_id && <p className="text-[11px] text-destructive">{formErrors.subnet_id}</p>}
-                    </div>
-                  </>
+                    ) : null}
+                    <Input
+                      value={form.config.subnet_id ?? ""}
+                      placeholder={form.provider === "aws"
+                        ? "subnet-…"
+                        : "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Network/virtualNetworks/<vnet>/subnets/<subnet>"}
+                      onChange={(e) => setForm({ ...form, config: { ...form.config, subnet_id: e.target.value } })}
+                    />
+                    {formErrors.subnet_id && <p className="text-[11px] text-destructive">{formErrors.subnet_id}</p>}
+                    {formErrors.default_region && <p className="text-[11px] text-destructive">{formErrors.default_region}</p>}
+                  </div>
                 )}
 
                 {providerConfig.map((f) => (

@@ -6,6 +6,7 @@ import {
   reconcileProvisioningAgainstAzure,
   applyPromoteToRunning,
 } from "../_shared/azure-reconcile.ts";
+import { resolveAwsRuntime, describeAwsInstance } from "../_shared/cloud-providers/aws-runtime.ts";
 
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
@@ -21,7 +22,6 @@ Deno.serve(async (req) => {
     const { vm_id } = await req.json();
     if (!vm_id) return errorResponse("vm_id is required", 400);
 
-    // Get VM record
     const { data: vm } = await supabase.from("virtual_machines").select("*").eq("id", vm_id).maybeSingle();
     if (!vm) return errorResponse("VM not found", 404);
 
@@ -36,8 +36,39 @@ Deno.serve(async (req) => {
       return jsonResponse({ status: "provisioning" });
     }
 
-    // Credentials come from the Resource Providers registry that created this VM.
     const admin = serviceClient();
+
+    // Resolve which cloud owns this VM via its provider account.
+    let provider = "azure";
+    if (vm.provider_account_id) {
+      const { data: acct } = await admin
+        .from("cloud_provider_accounts")
+        .select("provider")
+        .eq("id", vm.provider_account_id)
+        .maybeSingle();
+      if (acct?.provider) provider = String(acct.provider);
+    }
+
+    if (provider === "aws") {
+      const aws = await resolveAwsRuntime(admin, vm.provider_account_id);
+      // Prefer the VM's stored region when present
+      if (vm.region) aws.defaultRegion = String(vm.region);
+      const desc = await describeAwsInstance(aws, vm.azure_vm_id);
+      if (desc.state === "running") {
+        await applyPromoteToRunning(supabase, vm_id, desc.privateIp);
+        return jsonResponse({ status: "running", private_ip: desc.privateIp });
+      }
+      if (desc.state === "terminated" || desc.state === "shutting-down") {
+        await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm_id);
+        return jsonResponse({ status: "failed" });
+      }
+      if (desc.state === "stopped" || desc.state === "stopping") {
+        await supabase.from("virtual_machines").update({ status: "stopped" }).eq("id", vm_id);
+        return jsonResponse({ status: "stopped" });
+      }
+      return jsonResponse({ status: "provisioning" });
+    }
+
     const azure = await resolveAzureRuntime(admin, vm.provider_account_id);
     const azureToken = await getAzureToken(azure.tenantId, azure.clientId, azure.clientSecret);
 

@@ -1,5 +1,5 @@
 /**
- * Admin Cloud Quotas — Azure live sync + AWS stub.
+ * Admin Cloud Quotas — Azure live sync + AWS Service Quotas live sync.
  *
  * Actions (JSON body):
  *   { action: "status" }                         → sync state + snapshots for azure & aws
@@ -9,11 +9,19 @@
  * Sync keeps the **full VM family set** Azure returns (*Family keys) — not BS-only —
  * plus cores / virtualMachines / Public IPs. Per-family limit/usage/remaining is in
  * each region row so Ops can pick Launch Lab SKU fallbacks with eyes open.
- * AWS: Service Quotas API not wired — records not_connected stub.
+ * AWS: Service Quotas (EC2 On-Demand vCPU + Elastic IP) via Resource Provider credentials.
  * Home region: Azure centralindia (NOT southindia); AWS ap-south-1.
  */
 import { corsHeadersFor, requireAdmin } from "../_shared/auth.ts";
 import { resolveAzureRuntime, ProviderConfigError } from "../_shared/cloud-providers/azure-runtime.ts";
+import {
+  resolveAwsRuntime,
+  getServiceQuota,
+  countRunningVcpus,
+  countElasticIps,
+  awsInstanceTypeVcpus,
+  mapToAwsInstanceType,
+} from "../_shared/cloud-providers/aws-runtime.ts";
 
 type Provider = "azure" | "aws";
 
@@ -409,44 +417,140 @@ async function syncAzure(supabase: any) {
 
 async function syncAws(supabase: any) {
   const sku = await loadSkuNeeds(supabase);
+  const aws = await resolveAwsRuntime(supabase, null);
   const now = new Date().toISOString();
-  const reason =
-    "AWS Service Quotas API not wired in Hub v1. Resource Providers can store AWS credentials for STS federation, but quota sync is stubbed. Configure when Service Quotas (ec2) is connected.";
 
-  // Optional: check whether an active AWS account exists (still stub quotas)
-  const { data: awsAccount } = await supabase
-    .from("cloud_provider_accounts")
-    .select("id, display_name, status, default_region")
-    .eq("provider", "aws")
-    .eq("status", "active")
-    .order("is_default", { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  // Prefer AWS instance-type vCPU basis when published templates look like EC2 types.
+  const instanceType = mapToAwsInstanceType(sku.vmSize);
+  const skuVcpus = sku.vmSize && /^[a-z][0-9a-z]*\./i.test(sku.vmSize)
+    ? awsInstanceTypeVcpus(sku.vmSize)
+    : Math.max(1, sku.vcpus || awsInstanceTypeVcpus(instanceType));
 
-  const regions: RegionRow[] = AWS_REGIONS.map((region) => ({
-    region,
-    displayName: AWS_REGION_LABELS[region] || region,
-    isHome: region === AWS_HOME,
-    metrics: [],
-    families: [],
-    labsFit: 0,
-    limitingFactor: "AWS quotas not connected",
-    syncOk: false,
-    syncError: "not_connected",
-  }));
+  // L-1216C47A = Running On-Demand Standard (A,C,D,H,I,M,R,T,Z) instances (vCPU)
+  // L-0263D0A3 = EC2-VPC Elastic IPs
+  const ON_DEMAND_VCPU = "L-1216C47A";
+  const ELASTIC_IP = "L-0263D0A3";
+
+  const regions: RegionRow[] = [];
+  for (let i = 0; i < AWS_REGIONS.length; i += 2) {
+    const batch = AWS_REGIONS.slice(i, i + 2);
+    const rows = await Promise.all(batch.map(async (region) => {
+      try {
+        const [vcpuQuota, eipQuota, vcpuUsage, eipUsage] = await Promise.all([
+          getServiceQuota(aws, region, "ec2", ON_DEMAND_VCPU),
+          getServiceQuota(aws, region, "ec2", ELASTIC_IP),
+          countRunningVcpus({ ...aws, defaultRegion: region }, region),
+          countElasticIps({ ...aws, defaultRegion: region }, region),
+        ]);
+
+        if (!vcpuQuota) {
+          return {
+            region,
+            displayName: AWS_REGION_LABELS[region] || region,
+            isHome: region === AWS_HOME,
+            metrics: [],
+            families: [],
+            labsFit: 0,
+            limitingFactor: null,
+            syncOk: false,
+            syncError: "Service Quotas GetServiceQuota returned no On-Demand vCPU quota (check IAM servicequotas:GetServiceQuota)",
+          } satisfies RegionRow;
+        }
+
+        const metrics: Metric[] = [
+          {
+            name: vcpuQuota.name || "Running On-Demand Standard instances (vCPU)",
+            key: "onDemandStandardVcpus",
+            currentUsage: vcpuUsage,
+            limit: vcpuQuota.value,
+            unit: vcpuQuota.unit || "None",
+          },
+        ];
+        if (eipQuota) {
+          metrics.push({
+            name: eipQuota.name || "Elastic IPs",
+            key: "elasticIps",
+            currentUsage: eipUsage,
+            limit: eipQuota.value,
+            unit: eipQuota.unit || "None",
+          });
+        }
+
+        // Map into Azure-shaped family key so Admin UI family tables still work.
+        const familyKey = "onDemandStandardVcpus";
+        const families: FamilyQuota[] = [{
+          key: familyKey,
+          name: "On-Demand Standard (vCPU)",
+          currentUsage: vcpuUsage,
+          limit: vcpuQuota.value,
+          remaining: Math.max(0, vcpuQuota.value - vcpuUsage),
+          unit: "None",
+          labsFit: vcpuQuota.value > 0 ? Math.floor(Math.max(0, vcpuQuota.value - vcpuUsage) / skuVcpus) : 0,
+          labRelevant: true,
+        }];
+
+        const candidates: { label: string; n: number }[] = [
+          { label: families[0].name, n: families[0].labsFit },
+        ];
+        const eip = metrics.find((m) => m.key === "elasticIps");
+        if (eip && eip.limit > 0) {
+          candidates.push({ label: eip.name, n: Math.max(0, eip.limit - eip.currentUsage) });
+        }
+        candidates.sort((a, b) => a.n - b.n);
+
+        return {
+          region,
+          displayName: AWS_REGION_LABELS[region] || region,
+          isHome: region === AWS_HOME,
+          metrics,
+          families,
+          labsFit: Math.max(0, candidates[0].n),
+          limitingFactor: candidates[0].label,
+          syncOk: true,
+          syncError: null,
+        } satisfies RegionRow;
+      } catch (e) {
+        return {
+          region,
+          displayName: AWS_REGION_LABELS[region] || region,
+          isHome: region === AWS_HOME,
+          metrics: [],
+          families: [],
+          labsFit: 0,
+          limitingFactor: null,
+          syncOk: false,
+          syncError: e instanceof Error ? e.message.slice(0, 240) : "AWS region sync failed",
+        } satisfies RegionRow;
+      }
+    }));
+    regions.push(...rows);
+  }
+
+  const okCount = regions.filter((r) => r.syncOk).length;
+  const failCount = regions.length - okCount;
+  const status = okCount > 0 ? "ok" : "fail";
+  const reason = failCount === 0
+    ? `Synced ${okCount} regions (home=${AWS_HOME}); On-Demand vCPU + Elastic IP`
+    : okCount > 0
+    ? `Partial sync: ${okCount} ok, ${failCount} failed`
+    : `All AWS region syncs failed`;
 
   const snapshot = {
     provider: "aws" as const,
     homeRegion: AWS_HOME,
     syncedAt: now,
-    sku,
-    account: awsAccount
-      ? { id: awsAccount.id, displayName: awsAccount.display_name, defaultRegion: awsAccount.default_region }
-      : null,
+    sku: { ...sku, awsInstanceType: instanceType, vcpus: skuVcpus },
+    account: {
+      id: aws.accountId,
+      displayName: aws.displayName,
+      defaultRegion: aws.defaultRegion,
+      awsAccountId: aws.awsAccountId,
+    },
     regions,
-    familyKeys: [] as string[],
-    mode: "stub" as const,
-    gap: reason,
+    familyKeys: ["onDemandStandardVcpus"],
+    labRelevantFamilies: ["onDemandStandardVcpus"],
+    provisionFallbackChain: ["t3.small", "t3.medium", "t3.large"],
+    mode: "live" as const,
   };
 
   const { data: existing } = await supabase
@@ -457,20 +561,17 @@ async function syncAws(supabase: any) {
 
   await supabase.from("cloud_quota_sync_state").upsert({
     provider: "aws",
-    last_status: "not_connected",
+    last_status: status,
     last_reason: reason,
-    last_ok_at: existing?.last_ok_at ?? null,
-    last_fail_at: now,
+    last_ok_at: status === "ok" ? now : existing?.last_ok_at ?? null,
+    last_fail_at: status === "fail" ? now : existing?.last_fail_at ?? null,
     last_synced_at: now,
     home_region: AWS_HOME,
     snapshot,
     updated_at: now,
   });
 
-  return {
-    sync: { provider: "aws", status: "not_connected", reason, syncedAt: now },
-    snapshot,
-  };
+  return { sync: { provider: "aws", status, reason, syncedAt: now }, snapshot };
 }
 
 async function loadStatus(supabase: any) {
@@ -490,10 +591,8 @@ async function loadStatus(supabase: any) {
     if (!byProvider[p]) {
       byProvider[p] = {
         provider: p,
-        last_status: p === "aws" ? "not_connected" : "never",
-        last_reason: p === "aws"
-          ? "AWS Service Quotas API not wired in Hub v1"
-          : "Not synced yet",
+        last_status: "never",
+        last_reason: "Not synced yet",
         last_ok_at: null,
         last_fail_at: null,
         last_synced_at: null,
@@ -572,7 +671,7 @@ Deno.serve(async (req) => {
           .maybeSingle();
         await admin.supabase.from("cloud_quota_sync_state").upsert({
           provider,
-          last_status: provider === "aws" ? "not_connected" : "fail",
+          last_status: "fail",
           last_reason: message,
           last_fail_at: now,
           last_ok_at: existing?.last_ok_at ?? null,

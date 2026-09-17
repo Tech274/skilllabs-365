@@ -11,6 +11,10 @@ import {
   validateAzureCredentials,
   resolveVmAdminPassword, vmProvisioningGaps, type AzureRuntime,
 } from "../_shared/cloud-providers/azure-runtime.ts";
+import {
+  assertAwsVmProvisioningReady, ensureAwsNetwork, resolveAwsRuntime, verifyAwsCredentials,
+  createAwsVm, resolveLabAmiId, mapToAwsInstanceType, awsVmProvisioningGaps, type AwsRuntime,
+} from "../_shared/cloud-providers/aws-runtime.ts";
 import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
 
@@ -428,13 +432,13 @@ Deno.serve(async (req) => {
     }
 
     // --- Resource Provider ------------------------------------------------
-    // Every lab template must resolve to an active Azure account in the
-    // Resource Providers registry (explicit selection or the provider default).
-    // Without one we refuse to provision — no ambient/legacy credentials exist.
-    if (template.provider && template.provider !== "azure") {
+    // Lab templates resolve to an active Azure or AWS account in the
+    // Resource Providers registry. Without one we refuse to provision.
+    const templateProvider = (template.provider || "azure") as string;
+    if (templateProvider !== "azure" && templateProvider !== "aws") {
       return new Response(
         JSON.stringify({
-          error: `Lab VM provisioning currently supports Azure resource providers only (template is set to ${template.provider}).`,
+          error: `Lab VM provisioning supports Azure and AWS resource providers (template is set to ${templateProvider}).`,
           setting: "Lab template → Resource provider",
           correlation_id: correlationId,
         }),
@@ -444,9 +448,171 @@ Deno.serve(async (req) => {
 
     await trace.start(SOURCE, "resource-provider", "Resolving resource provider account for this lab");
     const networkDefaults = await loadAzureNetworkDefaults(service);
-    let azure: AzureRuntime;
+    let azure: AzureRuntime | null = null;
+    let aws: AwsRuntime | null = null;
     let resolvedRuntime: AzureRuntime | null = null;
     let subnetResolution: { subnetId: string; created: boolean; source: string } | null = null;
+
+    if (templateProvider === "aws") {
+      try {
+        aws = await resolveAwsRuntime(supabase, template.provider_account_id);
+        await trace.start(SOURCE, "subnet-resolve", "Resolving VPC/subnet/security group for this lab VM");
+        const net = await ensureAwsNetwork(service, aws);
+        subnetResolution = { subnetId: net.subnetId, created: net.created, source: net.source };
+        await trace.success(
+          SOURCE,
+          "subnet-resolve",
+          net.created ? "Created or discovered AWS lab network" : "Using configured AWS network",
+          { subnet_id: net.subnetId, vpc_id: net.vpcId, security_group_id: net.securityGroupId, source: net.source },
+        );
+        assertAwsVmProvisioningReady(aws);
+        providerCtx.accountName = aws.displayName;
+        providerCtx.userId = userId;
+        providerCtx.templateId = template.id;
+        providerCtx.templateName = template.name;
+        await trace.success(SOURCE, "resource-provider", `Using AWS resource provider "${aws.displayName}"`, {
+          account_id: aws.accountId,
+          region: aws.defaultRegion,
+          subnet_id: aws.subnetId,
+          vpc_id: aws.vpcId,
+        });
+
+        await trace.start(SOURCE, "preflight", "Validating AWS credentials via STS");
+        const pre = await verifyAwsCredentials(aws);
+        if (!pre.ok) {
+          await trace.failed(SOURCE, "preflight", pre.message);
+          return new Response(
+            JSON.stringify({
+              correlation_id: correlationId,
+              error: pre.message,
+              setting: `Resource Providers → ${aws.displayName}`,
+              suggestion: "Update Access Key / Secret on the AWS resource provider and re-test connection.",
+              stage: "preflight:sts",
+            }),
+            { status: 400, headers: traceHeaders },
+          );
+        }
+        await trace.success(SOURCE, "preflight", pre.message, { account: pre.account, arn: pre.arn });
+
+        const awsRegion = aws.defaultRegion;
+        const instanceType = mapToAwsInstanceType(template.vm_size);
+        const vmName = `lab-${template.id.substring(0, 8)}-${Date.now().toString(36)}`;
+
+        const { data: vmRecord, error: vmInsertError } = await supabase
+          .from("virtual_machines")
+          .insert({
+            user_id: userId,
+            lab_template_id: template.id,
+            provider_account_id: aws.accountId,
+            region: awsRegion,
+            vm_size: instanceType,
+            status: "provisioning",
+            expires_at: new Date(Date.now() + template.duration * 60 * 1000).toISOString(),
+          })
+          .select()
+          .single();
+        if (vmInsertError) throw new Error(`Failed to register VM: ${vmInsertError.message}`);
+        trace.attach({ vmId: vmRecord.id });
+        await trace.success(SOURCE, "vm-record", "Lab VM registered and queued for provisioning", {
+          vm_name: vmName, region: awsRegion, instance_type: instanceType,
+        });
+
+        await trace.start(SOURCE, "ami-resolve", "Resolving lab AMI");
+        const amiId = await resolveLabAmiId(aws, template.os_image);
+        await trace.success(SOURCE, "ami-resolve", `Using AMI ${amiId}`);
+
+        let vmResult: { instanceId: string; privateIp: string };
+        await trace.start(SOURCE, "vm-create", `Creating EC2 instance ${vmName} (${instanceType})`);
+        try {
+          vmResult = await createAwsVm(aws, {
+            name: vmName,
+            instanceType,
+            amiId,
+            osImage: template.os_image,
+          });
+        } catch (awsError) {
+          await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vmRecord.id);
+          await trace.failed(SOURCE, "vm-create", awsError instanceof Error ? awsError.message : "EC2 RunInstances failed");
+          throw awsError;
+        }
+        await trace.success(SOURCE, "vm-create", "EC2 instance launched", {
+          instance_id: vmResult.instanceId, private_ip: vmResult.privateIp, subnet_id: aws.subnetId,
+        });
+
+        if (networkDefaults.connectivityCheckEnabled) {
+          await trace.start(SOURCE, "connectivity-check", "Checking remote access port reachability");
+          const probe = await checkConnectivity(
+            vmResult.privateIp,
+            template.os_image,
+            networkDefaults.connectivityCheckTimeoutMs,
+          );
+          const label = `${probe.protocol.toUpperCase()} ${probe.host ?? "-"}:${probe.port}`;
+          if (!probe.attempted) await trace.skipped(SOURCE, "connectivity-check", `Skipped — ${probe.error}`, probe);
+          else if (probe.reachable) await trace.success(SOURCE, "connectivity-check", `${label} reachable in ${probe.latency_ms}ms`, probe);
+          else await trace.failed(SOURCE, "connectivity-check", `${label} not reachable yet (${probe.error}). The VM may still be booting.`, probe);
+        } else {
+          await trace.skipped(SOURCE, "connectivity-check", "Connectivity check disabled in platform settings");
+        }
+
+        // Store EC2 instance id in azure_vm_id (legacy column = cloud instance ref).
+        await supabase.from("virtual_machines").update({
+          azure_vm_id: vmResult.instanceId,
+          private_ip: vmResult.privateIp,
+          status: "provisioning",
+        }).eq("id", vmRecord.id);
+
+        const result = {
+          vm_id: vmRecord.id,
+          azure_vm_id: vmResult.instanceId,
+          instance_id: vmResult.instanceId,
+          provider: "aws",
+          private_ip: vmResult.privateIp,
+          status: "provisioning",
+          vm_name: vmName,
+          subnet_id: aws.subnetId,
+          subnet_source: subnetResolution?.source ?? "configured",
+          correlation_id: correlationId,
+        };
+        await completeIdempotency(supabase, { key: idem.key, userId, action: "provision-lab", response: result });
+        idem = null;
+        await recordAudit(supabase, {
+          actorId: userId, action: "lab.launch", entityType: "lab_template",
+          entityId: template.id, entityLabel: template.name, outcome: "success",
+          correlationId,
+          changes: { vm_id: vmRecord.id, region: awsRegion, provider_account: aws.displayName, subnet_id: aws.subnetId, provider: "aws" },
+          message: `Launched AWS lab VM ${vmName}`,
+        });
+        return new Response(JSON.stringify(result), { status: 200, headers: traceHeaders });
+      } catch (e) {
+        if (e instanceof ProviderConfigError || (aws && e instanceof Error)) {
+          const message = e instanceof Error ? e.message : "Resource provider not configured";
+          const setting = e instanceof ProviderConfigError ? e.setting : `Resource Providers → ${aws?.displayName ?? "AWS"}`;
+          const suggestion = e instanceof ProviderConfigError ? e.suggestion : undefined;
+          const missingFields = aws ? awsVmProvisioningGaps(aws).map((g) => g.field) : [];
+          // Only treat config errors as soft 400; rethrow unexpected after notify
+          if (e instanceof ProviderConfigError) {
+            await trace.failed(SOURCE, "resource-provider", message, { setting });
+            await notifyConfigIssue(service, {
+              provider: "aws",
+              code: "ResourceProviderNotConfigured",
+              setting,
+              message,
+              suggestion,
+              context: "lab provisioning",
+            });
+            return new Response(
+              JSON.stringify({
+                error: message, setting, suggestion, missing_fields: missingFields,
+                correlation_id: correlationId, stage: "resource-provider",
+              }),
+              { status: 400, headers: traceHeaders },
+            );
+          }
+        }
+        throw e;
+      }
+    }
+
     try {
       azure = await resolveAzureRuntime(supabase, template.provider_account_id);
       resolvedRuntime = azure;
@@ -506,6 +672,7 @@ Deno.serve(async (req) => {
         { status: 400, headers: traceHeaders },
       );
     }
+    if (!azure) throw new Error("Azure runtime missing after resource-provider resolution");
     providerCtx.subscriptionId = azure.subscriptionId;
     providerCtx.resourceGroup = azure.resourceGroup;
     providerCtx.accountName = azure.displayName;

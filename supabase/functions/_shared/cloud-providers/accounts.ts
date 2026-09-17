@@ -24,6 +24,7 @@ export const CREDENTIAL_FIELDS: Record<string, { key: string; label: string; req
     { key: "access_key_id", label: "AWS Access Key ID", required: true },
     { key: "secret_access_key", label: "AWS Secret Access Key", required: true },
     { key: "session_token", label: "Session Token (optional)", required: false },
+    { key: "vm_admin_password", label: "VM Admin Password (required for lab VMs)", required: false },
   ],
   azure: [
     { key: "tenant_id", label: "Directory (tenant) ID", required: true },
