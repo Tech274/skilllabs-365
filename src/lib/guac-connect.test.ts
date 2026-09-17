@@ -15,3 +15,15 @@ describe("isTokenizedGuacUrl", () => {
     expect(isTokenizedGuacUrl("https://guac.example/#/client/abc")).toBe(false);
   });
 });
+
+import { toBrowserSafeGuacUrl } from "./guac-connect";
+
+describe("toBrowserSafeGuacUrl", () => {
+  it("rewrites http IP:8080 Guac URL to public HTTPS gateway", () => {
+    const raw =
+      "http://3.6.228.159:8080/guacamole/#/client/abc123?token=secrettok";
+    expect(toBrowserSafeGuacUrl(raw)).toBe(
+      "https://guac.skillhub365.co.in/guacamole/#/client/abc123?token=secrettok",
+    );
+  });
+});

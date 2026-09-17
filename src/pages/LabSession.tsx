@@ -104,6 +104,15 @@ export default function LabSession() {
     if (!isTokenizedGuacUrl(data.iframe_url)) {
       throw new Error("Secure lab desktop is not ready yet (missing connection token).");
     }
+    // Mixed content (http Guac on https Hub) blanks the iframe — fail closed
+    try {
+      const u = new URL(data.iframe_url);
+      if (typeof window !== "undefined" && window.location.protocol === "https:" && u.protocol === "http:") {
+        throw new Error("Secure lab gateway URL must be HTTPS (mixed content blocked).");
+      }
+    } catch (e) {
+      if (e instanceof Error && e.message.includes("HTTPS")) throw e;
+    }
     setGuacIframeUrl(data.iframe_url);
     if (data.session_id) setDbSessionId(data.session_id);
     setSession((prev) => ({
