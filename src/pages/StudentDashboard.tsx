@@ -6,6 +6,7 @@ import { useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { ProvisioningErrorPanel } from "@/components/ProvisioningErrorPanel";
 import { readFunctionError } from "@/lib/function-error";
+import { learnerConnectHoldCopy } from "@/lib/guac-connect";
 import { useAuth } from "@/hooks/use-auth";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -94,17 +95,19 @@ export default function StudentDashboard() {
       }
 
       if (data.status === "running") {
-        toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
-        navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
+        // Even when provision returns running, gate on a tokenized Guac URL before session.
+        provisioning.startProvisioning(lab.id, lab.name, data.vm_id);
+        toast({ title: "Almost ready", description: "Finishing secure desktop setup…" });
       } else {
         provisioning.startProvisioning(lab.id, lab.name, data.vm_id);
-        toast({ title: "VM Provisioning", description: "Azure VM is starting up..." });
+        toast({ title: "Lab starting", description: "Your lab is getting ready…" });
       }
     } catch (err: unknown) {
       resetIdempotency(`provision:${lab.id}`);
-      const message = err instanceof Error ? err.message : "Failed to provision VM. Please try again.";
+      const raw = err instanceof Error ? err.message : "Failed to provision VM. Please try again.";
+      const message = learnerConnectHoldCopy(raw);
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
-      toast({ title: "Launch Failed", description: message, variant: "destructive" });
+      toast({ title: "Technical glitch", description: message, variant: "destructive" });
     } finally {
       setLaunchingId(null);
     }

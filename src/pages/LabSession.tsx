@@ -29,6 +29,11 @@ import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
 import { LearnerProvisioningPanel } from "@/components/LearnerProvisioningPanel";
 import { useAuth } from "@/hooks/use-auth";
 import { HUB_WHATSAPP_UPSELL } from "@/lib/skilltrack-handoff";
+import {
+  fetchTokenizedGuacUrl,
+  isTokenizedGuacUrl,
+  takeGuacReady,
+} from "@/lib/guac-connect";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 const isMixedContent = (url: string) => {
@@ -51,7 +56,7 @@ const defaultSession: SessionInfo = {
   labName: "Lab Session",
   protocol: "RDP",
   vmSize: "Standard_B2s",
-  region: "East US",
+  region: "—",
   privateIp: "—",
   expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
   duration: 120,
@@ -83,51 +88,85 @@ export default function LabSession() {
   const idleUpdateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const idleWarningIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Guacamole URL from search params (legacy) or from edge function
-  const guacamoleUrl = guacIframeUrl || searchParams.get("guac_url") || "";
+  // Only tokenized iframe URLs from guacamole-proxy (never bare ?guac_url= — native login wall)
+  const guacamoleUrl = isTokenizedGuacUrl(guacIframeUrl) ? guacIframeUrl : "";
 
   // Check for vm_id param to create a real Guacamole session
   const vmId = searchParams.get("vm_id");
 
+  const applyGuacResult = useCallback((data: {
+    iframe_url: string;
+    session_id?: string;
+    protocol?: string;
+    vm_ip?: string;
+    region?: string | null;
+  }) => {
+    if (!isTokenizedGuacUrl(data.iframe_url)) {
+      throw new Error("Secure lab desktop is not ready yet (missing connection token).");
+    }
+    setGuacIframeUrl(data.iframe_url);
+    if (data.session_id) setDbSessionId(data.session_id);
+    setSession((prev) => ({
+      ...prev,
+      protocol: (data.protocol as SessionInfo["protocol"]) || prev.protocol,
+      privateIp: data.vm_ip || prev.privateIp,
+      region: (data.region && String(data.region).trim()) || prev.region,
+    }));
+    setConnectionState("connected");
+    setIframeLoadFailed(false);
+    iframeTimerRef.current = setTimeout(() => setIframeLoadFailed(true), 15000);
+  }, []);
+
   const createGuacSession = useCallback(async (targetVmId: string) => {
     try {
-      const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
-        body: { action: "create-session", vm_id: targetVmId },
-        headers: idempotencyHeaders(`guac-session:${targetVmId}`),
-      });
-
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
-
-      setGuacIframeUrl(data.iframe_url);
-      setDbSessionId(data.session_id);
-
-      setSession((prev) => ({
-        ...prev,
-        protocol: data.protocol || prev.protocol,
-        privateIp: data.vm_ip || prev.privateIp,
-      }));
-      setConnectionState("connected");
-      setIframeLoadFailed(false);
-      // Start a 15s timeout — if iframe doesn't load, show error
-      iframeTimerRef.current = setTimeout(() => setIframeLoadFailed(true), 15000);
+      const stashed = takeGuacReady(targetVmId);
+      if (stashed) {
+        applyGuacResult(stashed);
+        return;
+      }
+      const data = await fetchTokenizedGuacUrl(targetVmId);
+      applyGuacResult(data);
     } catch (err) {
       console.error("Failed to create Guacamole session:", err);
       resetIdempotency(`guac-session:${targetVmId}`);
       setLastError(err instanceof Error ? err.message : "Connection failed");
       setConnectionState("error");
     }
-  }, []);
+  }, [applyGuacResult]);
 
-  // Init: create real session if vm_id is provided, otherwise demo mode
+  // Load VM facts (region must match Azure/lab — never hardcode East US)
+  useEffect(() => {
+    if (!vmId) return;
+    let cancelled = false;
+    (async () => {
+      const { data: vm } = await supabase
+        .from("virtual_machines")
+        .select("name, region, private_ip, vm_size, lab_templates(name, protocol, duration_minutes)")
+        .eq("id", vmId)
+        .maybeSingle();
+      if (cancelled || !vm) return;
+      const tpl = Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates;
+      setSession((prev) => ({
+        ...prev,
+        labName: (tpl as { name?: string } | null)?.name || vm.name || prev.labName,
+        protocol: ((tpl as { protocol?: string } | null)?.protocol?.toUpperCase() === "SSH" ? "SSH" : "RDP"),
+        vmSize: vm.vm_size || prev.vmSize,
+        region: (vm.region && String(vm.region).trim()) || prev.region,
+        privateIp: vm.private_ip || prev.privateIp,
+        duration: (tpl as { duration_minutes?: number } | null)?.duration_minutes || prev.duration,
+      }));
+    })();
+    return () => { cancelled = true; };
+  }, [vmId]);
+
+  // Init: require vm_id + tokenized Guac; stay on calm panel until ready (no demo fake-connect)
   useEffect(() => {
     if (vmId) {
       createGuacSession(vmId);
-    } else {
-      // Demo mode — simulate connection
-      const timer = setTimeout(() => setConnectionState("connected"), 2500);
-      return () => clearTimeout(timer);
+      return;
     }
+    setLastError("This lab session is missing a VM. Go back to Labs and launch again.");
+    setConnectionState("error");
   }, [vmId, createGuacSession]);
 
   // Idle activity tracking: detect mouse/keyboard near iframe and update last_activity_at
@@ -212,32 +251,19 @@ export default function LabSession() {
     setConnectionState("connecting");
     setLastError(null);
     try {
-      if (dbSessionId) {
-        // Re-issue a scoped Guacamole token without recreating the connection
-        const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
-          body: { action: "reconnect", session_id: dbSessionId },
-        });
-        if (error) throw error;
-        if (data?.error) throw new Error(data.error);
-        setGuacIframeUrl(data.iframe_url);
-        setConnectionState("connected");
-        setIframeLoadFailed(false);
+      if (dbSessionId && vmId) {
+        const data = await fetchTokenizedGuacUrl(vmId, { action: "reconnect", sessionId: dbSessionId });
+        applyGuacResult(data);
       } else if (vmId) {
         await createGuacSession(vmId);
       } else {
-        setTimeout(() => setConnectionState("connected"), 2000);
+        setLastError("This lab session is missing a VM. Go back to Labs and launch again.");
+        setConnectionState("error");
       }
-      toast({ title: "Trying again", description: "Re-establishing your lab session…" });
     } catch (err) {
       console.error("Reconnect failed:", err);
-      const msg = err instanceof Error ? err.message : "Unknown error";
-      setLastError(msg);
+      setLastError(err instanceof Error ? err.message : "Reconnect failed");
       setConnectionState("error");
-      toast({
-        title: "Couldn't reconnect",
-        description: canDebug ? msg : "Please try again in a moment.",
-        variant: "destructive",
-      });
     }
   };
 

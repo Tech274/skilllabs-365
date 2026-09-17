@@ -269,6 +269,7 @@ Deno.serve(async (req) => {
             iframe_url: `${guacBaseUrl}/#/client/${encodeURIComponent(reusedClientId)}?token=${scoped.token}`,
             protocol: (labTemplateProtocol(vm) === "ssh" ? "SSH" : "RDP"),
             vm_ip: vm.private_ip,
+            region: vm.region ?? null,
             reused_existing: true,
             correlation_id: correlationId,
           };
@@ -372,6 +373,7 @@ Deno.serve(async (req) => {
         iframe_url: iframeUrl,
         protocol: protocol.toUpperCase(),
         vm_ip: vm.private_ip,
+        region: vm.region ?? null,
         correlation_id: correlationId,
       };
       timeline.attach({ sessionId: session.id });
@@ -388,7 +390,7 @@ Deno.serve(async (req) => {
 
       const { data: sess } = await supabase
         .from("sessions")
-        .select("user_id, status, guac_connection_id, guac_username")
+        .select("user_id, status, guac_connection_id, guac_username, region, vm_id")
         .eq("id", session_id).maybeSingle();
       if (!sess) throw new Error("Session not found");
       if (sess.status !== "active") throw new Error("Session is no longer active");
@@ -423,7 +425,7 @@ Deno.serve(async (req) => {
         reason: String(body.reason ?? "user_reconnect"), correlation_id: correlationId,
       });
 
-      return new Response(JSON.stringify({ session_id, iframe_url: iframeUrl }), {
+      return new Response(JSON.stringify({ session_id, iframe_url: iframeUrl, region: sess.region ?? null, vm_id: sess.vm_id ?? null }), {
         status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
