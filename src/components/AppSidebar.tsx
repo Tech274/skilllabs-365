@@ -1,7 +1,7 @@
 import {
   LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
   Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
-  Loader2, X, KeyRound, Sparkles, Download, RotateCcw, MonitorPlay, ClipboardList, Unlock } from "lucide-react";
+  Loader2, X, KeyRound, Sparkles, Download, RotateCcw, MonitorPlay, ClipboardList, Unlock, Gauge } from "lucide-react";
 
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -28,6 +28,7 @@ const adminItems = [
   { title: "Lab Grants", url: "/admin/manual-grants", icon: Unlock },
   { title: "Cloud Reports", url: "/admin/cloud-reports", icon: FileText },
   { title: "Resource Providers", url: "/admin/resource-providers", icon: Cloud },
+  { title: "Cloud Quotas", url: "/admin/cloud-quotas", icon: Gauge },
   { title: "AI Status", url: "/admin/ai-status", icon: Sparkles },
   { title: "Provisioning Export", url: "/admin/provisioning-export", icon: Download },
   { title: "Provisioning Status", url: "/admin/provisioning-status", icon: Activity },

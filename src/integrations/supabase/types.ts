@@ -646,6 +646,42 @@ export type Database = {
         }
         Relationships: []
       }
+      cloud_quota_sync_state: {
+        Row: {
+          home_region: string | null
+          last_fail_at: string | null
+          last_ok_at: string | null
+          last_reason: string | null
+          last_status: string
+          last_synced_at: string | null
+          provider: string
+          snapshot: Json
+          updated_at: string
+        }
+        Insert: {
+          home_region?: string | null
+          last_fail_at?: string | null
+          last_ok_at?: string | null
+          last_reason?: string | null
+          last_status?: string
+          last_synced_at?: string | null
+          provider: string
+          snapshot?: Json
+          updated_at?: string
+        }
+        Update: {
+          home_region?: string | null
+          last_fail_at?: string | null
+          last_ok_at?: string | null
+          last_reason?: string | null
+          last_status?: string
+          last_synced_at?: string | null
+          provider?: string
+          snapshot?: Json
+          updated_at?: string
+        }
+        Relationships: []
+      }
       daily_reports: {
         Row: {
           created_at: string
@@ -1235,6 +1271,57 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      quota_increase_requests: {
+        Row: {
+          completed_at: string | null
+          created_at: string
+          created_by: string | null
+          current_limit: number | null
+          id: string
+          justification: string | null
+          provider: string
+          region: string
+          requested_limit: number
+          resource_name: string
+          status: string
+          submitted_at: string | null
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string | null
+          current_limit?: number | null
+          id?: string
+          justification?: string | null
+          provider: string
+          region: string
+          requested_limit: number
+          resource_name: string
+          status?: string
+          submitted_at?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          completed_at?: string | null
+          created_at?: string
+          created_by?: string | null
+          current_limit?: number | null
+          id?: string
+          justification?: string | null
+          provider?: string
+          region?: string
+          requested_limit?: number
+          resource_name?: string
+          status?: string
+          submitted_at?: string | null
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
       }
       resources: {
         Row: {
