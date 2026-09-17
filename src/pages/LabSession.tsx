@@ -12,20 +12,23 @@ import {
   WifiOff,
   RefreshCw,
   Clipboard,
-  Upload,
   Power,
   AlertTriangle,
   Loader2,
-  Send,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
+import { LearnerProvisioningPanel } from "@/components/LearnerProvisioningPanel";
+import { useAuth } from "@/hooks/use-auth";
+import { HUB_WHATSAPP_UPSELL } from "@/lib/skilltrack-handoff";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 const isMixedContent = (url: string) => {
@@ -59,8 +62,13 @@ export default function LabSession() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const { isAdmin, isSuperAdmin } = useAuth();
+  const canDebug = isAdmin || isSuperAdmin;
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
+  const [showTechnicalTrace, setShowTechnicalTrace] = useState(false);
+  const [connectStartedAt] = useState(() => Date.now());
+  const [lastError, setLastError] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showToolbar, setShowToolbar] = useState(true);
   const [timeRemaining, setTimeRemaining] = useState("");
@@ -106,6 +114,7 @@ export default function LabSession() {
     } catch (err) {
       console.error("Failed to create Guacamole session:", err);
       resetIdempotency(`guac-session:${targetVmId}`);
+      setLastError(err instanceof Error ? err.message : "Connection failed");
       setConnectionState("error");
     }
   }, []);
@@ -201,6 +210,7 @@ export default function LabSession() {
 
   const handleReconnect = async () => {
     setConnectionState("connecting");
+    setLastError(null);
     try {
       if (dbSessionId) {
         // Re-issue a scoped Guacamole token without recreating the connection
@@ -217,11 +227,17 @@ export default function LabSession() {
       } else {
         setTimeout(() => setConnectionState("connected"), 2000);
       }
-      toast({ title: "Reconnecting", description: "Re-establishing your lab session..." });
+      toast({ title: "Trying again", description: "Re-establishing your lab session…" });
     } catch (err) {
       console.error("Reconnect failed:", err);
+      const msg = err instanceof Error ? err.message : "Unknown error";
+      setLastError(msg);
       setConnectionState("error");
-      toast({ title: "Reconnect failed", description: err instanceof Error ? err.message : "Unknown error", variant: "destructive" });
+      toast({
+        title: "Couldn't reconnect",
+        description: canDebug ? msg : "Please try again in a moment.",
+        variant: "destructive",
+      });
     }
   };
 
@@ -262,10 +278,10 @@ export default function LabSession() {
   };
 
   const connectionLabel: Record<ConnectionState, string> = {
-    connecting: "Connecting...",
+    connecting: "Getting ready…",
     connected: "Connected",
     disconnected: "Disconnected",
-    error: "Connection Error",
+    error: "Needs attention",
   };
 
   const isTimeLow = (() => {
@@ -346,8 +362,26 @@ export default function LabSession() {
               </div>
               <div className="h-4 w-px bg-border" />
               <span className="text-[10px] text-muted-foreground font-mono">
-                {session.privateIp} · {session.region}
+                {canDebug && showTechnicalTrace
+                  ? `${session.privateIp} · ${session.region}`
+                  : session.region}
               </span>
+              {canDebug && (
+                <>
+                  <div className="h-4 w-px bg-border" />
+                  <div className="flex items-center gap-1.5">
+                    <Switch
+                      id="lab-tech-trace"
+                      checked={showTechnicalTrace}
+                      onCheckedChange={setShowTechnicalTrace}
+                      className="scale-75 origin-left"
+                    />
+                    <Label htmlFor="lab-tech-trace" className="text-[10px] text-muted-foreground cursor-pointer">
+                      Debug
+                    </Label>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Right: Actions */}
@@ -402,81 +436,46 @@ export default function LabSession() {
 
       {/* Main Session Area */}
       <div className="flex-1 relative bg-background">
-        {/* Connecting Overlay */}
+        {/* Connecting Overlay — calm learner UI by default */}
         <AnimatePresence>
           {connectionState === "connecting" && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-background"
+              className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-background px-4"
             >
-              <motion.div
-                animate={{ rotate: 360 }}
-                transition={{ duration: 2, repeat: Infinity, ease: "linear" }}
-                className="h-12 w-12 rounded-full border-2 border-primary/20 border-t-primary mb-6"
+              <LearnerProvisioningPanel
+                mode="preparing"
+                startedAt={connectStartedAt}
+                vmId={vmId}
+                onBack={() => navigate("/labs")}
               />
-              <h2 className="text-lg font-semibold text-foreground mb-2">Connecting to Lab Session</h2>
-              <p className="text-sm text-muted-foreground mb-1">Establishing secure {session.protocol} connection...</p>
-              {vmId && <ProvisioningTimeline vmId={vmId} className="mt-6 w-full max-w-md text-left" />}
-              <p className="text-xs text-muted-foreground font-mono">{session.privateIp} · {session.region}</p>
-              <div className="mt-8 space-y-2 text-xs text-muted-foreground">
-                <motion.div
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.3 }}
-                  className="flex items-center gap-2"
-                >
-                  <div className="h-1.5 w-1.5 rounded-full bg-success" />
-                  Authenticating with gateway
-                </motion.div>
-                <motion.div
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.8 }}
-                  className="flex items-center gap-2"
-                >
-                  <div className="h-1.5 w-1.5 rounded-full bg-success" />
-                  Initializing remote display
-                </motion.div>
-                <motion.div
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 1.5 }}
-                  className="flex items-center gap-2"
-                >
-                  <Loader2 className="h-3 w-3 animate-spin text-primary" />
-                  Rendering session...
-                </motion.div>
-              </div>
+              {canDebug && showTechnicalTrace && vmId && (
+                <ProvisioningTimeline vmId={vmId} className="mt-6 w-full max-w-lg text-left" />
+              )}
             </motion.div>
           )}
         </AnimatePresence>
 
-        {/* Error Overlay */}
+        {/* Error Overlay — friendly student copy; technical trace only via debug */}
         <AnimatePresence>
           {connectionState === "error" && (
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-background"
+              className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-background px-4"
             >
-              <div className="rounded-full bg-destructive/10 p-4 mb-4">
-                <AlertTriangle className="h-8 w-8 text-destructive" />
-              </div>
-              <h2 className="text-lg font-semibold text-foreground mb-2">Connection Failed</h2>
-              <p className="text-sm text-muted-foreground mb-6">Unable to establish connection to the remote session.</p>
-              {vmId && <ProvisioningTimeline vmId={vmId} className="mb-6 w-full max-w-md text-left" />}
-              <div className="flex gap-3">
-                <Button variant="outline" onClick={() => navigate("/labs")}>
-                  Back to Labs
-                </Button>
-                <Button onClick={handleReconnect}>
-                  <RefreshCw className="h-4 w-4 mr-2" />
-                  Retry Connection
-                </Button>
-              </div>
+              <LearnerProvisioningPanel
+                mode="failed"
+                errorMessage={lastError}
+                onRetry={handleReconnect}
+                onBack={() => navigate("/labs")}
+              />
+              {canDebug && showTechnicalTrace && vmId && (
+                <ProvisioningTimeline vmId={vmId} className="mt-6 w-full max-w-lg text-left" />
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -521,31 +520,25 @@ export default function LabSession() {
                   <div className="flex items-center gap-2 px-4 py-2 bg-warning/10 border-b border-warning/30 text-warning text-xs">
                     <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
                     <span>
-                      <strong>Mixed content blocked:</strong> The Guacamole server is using HTTP but this page is HTTPS. 
-                      The browser will block the iframe. Please enable SSL/TLS on your Guacamole server to fix this.
+                      {canDebug && showTechnicalTrace ? (
+                        <>
+                          <strong>Mixed content blocked:</strong> The remote gateway is using HTTP but this page is HTTPS.
+                          Enable SSL/TLS on the gateway to fix this.
+                        </>
+                      ) : (
+                        <>Your secure lab connection needs a quick fix from Ops. Try again shortly or message WhatsApp support.</>
+                      )}
                     </span>
                   </div>
                 )}
                 {iframeLoadFailed && (
-                  <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-background">
-                    <div className="rounded-full bg-destructive/10 p-4 mb-4">
-                      <AlertTriangle className="h-8 w-8 text-destructive" />
-                    </div>
-                    <h2 className="text-lg font-semibold text-foreground mb-2">Failed to Load Session</h2>
-                    <p className="text-sm text-muted-foreground mb-1 max-w-md text-center">
-                      The remote desktop iframe could not be loaded. This may be caused by network issues, 
-                      mixed content restrictions, or the Guacamole server being unreachable.
-                    </p>
-                    <p className="text-xs text-muted-foreground font-mono mb-6">{guacamoleUrl}</p>
-                    <div className="flex gap-3">
-                      <Button variant="outline" onClick={() => navigate("/labs")}>
-                        Back to Labs
-                      </Button>
-                      <Button onClick={() => { setIframeLoadFailed(false); handleReconnect(); }}>
-                        <RefreshCw className="h-4 w-4 mr-2" />
-                        Retry Connection
-                      </Button>
-                    </div>
+                  <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-background px-4">
+                    <LearnerProvisioningPanel
+                      mode="failed"
+                      errorMessage={canDebug && showTechnicalTrace ? `Failed to load session frame: ${guacamoleUrl}` : null}
+                      onRetry={() => { setIframeLoadFailed(false); handleReconnect(); }}
+                      onBack={() => navigate("/labs")}
+                    />
                   </div>
                 )}
                 <iframe
@@ -572,7 +565,7 @@ export default function LabSession() {
                 />
               </>
             ) : (
-              /* Demo placeholder when no Guacamole URL */
+              /* Placeholder when no remote URL yet */
               <div className="h-full w-full flex flex-col items-center justify-center bg-background">
                 <div className="max-w-md text-center space-y-6">
                   <div className="mx-auto rounded-2xl border border-border bg-card p-8 space-y-4">
@@ -583,9 +576,9 @@ export default function LabSession() {
                         <Terminal className="h-10 w-10 text-primary" />
                       )}
                     </div>
-                    <h3 className="text-lg font-semibold text-foreground">Guacamole Session Ready</h3>
+                    <h3 className="text-lg font-semibold text-foreground">Lab desktop ready soon</h3>
                     <p className="text-sm text-muted-foreground">
-                      The {session.protocol} session iframe will render here once your Guacamole gateway is configured with the proper authentication tokens.
+                      Your {session.protocol} lab will appear here once the secure connection is available.
                     </p>
                     <div className="rounded-lg bg-muted/50 p-4 space-y-2 text-left">
                       <div className="flex justify-between text-xs">
@@ -597,21 +590,32 @@ export default function LabSession() {
                         <span className="text-foreground font-mono">{session.protocol}</span>
                       </div>
                       <div className="flex justify-between text-xs">
-                        <span className="text-muted-foreground">VM Size</span>
-                        <span className="text-foreground font-mono">{session.vmSize}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
-                        <span className="text-muted-foreground">IP Address</span>
-                        <span className="text-foreground font-mono">{session.privateIp}</span>
-                      </div>
-                      <div className="flex justify-between text-xs">
                         <span className="text-muted-foreground">Region</span>
                         <span className="text-foreground font-mono">{session.region}</span>
                       </div>
+                      {canDebug && showTechnicalTrace && (
+                        <>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-muted-foreground">VM Size</span>
+                            <span className="text-foreground font-mono">{session.vmSize}</span>
+                          </div>
+                          <div className="flex justify-between text-xs">
+                            <span className="text-muted-foreground">IP Address</span>
+                            <span className="text-foreground font-mono">{session.privateIp}</span>
+                          </div>
+                        </>
+                      )}
                     </div>
-                    <p className="text-[10px] text-muted-foreground">
-                      Configure <code className="text-primary">GUACAMOLE_URL</code> and Azure secrets to enable live sessions.
-                    </p>
+                    {canDebug && showTechnicalTrace && (
+                      <p className="text-[10px] text-muted-foreground">
+                        Configure remote gateway URL and cloud secrets to enable live sessions.
+                      </p>
+                    )}
+                    <Button variant="secondary" size="sm" asChild>
+                      <a href={HUB_WHATSAPP_UPSELL} target="_blank" rel="noopener noreferrer">
+                        Need help? WhatsApp Ops
+                      </a>
+                    </Button>
                   </div>
                 </div>
               </div>
@@ -624,11 +628,19 @@ export default function LabSession() {
       {showToolbar && connectionState === "connected" && (
         <div className="flex items-center justify-between px-4 py-1.5 border-t border-border bg-card/80 text-[10px] text-muted-foreground">
           <div className="flex items-center gap-3">
-            <span>Session: <code className="text-foreground">{sessionId || "demo"}</code></span>
-            <span>VM: <code className="text-foreground">{session.vmSize}</code></span>
+            {canDebug && showTechnicalTrace ? (
+              <>
+                <span>Session: <code className="text-foreground">{sessionId || "demo"}</code></span>
+                <span>VM: <code className="text-foreground">{session.vmSize}</code></span>
+              </>
+            ) : (
+              <span>{session.protocol} · {session.region}</span>
+            )}
           </div>
           <div className="flex items-center gap-3">
-            <span>{session.protocol} · {session.privateIp}</span>
+            {canDebug && showTechnicalTrace && (
+              <span>{session.protocol} · {session.privateIp}</span>
+            )}
             <button
               onClick={() => setShowToolbar(false)}
               className="text-muted-foreground hover:text-foreground transition-colors"

@@ -10,8 +10,10 @@ interface ProvisioningProgressProps {
   estimatedSeconds?: number;
   onCancel?: () => void;
   cancelling?: boolean;
-  /** When provided, the live Edge Function step timeline is streamed below the bar. */
+  /** When provided with showTechnicalTrace, streams the live Edge Function step timeline. */
   vmId?: string | null;
+  /** Admin / Ops / debug only — never default student UI. */
+  showTechnicalTrace?: boolean;
   className?: string;
 }
 
@@ -28,6 +30,7 @@ export function ProvisioningProgress({
   onCancel,
   cancelling,
   vmId,
+  showTechnicalTrace = false,
   className,
 }: ProvisioningProgressProps) {
   const [elapsed, setElapsed] = useState(0);
@@ -95,7 +98,7 @@ export function ProvisioningProgress({
           </div>
         ))}
       </div>
-      {vmId && <ProvisioningTimeline vmId={vmId} className="mt-1" />}
+      {vmId && showTechnicalTrace && <ProvisioningTimeline vmId={vmId} className="mt-1" />}
     </div>
   );
 }

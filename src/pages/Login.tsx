@@ -24,7 +24,7 @@ const Login = () => {
 
   if (loading) return null;
   if (session) {
-    const dest = role === "admin" ? "/" : role === "instructor" ? "/instructor" : "/student";
+    const dest = role === "admin" || role === "super_admin" ? "/" : role === "instructor" ? "/instructor" : "/student";
     return <Navigate to={dest} replace />;
   }
 
