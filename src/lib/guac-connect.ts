@@ -19,18 +19,13 @@ export function toBrowserSafeGuacUrl(url: string): string {
       /^\d{1,3}(?:\.\d{1,3}){3}$/.test(u.hostname) ||
       u.port === "8080";
     if (!isPrivate && u.protocol === "https:") return url;
-    const path = u.pathname.replace(/\/+$/, "") || "";
-    const guacPath = path.endsWith("/guacamole") || path.includes("/guacamole")
-      ? path
-      : path
-        ? `${path}/guacamole`
-        : "/guacamole";
-    const hash = u.hash || "";
-    const search = u.search || "";
-    // Prefer Guac form /guacamole/#/client/...?token= (slash before hash)
-    const pathPart = guacPath.replace(/\/+$/, "") || "/guacamole";
-    const hashPart = hash.startsWith("#") ? `/${hash}` : hash;
-    return `${PUBLIC}${pathPart}${hashPart}${search}`;
+    let path = (u.pathname || "").replace(/\/+$/, "");
+    if (!path.endsWith("/guacamole") && !path.includes("/guacamole")) {
+      path = path ? `${path}/guacamole` : "/guacamole";
+    }
+    // Guac client URLs use /guacamole/#/client/...
+    if (!path.endsWith("/")) path = `${path}/`;
+    return `${PUBLIC}${path}${u.hash || ""}${u.search || ""}`;
   } catch {
     return url;
   }
