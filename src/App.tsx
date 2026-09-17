@@ -39,6 +39,7 @@ import AdminAuditLog from "./pages/AdminAuditLog";
 import AdminSessionLifecycle from "./pages/AdminSessionLifecycle";
 import AdminProvisioningRetries from "./pages/AdminProvisioningRetries";
 import AdminProvisioningStatus from "./pages/AdminProvisioningStatus";
+import AdminManualLabGrants from "./pages/AdminManualLabGrants";
 import { SkillTrackHandoffCapture } from "./components/SkillTrackHandoffCapture";
 
 
@@ -81,6 +82,7 @@ const App = () => (
                 <Route path="/admin/audit-log" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminAuditLog /></RoleProtectedRoute>} />
                 <Route path="/admin/session-lifecycle" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><AdminSessionLifecycle /></RoleProtectedRoute>} />
                 <Route path="/admin/provisioning-retries" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminProvisioningRetries /></RoleProtectedRoute>} />
+                <Route path="/admin/manual-grants" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminManualLabGrants /></RoleProtectedRoute>} />
                 <Route path="/cloud-access" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
                 <Route path="/cloud-access/:id" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
 

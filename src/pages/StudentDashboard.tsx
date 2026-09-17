@@ -155,8 +155,8 @@ export default function StudentDashboard() {
                     <p className="font-medium text-foreground">Lab access pending</p>
                     <p className="text-muted-foreground text-xs mt-0.5">
                       Sign-in worked{handoff?.email ? ` as ${handoff.email}` : ""}. After payment,
-                      Ops grants access in Access Catalogue (manual this cut). Message us if you
-                      already paid.
+                      Ops unlocks labs via Lab Grants (manual this cut — not Cloud Access Catalogue).
+                      Message us if you already paid.
                     </p>
                   </>
                 )}
