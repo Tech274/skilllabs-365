@@ -787,6 +787,7 @@ export type Database = {
           file_transfer_enabled: boolean
           id: string
           idle_timeout: number
+          is_persistent: boolean
           name: string
           os_image: string
           protocol: string
@@ -806,6 +807,7 @@ export type Database = {
           file_transfer_enabled?: boolean
           id?: string
           idle_timeout?: number
+          is_persistent?: boolean
           name: string
           os_image?: string
           protocol: string
@@ -825,6 +827,7 @@ export type Database = {
           file_transfer_enabled?: boolean
           id?: string
           idle_timeout?: number
+          is_persistent?: boolean
           name?: string
           os_image?: string
           protocol?: string

@@ -30,6 +30,7 @@ interface LabForm {
   os_image: string;
   duration: number;
   idle_timeout: number;
+  is_persistent: boolean;
   clipboard_enabled: boolean;
   file_transfer_enabled: boolean;
   region: string;
@@ -39,7 +40,7 @@ interface LabForm {
 
 const emptyForm: LabForm = {
   name: '', description: '', protocol: 'RDP', vm_size: 'Standard_B2s', os_image: 'Windows Server 2022',
-  duration: 120, idle_timeout: 20, clipboard_enabled: true, file_transfer_enabled: false, region: 'All Regions', status: 'draft', provider_account_id: '',
+  duration: 120, idle_timeout: 20, is_persistent: false, clipboard_enabled: true, file_transfer_enabled: false, region: 'All Regions', status: 'draft', provider_account_id: '',
 };
 
 const statusStyle: Record<string, string> = {
@@ -113,7 +114,7 @@ export default function LabManagement() {
     setForm({
       name: lab.name, description: lab.description || '', protocol: lab.protocol,
       vm_size: lab.vm_size, os_image: lab.os_image, duration: lab.duration,
-      idle_timeout: lab.idle_timeout, clipboard_enabled: lab.clipboard_enabled,
+      idle_timeout: lab.idle_timeout, is_persistent: lab.is_persistent, clipboard_enabled: lab.clipboard_enabled,
       file_transfer_enabled: lab.file_transfer_enabled, region: lab.region, status: lab.status,
       provider_account_id: lab.provider_account_id ?? '',
     });
@@ -164,7 +165,7 @@ export default function LabManagement() {
     const insert: TablesInsert<"lab_templates"> = {
       name: `${lab.name} (Copy)`, description: lab.description, protocol: lab.protocol,
       vm_size: lab.vm_size, os_image: lab.os_image, duration: lab.duration,
-      idle_timeout: lab.idle_timeout, clipboard_enabled: lab.clipboard_enabled,
+      idle_timeout: lab.idle_timeout, is_persistent: lab.is_persistent, clipboard_enabled: lab.clipboard_enabled,
       file_transfer_enabled: lab.file_transfer_enabled, region: lab.region, status: 'draft',
     };
     const { error } = await supabase.from("lab_templates").insert(insert);
@@ -270,8 +271,8 @@ export default function LabManagement() {
                 <p className="text-xs text-muted-foreground line-clamp-2">{lab.description}</p>
                 <div className="grid grid-cols-2 gap-2 text-center">
                   <div className="rounded-lg bg-muted/50 p-2">
-                    <p className="text-sm font-mono font-semibold text-foreground">{lab.duration}m</p>
-                    <p className="text-[9px] text-muted-foreground uppercase">Duration</p>
+                    <p className="text-sm font-mono font-semibold text-foreground">{lab.is_persistent ? "∞" : `${lab.duration}m`}</p>
+                    <p className="text-[9px] text-muted-foreground uppercase">Total minutes</p>
                   </div>
                   <div className="rounded-lg bg-muted/50 p-2">
                     <p className="text-sm font-mono font-semibold text-foreground">{lab.idle_timeout}m</p>
@@ -282,6 +283,7 @@ export default function LabManagement() {
                   <Badge variant="outline" className="text-[10px] font-mono">{lab.vm_size}</Badge>
                   <Badge variant="outline" className="text-[10px]">{lab.protocol}</Badge>
                   <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
+                  <Badge variant="outline" className={cn("text-[10px]", lab.is_persistent ? "text-success border-success/30" : "")}>{lab.is_persistent ? "Persistent" : "Non-persistent"}</Badge>
                   {!lab.clipboard_enabled && <Badge variant="outline" className="text-[10px] text-warning border-warning/30">No Clipboard</Badge>}
                 </div>
                 {lab.status === 'published' && (
@@ -372,9 +374,21 @@ export default function LabManagement() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
-                  <Label>Duration (minutes)</Label>
-                  <Input type="number" value={form.duration} onChange={e => setForm({ ...form, duration: Number(e.target.value) })} />
+                  <Label>Persistence</Label>
+                  <Select value={form.is_persistent ? "persistent" : "non-persistent"} onValueChange={v => setForm({ ...form, is_persistent: v === "persistent" })}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="persistent">Persistent</SelectItem>
+                      <SelectItem value="non-persistent">Non-persistent</SelectItem>
+                    </SelectContent>
+                  </Select>
                 </div>
+                <div className="space-y-2">
+                  <Label>Total minutes</Label>
+                  <Input type="number" value={form.duration} onChange={e => setForm({ ...form, duration: Number(e.target.value) })} disabled={form.is_persistent} />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label>Idle Timeout (minutes)</Label>
                   <Input type="number" value={form.idle_timeout} onChange={e => setForm({ ...form, idle_timeout: Number(e.target.value) })} />
