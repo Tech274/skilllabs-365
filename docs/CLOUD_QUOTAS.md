@@ -24,6 +24,22 @@ Per region, **labs fit** = min of:
 2. remaining total regional cores ÷ sku vCPU  
 3. remaining Public IP Addresses (1 IP per lab)
 
+## VM families (follow-on)
+
+Azure sync keeps the **full Compute `*Family` set** returned by location usages — not BS-only.
+Each region snapshot includes per-family **limit / usage / remaining** (and family-only `labsFit` at the SKU vCPU basis).
+
+Lab-relevant families (provision / Launch Lab fallback chain):
+
+- `standardBSFamily` — Standard_B2s / B2ms
+- `standardDSv3Family` — Standard_D2s_v3
+- `standardDSv5Family` — Standard_D2s_v5
+- `standardDASv5Family` — Standard_D2as_v5
+- plus other `*Family` keys Azure returns for the subscription
+
+Admin UI: region filter + family filter; Top 5 bankable regions; home = `centralindia`.
+Clear copy when remaining / labsFit is 0 (eastus BS unavailable + DSv5=0 must be visible).
+
 ## Persistence
 
 | Table | Purpose |
@@ -43,6 +59,6 @@ Existing `azure-quota` (Index widget, eastus + centralindia) is unchanged.
 ## Gaps to document in PR
 
 1. AWS Service Quotas (EC2 On-Demand / elastic IPs) not connected.  
-2. Azure sync covers a curated region list (not every subscription location).  
+2. Azure sync covers a curated region list (not every subscription location), but **all** `*Family` quotas within those regions are retained.  
 3. Quota increase requests are Hub-only records — Ops files the cloud ticket manually.  
 4. Public IP metric omitted for a region when Network usages call fails (Compute still used).

@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   ASSUMED_LAB_SKU,
   AZURE_HOME_REGION,
+  buildFamilyQuotaRows,
   calcLabsFit,
+  collectFamilyKeys,
   deriveSkuNeeds,
   formatSyncAgo,
+  isAzureFamilyUsageKey,
   rankBankableRegions,
   remaining,
+  shouldKeepComputeUsage,
+  zeroCapacityCopy,
   type RegionQuotaRow,
 } from "./cloud-quotas";
 
@@ -102,5 +107,57 @@ describe("cloud-quotas capacity helpers", () => {
     const now = Date.parse("2026-09-17T10:00:00Z");
     expect(formatSyncAgo(new Date(now - 30_000).toISOString(), now)).toBe("30s ago");
     expect(formatSyncAgo(null, now)).toBe("Never");
+  });
+
+  it("keeps every Azure *Family usage key (not BS-only)", () => {
+    expect(isAzureFamilyUsageKey("standardBSFamily")).toBe(true);
+    expect(isAzureFamilyUsageKey("standardDSv5Family")).toBe(true);
+    expect(isAzureFamilyUsageKey("cores")).toBe(false);
+    expect(shouldKeepComputeUsage("standardDSv5Family")).toBe(true);
+    expect(shouldKeepComputeUsage("standardExoticFamily")).toBe(true);
+    expect(shouldKeepComputeUsage("cores")).toBe(true);
+    expect(shouldKeepComputeUsage("availabilitySets")).toBe(false);
+  });
+
+  it("builds per-family limit/usage/remaining rows", () => {
+    const rows = buildFamilyQuotaRows(
+      [
+        { key: "standardBSFamily", name: "BS Family", currentUsage: 8, limit: 10, unit: "Count" },
+        { key: "standardDSv5Family", name: "DSv5 Family", currentUsage: 0, limit: 0, unit: "Count" },
+        { key: "cores", name: "cores", currentUsage: 1, limit: 100, unit: "Count" },
+      ],
+      2,
+    );
+    expect(rows.map((r) => r.key)).toEqual(["standardBSFamily", "standardDSv5Family"]);
+    expect(rows[0].remaining).toBe(2);
+    expect(rows[0].labsFit).toBe(1);
+    expect(rows[0].labRelevant).toBe(true);
+    expect(rows[1].remaining).toBe(0);
+    expect(rows[1].labsFit).toBe(0);
+  });
+
+  it("explains zero remaining / labsFit for ops", () => {
+    expect(zeroCapacityCopy({ remaining: 0, familyLabel: "standardDSv5Family" })).toMatch(/No remaining capacity/i);
+    expect(zeroCapacityCopy({ labsFit: 0, limitingFactor: "Public IP Addresses" })).toMatch(/labsFit is 0/i);
+    expect(zeroCapacityCopy({ labsFit: 3, remaining: 6 })).toBeNull();
+  });
+
+  it("collects family keys across regions for filters", () => {
+    const keys = collectFamilyKeys([
+      {
+        region: "eastus",
+        displayName: "East US",
+        isHome: false,
+        metrics: [
+          { key: "standardDSv5Family", name: "DSv5", currentUsage: 0, limit: 0, unit: "Count" },
+          { key: "standardBSFamily", name: "BS", currentUsage: 1, limit: 10, unit: "Count" },
+        ],
+        labsFit: 0,
+        limitingFactor: "x",
+        syncOk: true,
+      },
+    ]);
+    expect(keys[0]).toBe("standardBSFamily");
+    expect(keys).toContain("standardDSv5Family");
   });
 });
