@@ -1731,7 +1731,11 @@ export type Database = {
         Row: {
           azure_vm_id: string | null
           created_at: string
+          ended_at: string | null
+          ended_by: string | null
+          ended_reason: string | null
           expires_at: string | null
+          expiry_warned_at: string | null
           id: string
           idle_minutes: number
           lab_template_id: string | null
@@ -1746,7 +1750,11 @@ export type Database = {
         Insert: {
           azure_vm_id?: string | null
           created_at?: string
+          ended_at?: string | null
+          ended_by?: string | null
+          ended_reason?: string | null
           expires_at?: string | null
+          expiry_warned_at?: string | null
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null
@@ -1761,7 +1769,11 @@ export type Database = {
         Update: {
           azure_vm_id?: string | null
           created_at?: string
+          ended_at?: string | null
+          ended_by?: string | null
+          ended_reason?: string | null
           expires_at?: string | null
+          expiry_warned_at?: string | null
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null

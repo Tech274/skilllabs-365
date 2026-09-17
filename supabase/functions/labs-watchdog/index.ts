@@ -1,9 +1,13 @@
 // Orphan/expiry watchdog.
 //
 // Scans for labs and sessions that are past their expires_at (or hopelessly
-// stuck) and triggers an idempotent cancellation + Azure cleanup for each one.
+// stuck) and triggers an idempotent soft cleanup for each one.
+// Soft-expiry policy (Atlas GO): deallocate + DB deallocated + notify —
+// NEVER silently hard-delete Azure VMs on lab window expiry.
+// Hard delete only when ALLOW_AUTO_TERMINATE=true (off by default) or via
+// admin delete-vm / cancel-provisioning / purge-failed in cleanup-idle-labs.
 // Safe to run every minute: every action is guarded by a deterministic
-// idempotency key so repeated runs never delete twice or double-log.
+// idempotency key so repeated runs never double-act or double-log.
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { corsHeadersFor, requireAdmin, jsonResponse, errorResponse } from "../_shared/auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
@@ -14,6 +18,12 @@ const SOURCE = "labs-watchdog";
 const WATCHDOG_USER = "00000000-0000-0000-0000-000000000000";
 const STUCK_PROVISIONING_MINUTES = 20;
 const MAX_PER_RUN = 50;
+
+/** When true, expiry/stuck paths may hard-delete Azure VMs. Default: off. */
+function allowAutoTerminate(): boolean {
+  const v = (Deno.env.get("ALLOW_AUTO_TERMINATE") || "").trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
 
 async function getAzureToken(tenantId: string, clientId: string, clientSecret: string): Promise<string> {
   const res = await fetch(`https://login.microsoftonline.com/${tenantId}/oauth2/v2.0/token`, {
@@ -28,6 +38,23 @@ async function getAzureToken(tenantId: string, clientId: string, clientSecret: s
   });
   if (!res.ok) throw new Error(`Azure auth failed: ${await res.text()}`);
   return (await res.json()).access_token;
+}
+
+async function deallocateAzureVM(
+  token: string,
+  subscriptionId: string,
+  resourceGroup: string,
+  vmName: string,
+): Promise<boolean> {
+  const res = await fetch(
+    `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}/deallocate?api-version=2024-03-01`,
+    { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+  );
+  if (!res.ok) {
+    console.error(`watchdog: deallocate VM ${vmName} failed: ${await res.text()}`);
+    return false;
+  }
+  return true;
 }
 
 async function deleteAzureVM(
@@ -51,6 +78,40 @@ function extractVmName(azureVmId: string): string {
   return azureVmId.includes("/") ? azureVmId.split("/").pop()! : azureVmId;
 }
 
+async function markVmEnded(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  vmId: string,
+  patch: { status: string; ended_by: string; ended_reason: string; ended_at: string },
+) {
+  await supabase.from("virtual_machines").update({
+    status: patch.status,
+    ended_by: patch.ended_by,
+    ended_reason: patch.ended_reason,
+    ended_at: patch.ended_at,
+  }).eq("id", vmId);
+}
+
+async function notifyLearnerAndAdmins(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  opts: { userId?: string | null; type: string; title: string; message: string },
+) {
+  const { data: adminRoles } = await supabase.from("user_roles").select("user_id").eq("role", "admin");
+  const adminIds: string[] = (adminRoles ?? []).map((r: { user_id: string }) => r.user_id);
+  const recipients = new Set<string>(adminIds);
+  if (opts.userId) recipients.add(opts.userId);
+  if (recipients.size === 0) return;
+  const rows = [...recipients].map((uid) => ({
+    user_id: uid,
+    type: opts.type,
+    title: opts.title,
+    message: opts.message,
+  }));
+  const { error } = await supabase.from("notifications").insert(rows);
+  if (error) console.error("watchdog notify failed:", error.message);
+}
+
 interface WatchdogVm {
   id: string;
   user_id: string | null;
@@ -59,6 +120,7 @@ interface WatchdogVm {
   status: string;
   expires_at: string | null;
   provider_account_id: string | null;
+  created_at?: string | null;
 }
 
 Deno.serve(async (req) => {
@@ -92,14 +154,41 @@ Deno.serve(async (req) => {
   const now = new Date();
   const nowIso = now.toISOString();
   const stuckCutoff = new Date(now.getTime() - STUCK_PROVISIONING_MINUTES * 60_000).toISOString();
+  const warnHorizon = new Date(now.getTime() + 15 * 60_000).toISOString();
   const actions: string[] = [];
   const skipped: string[] = [];
+  const hardDeleteAllowed = allowAutoTerminate();
 
   try {
+    // 0. Pre-expiry warning (T-15m) — cheap, before soft-expiry cleanup.
+    if (!dryRun) {
+      const { data: soonExpiring } = await supabase
+        .from("virtual_machines")
+        .select("id, user_id, azure_vm_id, expires_at")
+        .in("status", ["provisioning", "starting", "running"])
+        .not("expires_at", "is", null)
+        .gt("expires_at", nowIso)
+        .lte("expires_at", warnHorizon)
+        .is("expiry_warned_at", null)
+        .limit(MAX_PER_RUN);
+
+      for (const vm of soonExpiring ?? []) {
+        const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
+        await notifyLearnerAndAdmins(supabase, {
+          userId: vm.user_id,
+          type: "lab_expiry_warning",
+          title: "Lab expires in ~15 minutes",
+          message: `Lab VM ${label} expires at ${vm.expires_at}. Save work now — at expiry the VM will be deallocated (not deleted).`,
+        });
+        await supabase.from("virtual_machines").update({ expiry_warned_at: nowIso }).eq("id", vm.id);
+        actions.push(`vm ${vm.id.slice(0, 8)}: pre-expiry warn`);
+      }
+    }
+
     // 1. Labs past expires_at, plus labs wedged in provisioning far too long.
     const { data: expiredVms } = await supabase
       .from("virtual_machines")
-      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id")
+      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, created_at")
       .in("status", ["provisioning", "starting", "running", "deallocated"])
       .not("expires_at", "is", null)
       .lt("expires_at", nowIso)
@@ -107,13 +196,33 @@ Deno.serve(async (req) => {
 
     const { data: stuckVms } = await supabase
       .from("virtual_machines")
-      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id")
+      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, created_at")
       .eq("status", "provisioning")
       .lt("created_at", stuckCutoff)
       .limit(MAX_PER_RUN);
 
+    // Tag reason per target
+    const reasons = new Map<string, string>();
     const targets = new Map<string, WatchdogVm>();
-    for (const vm of [...(expiredVms ?? []), ...(stuckVms ?? [])] as WatchdogVm[]) targets.set(vm.id, vm);
+    for (const vm of (expiredVms ?? []) as WatchdogVm[]) {
+      // Skip already-deallocated that only need DB metadata if already ended for expiry —
+      // still process if status is deallocated but expires_at passed without ended_reason
+      // (idempotency key handles repeats). Prefer soft path for running/provisioning/starting.
+      if (vm.status === "deallocated") {
+        // Already soft-held; do not re-act unless hard-delete gate is on (v2 soft-hold purge).
+        // TODO(v2): soft-hold purge days later under ALLOW_AUTO_TERMINATE / admin.
+        skipped.push(`vm ${vm.id.slice(0, 8)}: already deallocated (soft-hold; purge parked v2)`);
+        continue;
+      }
+      targets.set(vm.id, vm);
+      reasons.set(vm.id, "lab_window_expired");
+    }
+    for (const vm of (stuckVms ?? []) as WatchdogVm[]) {
+      if (!targets.has(vm.id)) {
+        targets.set(vm.id, vm);
+        reasons.set(vm.id, "stuck_provisioning");
+      }
+    }
 
     // 2. Active sessions whose VM already died or whose expiry passed.
     const { data: expiredSessions } = await supabase
@@ -128,8 +237,10 @@ Deno.serve(async (req) => {
       return jsonResponse({
         dry_run: true,
         correlation_id: correlationId,
+        allow_auto_terminate: hardDeleteAllowed,
         expired_vms: [...targets.keys()],
         expired_sessions: (expiredSessions ?? []).map((s) => s.id),
+        policy: "soft_expiry_deallocate",
       });
     }
 
@@ -144,11 +255,14 @@ Deno.serve(async (req) => {
       if (s.vm_id && !targets.has(s.vm_id)) {
         const { data: vm } = await supabase
           .from("virtual_machines")
-          .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id")
+          .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, created_at")
           .eq("id", s.vm_id)
-          .not("status", "in", "(terminated,failed)")
+          .not("status", "in", "(terminated,failed,deallocated)")
           .maybeSingle();
-        if (vm) targets.set(vm.id, vm as WatchdogVm);
+        if (vm) {
+          targets.set(vm.id, vm as WatchdogVm);
+          reasons.set(vm.id, "lab_window_expired");
+        }
       }
     }
 
@@ -174,7 +288,8 @@ Deno.serve(async (req) => {
 
     for (const vm of targets.values()) {
       // Deterministic key: one cleanup per VM per expiry window, ever.
-      const key = `watchdog:${vm.id}:${vm.expires_at ?? "stuck"}`;
+      const endedReason = reasons.get(vm.id) || "lab_window_expired";
+      const key = `watchdog:${vm.id}:${vm.expires_at ?? "stuck"}:soft`;
       const userId = vm.user_id ?? WATCHDOG_USER;
       const claim = await claimIdempotency(supabase, {
         key,
@@ -195,9 +310,11 @@ Deno.serve(async (req) => {
       });
 
       try {
-        await timeline.start(SOURCE, "watchdog-cleanup", "Expired lab detected — releasing resources", {
+        await timeline.start(SOURCE, "watchdog-cleanup", "Expired/stuck lab detected — soft releasing resources", {
           previous_status: vm.status,
           expires_at: vm.expires_at,
+          ended_reason: endedReason,
+          allow_auto_terminate: hardDeleteAllowed,
         });
 
         await supabase
@@ -206,23 +323,71 @@ Deno.serve(async (req) => {
           .eq("vm_id", vm.id)
           .eq("status", "active");
 
+        let azureDeallocated = false;
         let azureDeleted = false;
         if (vm.azure_vm_id) {
           try {
             const az = await azureFor(vm.provider_account_id);
-            azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
+            const vmName = extractVmName(vm.azure_vm_id);
+            if (hardDeleteAllowed) {
+              // Explicit opt-in only — never the default expiry path.
+              azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+            } else {
+              azureDeallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+            }
           } catch (e) {
-            await timeline.failed(SOURCE, "azure-delete", e instanceof Error ? e.message : "Azure delete failed");
+            await timeline.failed(
+              SOURCE,
+              hardDeleteAllowed ? "azure-delete" : "azure-deallocate",
+              e instanceof Error ? e.message : "Azure action failed",
+            );
           }
         }
 
-        await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", vm.id);
-        const response = { success: true, vm_id: vm.id, azure_deleted: azureDeleted, correlation_id: correlationId };
-        await completeIdempotency(supabase, { key, userId, action: "watchdog-cleanup", response });
-        await timeline.success(SOURCE, "watchdog-cleanup", "Expired lab terminated by watchdog", {
-          azure_deleted: azureDeleted,
+        // Soft path: always deallocated (even if Azure call failed / no azure_vm_id)
+        // so we never leave status running and never mark terminated without an explicit delete.
+        // Hard path (ALLOW_AUTO_TERMINATE): terminated only when delete was attempted.
+        const nextStatus = hardDeleteAllowed ? "terminated" : "deallocated";
+        await markVmEnded(supabase, vm.id, {
+          status: nextStatus,
+          ended_by: SOURCE,
+          ended_reason: endedReason,
+          ended_at: nowIso,
         });
-        actions.push(`vm ${vm.id.slice(0, 8)}: terminated${azureDeleted ? " (azure deleted)" : ""}`);
+
+        const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
+        await notifyLearnerAndAdmins(supabase, {
+          userId: vm.user_id,
+          type: endedReason === "stuck_provisioning" ? "lab_stuck" : "lab_expired",
+          title: hardDeleteAllowed
+            ? "Lab terminated by watchdog"
+            : "Lab window expired — VM deallocated",
+          message: hardDeleteAllowed
+            ? `Lab VM ${label} was hard-terminated (ALLOW_AUTO_TERMINATE). Reason: ${endedReason}.`
+            : `Lab VM ${label} was soft-stopped (deallocated). Reason: ${endedReason}. Resources are held, not deleted.`,
+        });
+
+        const response = {
+          success: true,
+          vm_id: vm.id,
+          azure_deallocated: azureDeallocated,
+          azure_deleted: azureDeleted,
+          status: nextStatus,
+          ended_reason: endedReason,
+          correlation_id: correlationId,
+        };
+        await completeIdempotency(supabase, { key, userId, action: "watchdog-cleanup", response });
+        await timeline.success(SOURCE, "watchdog-cleanup", hardDeleteAllowed
+          ? "Expired lab terminated by watchdog (ALLOW_AUTO_TERMINATE)"
+          : "Expired lab soft-deallocated by watchdog", {
+          azure_deallocated: azureDeallocated,
+          azure_deleted: azureDeleted,
+          status: nextStatus,
+        });
+        actions.push(
+          `vm ${vm.id.slice(0, 8)}: ${nextStatus}` +
+            (azureDeleted ? " (azure deleted)" : azureDeallocated ? " (azure deallocated)" : " (db only)"),
+        );
       } catch (e) {
         await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
         await timeline.failed(SOURCE, "watchdog-cleanup", e instanceof Error ? e.message : "Watchdog cleanup failed");
@@ -254,6 +419,8 @@ Deno.serve(async (req) => {
       actions,
       skipped,
       checked_at: nowIso,
+      allow_auto_terminate: hardDeleteAllowed,
+      policy: "soft_expiry_deallocate",
     });
   } catch (e) {
     console.error("labs-watchdog failed:", e);
