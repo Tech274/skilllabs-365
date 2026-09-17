@@ -22,6 +22,28 @@ export function learnerFailureCopy(raw?: string | null): {
   detail: string;
   tip: string;
 } {
+  const key = (raw || "").trim();
+  if (key === "secure_desktop_retry_exhausted") {
+    return {
+      title: "We paused reconnecting for a moment",
+      detail:
+        "Your lab desktop did not come up cleanly after a few tries. This is usually temporary — take a short break, then open the lab again from Labs.",
+      tip: "Ops can see the technical details. WhatsApp us if it keeps happening.",
+    };
+  }
+  if (
+    key === "secure_desktop_frame_timeout" ||
+    key === "secure_desktop_blank_frame" ||
+    key === "secure_desktop_frame_error" ||
+    key === "secure_desktop_user_reported"
+  ) {
+    return {
+      title: "Your lab desktop needs another moment",
+      detail:
+        "The secure viewer opened, but the remote session did not settle. You can try again — we will not keep spinning forever.",
+      tip: "If this repeats, message Ops on WhatsApp with the lab name and time.",
+    };
+  }
   const detail = sanitizeLearnerMessage(raw);
   return {
     title: "We couldn't open your lab just yet",

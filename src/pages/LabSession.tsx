@@ -36,6 +36,8 @@ import {
 } from "@/lib/guac-connect";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
+/** Cap learner retries so Guac error pages never spin reconnect forever. */
+const MAX_LEARNER_RECONNECTS = 3;
 const isMixedContent = (url: string) => {
   try {
     return window.location.protocol === "https:" && new URL(url).protocol === "http:";
@@ -82,8 +84,13 @@ export default function LabSession() {
 
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
   const [iframeLoadFailed, setIframeLoadFailed] = useState(false);
+  /** Guac shell loaded (cross-origin) but remote SSH/RDP may still be failing inside the iframe. */
+  const [awaitingDesktop, setAwaitingDesktop] = useState(false);
   const [idleWarningMinutes, setIdleWarningMinutes] = useState(0);
+  const [reconnectAttempts, setReconnectAttempts] = useState(0);
+  const reconnectAttemptsRef = useRef(0);
   const iframeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const desktopSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActivityRef = useRef<number>(Date.now());
   const idleUpdateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const idleWarningIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -121,9 +128,20 @@ export default function LabSession() {
       privateIp: data.vm_ip || prev.privateIp,
       region: (data.region && String(data.region).trim()) || prev.region,
     }));
-    setConnectionState("connected");
+    // Do not claim "Connected" until the iframe document loads. Cross-origin Guac
+    // error pages still fire onLoad — we only treat that as shell-ready, then settle.
+    setConnectionState("connecting");
     setIframeLoadFailed(false);
-    iframeTimerRef.current = setTimeout(() => setIframeLoadFailed(true), 15000);
+    setAwaitingDesktop(true);
+    if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
+    if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
+    // If the Guac document never loads, fail closed (calm panel) — no infinite spin.
+    iframeTimerRef.current = setTimeout(() => {
+      setIframeLoadFailed(true);
+      setAwaitingDesktop(false);
+      setConnectionState("error");
+      setLastError("secure_desktop_frame_timeout");
+    }, 20000);
   }, []);
 
   const createGuacSession = useCallback(async (targetVmId: string) => {
@@ -257,13 +275,28 @@ export default function LabSession() {
   };
 
   const handleReconnect = async () => {
+    if (reconnectAttemptsRef.current >= MAX_LEARNER_RECONNECTS) {
+      setConnectionState("error");
+      setIframeLoadFailed(true);
+      setAwaitingDesktop(false);
+      setLastError("secure_desktop_retry_exhausted");
+      return;
+    }
+    const attempt = reconnectAttemptsRef.current;
+    reconnectAttemptsRef.current = attempt + 1;
+    setReconnectAttempts(attempt + 1);
     setConnectionState("connecting");
     setLastError(null);
+    setIframeLoadFailed(false);
     try {
-      if (dbSessionId && vmId) {
+      // First soft retry: rotate scoped token. Later retries: remint create-session
+      // (and reset idempotency) so we do not spin on a dead Guac connection.
+      if (dbSessionId && vmId && attempt === 0) {
         const data = await fetchTokenizedGuacUrl(vmId, { action: "reconnect", sessionId: dbSessionId });
         applyGuacResult(data);
       } else if (vmId) {
+        resetIdempotency(`guac-session:${vmId}`);
+        setDbSessionId(null);
         await createGuacSession(vmId);
       } else {
         setLastError("This lab session is missing a VM. Go back to Labs and launch again.");
@@ -273,6 +306,7 @@ export default function LabSession() {
       console.error("Reconnect failed:", err);
       setLastError(err instanceof Error ? err.message : "Reconnect failed");
       setConnectionState("error");
+      setAwaitingDesktop(false);
     }
   };
 
@@ -543,7 +577,7 @@ export default function LabSession() {
         </AnimatePresence>
 
         {/* Guacamole iframe / Placeholder */}
-        {connectionState === "connected" && (
+        {(connectionState === "connected" || (connectionState === "connecting" && !!guacamoleUrl)) && (
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -570,10 +604,38 @@ export default function LabSession() {
                   <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-background px-4">
                     <LearnerProvisioningPanel
                       mode="failed"
-                      errorMessage={canDebug && showTechnicalTrace ? `Failed to load session frame: ${guacamoleUrl}` : null}
-                      onRetry={() => { setIframeLoadFailed(false); handleReconnect(); }}
+                      errorMessage={
+                        canDebug && showTechnicalTrace
+                          ? `Failed to load session frame (attempt ${reconnectAttempts}/${MAX_LEARNER_RECONNECTS}): ${guacamoleUrl}`
+                          : reconnectAttempts >= MAX_LEARNER_RECONNECTS
+                            ? "secure_desktop_retry_exhausted"
+                            : null
+                      }
+                      onRetry={
+                        reconnectAttempts >= MAX_LEARNER_RECONNECTS
+                          ? undefined
+                          : () => { setIframeLoadFailed(false); handleReconnect(); }
+                      }
                       onBack={() => navigate("/labs")}
                     />
+                  </div>
+                )}
+                {awaitingDesktop && !iframeLoadFailed && connectionState === "connected" && (
+                  <div className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-border bg-card/95 px-4 py-2 text-xs text-muted-foreground shadow-sm backdrop-blur-sm flex items-center gap-3">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+                    <span>Opening your lab desktop…</span>
+                    <button
+                      type="button"
+                      className="font-medium text-primary hover:underline"
+                      onClick={() => {
+                        setAwaitingDesktop(false);
+                        setIframeLoadFailed(true);
+                        setConnectionState("error");
+                        setLastError("secure_desktop_user_reported");
+                      }}
+                    >
+                      Not working?
+                    </button>
                   </div>
                 )}
                 <iframe
@@ -585,18 +647,36 @@ export default function LabSession() {
                   title="Lab Session"
                   onLoad={() => {
                     if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
-                    // Try to detect blank iframe (cross-origin will throw)
+                    // Cross-origin Guac pages (including error/reconnect UI) always throw here.
+                    // Treat onLoad as "shell ready" only — NOT proof SSH/RDP succeeded.
                     try {
                       const doc = iframeRef.current?.contentDocument;
                       if (doc && (doc.body?.innerHTML === "" || doc.body?.childElementCount === 0)) {
                         setIframeLoadFailed(true);
+                        setAwaitingDesktop(false);
+                        setConnectionState("error");
+                        setLastError("secure_desktop_blank_frame");
+                        return;
                       }
-                    } catch {
-                      // Cross-origin — iframe loaded successfully from remote server
+                      // Same-origin empty check passed — rare for Guac
                       setIframeLoadFailed(false);
+                      setConnectionState("connected");
+                      setAwaitingDesktop(false);
+                    } catch {
+                      setIframeLoadFailed(false);
+                      setConnectionState("connected");
+                      // Keep a calm settle banner; learner can fail-closed if desktop never appears.
+                      setAwaitingDesktop(true);
+                      if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
+                      desktopSettleRef.current = setTimeout(() => setAwaitingDesktop(false), 12000);
                     }
                   }}
-                  onError={() => setIframeLoadFailed(true)}
+                  onError={() => {
+                    setIframeLoadFailed(true);
+                    setAwaitingDesktop(false);
+                    setConnectionState("error");
+                    setLastError("secure_desktop_frame_error");
+                  }}
                 />
               </>
             ) : (
@@ -660,7 +740,7 @@ export default function LabSession() {
       </div>
 
       {/* Bottom status bar */}
-      {showToolbar && connectionState === "connected" && (
+      {showToolbar && (connectionState === "connected" || (connectionState === "connecting" && !!guacamoleUrl)) && (
         <div className="flex items-center justify-between px-4 py-1.5 border-t border-border bg-card/80 text-[10px] text-muted-foreground">
           <div className="flex items-center gap-3">
             {canDebug && showTechnicalTrace ? (

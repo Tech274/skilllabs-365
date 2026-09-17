@@ -90,19 +90,24 @@ async function deleteGuacToken(guacBaseUrl: string, token: string): Promise<void
 }
 
 async function createGuacConnection(guacBaseUrl: string, token: string, dataSource: string, conn: GuacConnection): Promise<string> {
+  const protocol = conn.protocol.toLowerCase();
+  const parameters: Record<string, string> = {
+    hostname: conn.hostname,
+    port: conn.port,
+    ...(conn.username ? { username: conn.username } : {}),
+    ...(conn.password ? { password: conn.password } : {}),
+    ...(conn.parameters || {}),
+  };
+  // RDP-only defaults — never apply security/ignore-cert to SSH connections.
+  if (protocol === "rdp") {
+    if (parameters["ignore-cert"] === undefined) parameters["ignore-cert"] = "true";
+    if (parameters["security"] === undefined) parameters["security"] = "any";
+  }
   const payload: Record<string, unknown> = {
     parentIdentifier: "ROOT",
     name: conn.name,
-    protocol: conn.protocol.toLowerCase(),
-    parameters: {
-      hostname: conn.hostname,
-      port: conn.port,
-      "ignore-cert": "true",
-      security: "any",
-      ...(conn.username && { username: conn.username }),
-      ...(conn.password && { password: conn.password }),
-      ...(conn.parameters || {}),
-    },
+    protocol,
+    parameters,
     attributes: { "max-connections": "2", "max-connections-per-user": "1" },
   };
   const res = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/connections?token=${token}`, {
@@ -319,6 +324,39 @@ Deno.serve(async (req) => {
           pendingClaim = null;
           return new Response(JSON.stringify(reused), { status: 200, headers: traceHeaders });
         }
+        // Reuse failed (stale Guac user, etc.) — tear down before minting a replacement.
+        const failTxt = await pwRes.text().catch(() => "");
+        console.warn(`live session reuse password-rotate failed [${pwRes.status}]: ${failTxt.slice(0, 200)}`);
+        await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, liveSession.guac_username);
+        await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, liveSession.guac_connection_id);
+        await supabase.from("sessions").update({
+          ended_at: new Date().toISOString(),
+          status: "completed",
+          disconnect_reason: "reuse_failed_superseded",
+        }).eq("id", liveSession.id);
+        await logSessionEvent(supabase, liveSession.id, "session_end", {
+          reason: "reuse_failed_superseded", correlation_id: correlationId, http_status: pwRes.status,
+        });
+      }
+
+      // Fail-closed against orphan storms: supersede any other active Hub sessions for this VM.
+      const { data: activeSiblings } = await supabase
+        .from("sessions")
+        .select("id, guac_connection_id, guac_username")
+        .eq("vm_id", vm_id)
+        .eq("user_id", user.id)
+        .eq("status", "active");
+      for (const sibling of activeSiblings ?? []) {
+        if (sibling.guac_username) await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, sibling.guac_username);
+        if (sibling.guac_connection_id) await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, sibling.guac_connection_id);
+        await supabase.from("sessions").update({
+          ended_at: new Date().toISOString(),
+          status: "completed",
+          disconnect_reason: "superseded_by_new_connect",
+        }).eq("id", sibling.id);
+        await logSessionEvent(supabase, sibling.id, "session_end", {
+          reason: "superseded_by_new_connect", correlation_id: correlationId,
+        });
       }
 
       const labTemplate = Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates;
@@ -339,6 +377,17 @@ Deno.serve(async (req) => {
         connParams["disable-copy"] = clipOn ? "false" : "true";
         connParams["disable-paste"] = clipOn ? "false" : "true";
         if (labTemplate?.file_transfer_enabled) connParams["enable-drive"] = "true";
+      } else {
+        // SSH defaults (password auth — no passphrase/private-key). Optional SFTP from template.
+        connParams["font-name"] = "monospace";
+        connParams["font-size"] = "12";
+        connParams["color-scheme"] = "gray-black";
+        connParams["terminal-type"] = "xterm-256color";
+        connParams["server-alive-interval"] = "30";
+        const clipOn = !!labTemplate?.clipboard_enabled;
+        connParams["disable-copy"] = clipOn ? "false" : "true";
+        connParams["disable-paste"] = clipOn ? "false" : "true";
+        if (labTemplate?.file_transfer_enabled) connParams["enable-sftp"] = "true";
       }
 
       // VM sign-in credentials belong to the Resource Provider account that created the VM.
