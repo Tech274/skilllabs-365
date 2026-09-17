@@ -31,6 +31,16 @@ Never put a service-role key, Azure credential or Guacamole password in a `VITE_
 | `AI_ALERT_WEBHOOK_URL` (optional) | ai-alerts | outbound alerting |
 | `ALLOWED_ORIGINS` (optional) | all | extra CORS origins, comma separated (custom domains) |
 
+> **Note (Resource Providers):** Azure and AWS lab credentials are stored on
+> `cloud_provider_accounts` (Admin → Resource Providers), not as ambient
+> `AZURE_*` / `AWS_*` edge secrets. Legacy `AZURE_*` env vars in the table above
+> are historical; provision-lab resolves the active provider account at runtime.
+>
+> **AWS lab readiness:** Access Key + Secret, default region (e.g. `ap-south-1`),
+> subnet ID, security group ID, and VM admin password on the AWS provider account.
+> Optional: AMI ID, key pair, VPC ID (auto-filled from subnet). IAM needs EC2
+> Run/Describe/Stop/Terminate, SSM GetParameter (AMI), and Service Quotas read.
+
 ## 3. Deploying database migrations
 
 1. Migrations live in `supabase/migrations/` and are applied through the Lovable Cloud migration flow (approval required).

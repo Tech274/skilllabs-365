@@ -7,6 +7,9 @@ import {
   reconcileProvisioningAgainstAzure,
   applyPromoteToRunning,
 } from "../_shared/azure-reconcile.ts";
+import {
+  resolveAwsRuntime, stopAwsInstance, terminateAwsInstance, describeAwsInstance,
+} from "../_shared/cloud-providers/aws-runtime.ts";
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -111,6 +114,56 @@ function extractVmName(azureVmId: string): string {
     return parts[parts.length - 1];
   }
   return azureVmId;
+}
+
+async function providerOf(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  accountId?: string | null,
+): Promise<"azure" | "aws" | string> {
+  if (!accountId) return "azure";
+  const { data } = await supabase
+    .from("cloud_provider_accounts")
+    .select("provider")
+    .eq("id", accountId)
+    .maybeSingle();
+  return (data?.provider as string) || "azure";
+}
+
+/** Stop (deallocate / StopInstances) a lab VM on its home cloud. */
+async function stopCloudVm(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  azureFor: (accountId?: string | null) => Promise<AzureCtx>,
+  vm: { azure_vm_id: string; provider_account_id?: string | null; region?: string | null },
+): Promise<boolean> {
+  const provider = await providerOf(supabase, vm.provider_account_id);
+  if (provider === "aws") {
+    const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+    if (vm.region) aws.defaultRegion = String(vm.region);
+    await stopAwsInstance(aws, vm.azure_vm_id);
+    return true;
+  }
+  const az = await azureFor(vm.provider_account_id);
+  return await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
+}
+
+/** Delete / terminate a lab VM on its home cloud. */
+async function deleteCloudVm(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  azureFor: (accountId?: string | null) => Promise<AzureCtx>,
+  vm: { azure_vm_id: string; provider_account_id?: string | null; region?: string | null },
+): Promise<boolean> {
+  const provider = await providerOf(supabase, vm.provider_account_id);
+  if (provider === "aws") {
+    const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+    if (vm.region) aws.defaultRegion = String(vm.region);
+    await terminateAwsInstance(aws, vm.azure_vm_id);
+    return true;
+  }
+  const az = await azureFor(vm.provider_account_id);
+  return await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
 }
 
 
@@ -245,11 +298,10 @@ Deno.serve(async (req) => {
 
         if (vm.azure_vm_id) {
           try {
-            const az = await azureFor(vm.provider_account_id);
-            await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
+            await deleteCloudVm(supabase, azureFor, vm);
           } catch (e) {
-            console.error("cancel-provisioning: azure delete failed", e);
-            await timeline.failed(SOURCE, "azure-delete", e instanceof Error ? e.message : "Azure delete failed");
+            console.error("cancel-provisioning: cloud delete failed", e);
+            await timeline.failed(SOURCE, "cloud-delete", e instanceof Error ? e.message : "Cloud delete failed");
           }
         }
 
@@ -295,9 +347,7 @@ Deno.serve(async (req) => {
 
       if (action === "stop-vm") {
         if (vm.azure_vm_id) {
-          const vmName = extractVmName(vm.azure_vm_id);
-          const az = await azureFor(vm.provider_account_id);
-          await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+          await stopCloudVm(supabase, azureFor, vm);
         }
         await markVmEnded(supabase, targetVmId, {
           status: "deallocated",
@@ -318,9 +368,7 @@ Deno.serve(async (req) => {
       if (action === "delete-vm") {
         const deleteReason = actionReason || "admin_delete";
         if (vm.azure_vm_id) {
-          const vmName = extractVmName(vm.azure_vm_id);
-          const az = await azureFor(vm.provider_account_id);
-          await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+          await deleteCloudVm(supabase, azureFor, vm);
         }
         await markVmEnded(supabase, targetVmId, {
           status: "terminated",
@@ -442,12 +490,10 @@ Deno.serve(async (req) => {
       if (purgeVMs?.length) {
         for (const vm of purgeVMs) {
           if (vm.azure_vm_id) {
-            const vmName = extractVmName(vm.azure_vm_id);
             try {
-              const az = await azureFor(vm.provider_account_id);
-              await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+              await deleteCloudVm(supabase, azureFor, vm);
             } catch (e) {
-              console.error("purge-failed: azure delete skipped", e);
+              console.error("purge-failed: cloud delete skipped", e);
             }
           }
           // Delete the DB record entirely
@@ -529,9 +575,7 @@ Deno.serve(async (req) => {
             .maybeSingle();
 
           if (vm?.azure_vm_id) {
-            const vmName = extractVmName(vm.azure_vm_id);
-            const az = await azureFor(vm.provider_account_id);
-            const deallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+            const deallocated = await stopCloudVm(supabase, azureFor, vm);
             if (deallocated) {
               await markVmEnded(supabase, session.vm_id, {
                 status: "deallocated",
@@ -539,7 +583,7 @@ Deno.serve(async (req) => {
                 ended_reason: "idle_timeout",
                 ended_at: now.toISOString(),
               });
-              results.push(`Idle session ${session.id}: deallocated VM ${vmName}`);
+              results.push(`Idle session ${session.id}: deallocated VM ${vm.azure_vm_id}`);
             }
           }
         }
@@ -552,9 +596,7 @@ Deno.serve(async (req) => {
         if (activeSessionVmIds.has(vm.id)) continue; // VM still has active session
         if (!vm.azure_vm_id) continue;
 
-        const vmName = extractVmName(vm.azure_vm_id);
-        const az = await azureFor(vm.provider_account_id);
-        const deallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+        const deallocated = await stopCloudVm(supabase, azureFor, vm);
         if (deallocated) {
           await markVmEnded(supabase, vm.id, {
             status: "deallocated",
@@ -562,7 +604,7 @@ Deno.serve(async (req) => {
             ended_reason: "orphan_no_session",
             ended_at: now.toISOString(),
           });
-          results.push(`Orphan VM ${vmName}: deallocated`);
+          results.push(`Orphan VM ${vm.azure_vm_id}: deallocated`);
         }
       }
     }
@@ -580,10 +622,8 @@ Deno.serve(async (req) => {
 
         let azureOk = true;
         if (vm.azure_vm_id) {
-          const vmName = extractVmName(vm.azure_vm_id);
           try {
-            const az = await azureFor(vm.provider_account_id);
-            azureOk = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+            azureOk = await stopCloudVm(supabase, azureFor, vm);
           } catch (e) {
             azureOk = false;
             console.error("expired soft-path deallocate failed", e);
@@ -654,30 +694,51 @@ Deno.serve(async (req) => {
         let promoted = false;
         if (vm.azure_vm_id) {
           try {
-            const az = await azureFor(vm.provider_account_id);
-            const outcome = await reconcileProvisioningAgainstAzure(az, {
-              azureVmId: vm.azure_vm_id,
-              currentPrivateIp: vm.private_ip ?? null,
-            });
-            if (outcome.kind === "promoted") {
-              await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
-              promoted = true;
-              results.push(
-                `Stuck provisioning VM ${vm.id.substring(0, 8)}: Azure Running → promoted to running (no dealloc)`,
-              );
-            } else if (outcome.kind === "mapped" && outcome.status === "failed") {
-              // Azure already failed — mark failed without deallocate attempt noise.
-              await markVmEnded(supabase, vm.id, {
-                status: "failed",
-                ended_by: SOURCE,
-                ended_reason: "stuck_provisioning",
-                ended_at: now.toISOString(),
+            const provider = await providerOf(supabase, vm.provider_account_id);
+            if (provider === "aws") {
+              const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+              const desc = await describeAwsInstance(aws, vm.azure_vm_id);
+              if (desc.state === "running") {
+                await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
+                promoted = true;
+                results.push(
+                  `Stuck provisioning VM ${vm.id.substring(0, 8)}: AWS running → promoted to running (no stop)`,
+                );
+              } else if (desc.state === "terminated" || desc.state === "shutting-down") {
+                await markVmEnded(supabase, vm.id, {
+                  status: "failed",
+                  ended_by: SOURCE,
+                  ended_reason: "stuck_provisioning",
+                  ended_at: now.toISOString(),
+                });
+                results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: AWS terminated → marked failed`);
+                continue;
+              }
+            } else {
+              const az = await azureFor(vm.provider_account_id);
+              const outcome = await reconcileProvisioningAgainstAzure(az, {
+                azureVmId: vm.azure_vm_id,
+                currentPrivateIp: vm.private_ip ?? null,
               });
-              results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: Azure failed → marked failed`);
-              continue;
+              if (outcome.kind === "promoted") {
+                await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+                promoted = true;
+                results.push(
+                  `Stuck provisioning VM ${vm.id.substring(0, 8)}: Azure Running → promoted to running (no dealloc)`,
+                );
+              } else if (outcome.kind === "mapped" && outcome.status === "failed") {
+                await markVmEnded(supabase, vm.id, {
+                  status: "failed",
+                  ended_by: SOURCE,
+                  ended_reason: "stuck_provisioning",
+                  ended_at: now.toISOString(),
+                });
+                results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: Azure failed → marked failed`);
+                continue;
+              }
             }
           } catch (e) {
-            console.error("stuck provisioning Azure reconcile failed", e);
+            console.error("stuck provisioning cloud reconcile failed", e);
           }
         }
 
@@ -685,10 +746,8 @@ Deno.serve(async (req) => {
 
         // Soft: deallocate if present — do not hard-delete outside admin/cancel/purge paths.
         if (vm.azure_vm_id) {
-          const vmName = extractVmName(vm.azure_vm_id);
           try {
-            const az = await azureFor(vm.provider_account_id);
-            await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+            await stopCloudVm(supabase, azureFor, vm);
           } catch (e) {
             console.error("stuck provisioning deallocate failed", e);
           }

@@ -2,6 +2,7 @@
 // Writes one row per check into public.cloud_provider_health_checks so the
 // admin UI can subscribe over realtime.
 import { tryResolveAzureRuntime, type AzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+import { tryResolveAwsRuntime, type AwsRuntime } from "../_shared/cloud-providers/aws-runtime.ts";
 import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
 import { corsHeadersFor, corsHeaders, requireAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 
@@ -33,13 +34,13 @@ function grade(latency: number): "healthy" | "degraded" {
 }
 
 /** STS GetCallerIdentity — cheap, read-only credential validity + latency probe. */
-async function probeAws(region: string): Promise<Check> {
-  const accessKeyId = Deno.env.get("AWS_ACCESS_KEY_ID");
-  const secretAccessKey = Deno.env.get("AWS_SECRET_ACCESS_KEY");
-  const sessionToken = Deno.env.get("AWS_SESSION_TOKEN");
+async function probeAws(region: string, runtime: AwsRuntime | null): Promise<Check> {
+  const accessKeyId = runtime?.accessKeyId || Deno.env.get("AWS_ACCESS_KEY_ID");
+  const secretAccessKey = runtime?.secretAccessKey || Deno.env.get("AWS_SECRET_ACCESS_KEY");
+  const sessionToken = runtime?.sessionToken || Deno.env.get("AWS_SESSION_TOKEN") || null;
   const base: Check = { provider: "aws", check_name: "STS GetCallerIdentity", status: "unconfigured", latency_ms: null, detail: null, region };
   if (!accessKeyId || !secretAccessKey) {
-    return { ...base, detail: "AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY not set" };
+    return { ...base, detail: "No AWS account with credentials under Admin → Resource Providers" };
   }
 
   const host = "sts.amazonaws.com";
@@ -181,12 +182,18 @@ Deno.serve(async (req) => {
     const { supabase } = auth;
 
     const url = new URL(req.url);
-    const awsRegion = url.searchParams.get("aws_region") || "us-east-1";
     const azureRegion = url.searchParams.get("azure_region") || "eastus";
 
     // Credentials live in the Resource Providers registry (service-role read only).
-    const azureRuntime = await tryResolveAzureRuntime(serviceClient(), null);
-    const [awsCheck, azureToken] = await Promise.all([probeAws(awsRegion), probeAzureToken(azureRuntime)]);
+    const svc = serviceClient();
+    const [azureRuntime, awsRuntime] = await Promise.all([
+      tryResolveAzureRuntime(svc, null),
+      tryResolveAwsRuntime(svc, null),
+    ]);
+    const awsRegion = url.searchParams.get("aws_region")
+      || awsRuntime?.defaultRegion
+      || "ap-south-1";
+    const [awsCheck, azureToken] = await Promise.all([probeAws(awsRegion, awsRuntime), probeAzureToken(azureRuntime)]);
     const [armCheck, computeCheck] = await Promise.all([
       probeAzureArm(azureToken.token, azureRuntime),
       probeAzureCompute(azureToken.token, azureRegion, azureRuntime),

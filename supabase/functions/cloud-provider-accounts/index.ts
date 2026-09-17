@@ -6,6 +6,9 @@ import {
   azureRuntimeFromAccount, listAzureNetworks, rotateVmAdminCredential,
   validateAzureCredentials, vmProvisioningGaps,
 } from "../_shared/cloud-providers/azure-runtime.ts";
+import {
+  awsRuntimeFromAccount, listAwsNetworks, awsVmProvisioningGaps,
+} from "../_shared/cloud-providers/aws-runtime.ts";
 import { diffRecords, recordAudit } from "../_shared/admin-audit.ts";
 
 const PROVIDERS = ["aws", "azure", "gcp", "oci", "ibm", "alibaba", "digitalocean", "other"];
@@ -17,6 +20,17 @@ function publicRow(row: any) {
     try {
       const runtime = azureRuntimeFromAccount({ ...row, credentials: credentials ?? {} });
       const missing = vmProvisioningGaps(runtime);
+      readiness = { ready: missing.length === 0, missing };
+    } catch (e) {
+      readiness = {
+        ready: false,
+        missing: [{ field: "account", label: e instanceof Error ? e.message : "Account incomplete" }],
+      };
+    }
+  } else if (row.provider === "aws") {
+    try {
+      const runtime = awsRuntimeFromAccount({ ...row, credentials: credentials ?? {} });
+      const missing = awsVmProvisioningGaps(runtime);
       readiness = { ready: missing.length === 0, missing };
     } catch (e) {
       readiness = {
@@ -134,11 +148,32 @@ Deno.serve(async (req) => {
       if (!id) return errorResponse("id is required", 400);
       const { data: row } = await admin.from("cloud_provider_accounts").select("*").eq("id", id).maybeSingle();
       if (!row) return errorResponse("Account not found", 404);
-      if (row.provider !== "azure") return errorResponse("Subnet discovery is only available for Azure accounts", 400);
+      if (row.provider !== "azure" && row.provider !== "aws") {
+        return errorResponse("Subnet discovery is only available for Azure and AWS accounts", 400);
+      }
       try {
-        const runtime = azureRuntimeFromAccount(row as any);
-        const networks = await listAzureNetworks(runtime);
-        return jsonResponse(networks);
+        if (row.provider === "azure") {
+          const runtime = azureRuntimeFromAccount(row as any);
+          const networks = await listAzureNetworks(runtime);
+          return jsonResponse(networks);
+        }
+        const runtime = awsRuntimeFromAccount(row as any);
+        const networks = await listAwsNetworks(runtime);
+        // Shape like Azure for the admin picker: flatten VPC/subnet → vnets[].subnets[]
+        return jsonResponse({
+          vnets: networks.vpcs.map((v) => ({
+            id: v.id,
+            name: v.name,
+            location: runtime.defaultRegion,
+            addressPrefixes: v.cidr ? [v.cidr] : [],
+            subnets: v.subnets.map((s) => ({
+              id: s.id,
+              name: s.name + (s.az ? ` (${s.az})` : ""),
+              addressPrefix: s.cidr,
+              vpc_id: v.id,
+            })),
+          })),
+        });
       } catch (e) {
         return errorResponse(e instanceof Error ? e.message : "Failed to list subnets", 400);
       }
