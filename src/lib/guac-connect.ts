@@ -2,18 +2,37 @@
  * Guacamole Connect gate helpers.
  * Learners must never be handed a bare Guacamole URL (native login wall).
  * Only tokenized iframe URLs from guacamole-proxy are allowed.
+ *
+ * Dual-Guac: proxy picks the public host by VM cloud provider. Frontend
+ * trusts known public hosts from the proxy response; private/http URLs are
+ * rewritten using the provider map (aws → guac.skillhub365.co.in,
+ * azure → guac-azure.skillhub365.co.in).
  */
 
 import { supabase } from "@/integrations/supabase/client";
 import { idempotencyHeaders } from "@/lib/idempotency";
 import { readFunctionError } from "@/lib/function-error";
+import {
+  KNOWN_GUAC_PUBLIC_HOSTS,
+  normalizeGuacCloudProvider,
+  publicGuacBaseForProvider,
+  type GuacCloudProvider,
+} from "@/lib/guac-public-hosts";
 
+export type { GuacCloudProvider };
 
-/** Rewrite private/http Guac API hosts to the public HTTPS gateway for iframes. */
-export function toBrowserSafeGuacUrl(url: string): string {
-  const PUBLIC = "https://guac.skillhub365.co.in";
+/** Rewrite private/http Guac API hosts to the provider's public HTTPS gateway. */
+export function toBrowserSafeGuacUrl(
+  url: string,
+  provider?: GuacCloudProvider | string | null,
+): string {
+  const PUBLIC = publicGuacBaseForProvider(provider);
   try {
     const u = new URL(url);
+    // Proxy already returned a known public HTTPS host — trust it.
+    if (u.protocol === "https:" && KNOWN_GUAC_PUBLIC_HOSTS.has(u.hostname)) {
+      return url;
+    }
     const isPrivate =
       u.protocol === "http:" ||
       /^\d{1,3}(?:\.\d{1,3}){3}$/.test(u.hostname) ||
@@ -46,6 +65,7 @@ export type GuacConnectResult = {
   protocol?: string;
   vm_ip?: string;
   region?: string | null;
+  cloud_provider?: GuacCloudProvider;
 };
 
 const LEARNER_HOLD =
@@ -85,8 +105,12 @@ export async function fetchTokenizedGuacUrl(
     throw new Error(await readFunctionError(error, data));
   }
 
+  const cloudProvider = data?.cloud_provider
+    ? normalizeGuacCloudProvider(data.cloud_provider)
+    : undefined;
+
   const iframeUrl = data?.iframe_url
-    ? toBrowserSafeGuacUrl(String(data.iframe_url))
+    ? toBrowserSafeGuacUrl(String(data.iframe_url), cloudProvider)
     : undefined;
   if (!isTokenizedGuacUrl(iframeUrl)) {
     throw new Error(
@@ -100,6 +124,7 @@ export async function fetchTokenizedGuacUrl(
     protocol: data.protocol,
     vm_ip: data.vm_ip,
     region: data.region ?? null,
+    cloud_provider: cloudProvider,
   };
 }
 
@@ -185,6 +210,7 @@ export function takeGuacReady(vmId: string): GuacConnectResult | null {
       protocol: parsed.protocol,
       vm_ip: parsed.vm_ip,
       region: parsed.region ?? null,
+      cloud_provider: parsed.cloud_provider,
     };
   } catch {
     return null;
