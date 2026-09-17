@@ -3,6 +3,10 @@ import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrA
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+import {
+  reconcileProvisioningAgainstAzure,
+  applyPromoteToRunning,
+} from "../_shared/azure-reconcile.ts";
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -636,15 +640,49 @@ Deno.serve(async (req) => {
       console.error("Pre-expiry T-15m warn failed:", e);
     }
 
-    // 4. Mark VMs stuck in 'provisioning' for 10+ minutes as 'failed'
+    // 4. Stuck 'provisioning' (10+ min): Azure-check FIRST.
+    // If PowerState/running → promote to running (+ IP). NEVER deallocate a live Lex hold.
+    // Only fail/soft-dealloc when Azure is still creating / failed / not found / unavailable.
     const { data: stuckVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, created_at, provider_account_id")
+      .select("id, azure_vm_id, created_at, provider_account_id, private_ip")
       .eq("status", "provisioning")
       .lt("created_at", stuckCutoff);
 
     if (stuckVMs?.length) {
       for (const vm of stuckVMs) {
+        let promoted = false;
+        if (vm.azure_vm_id) {
+          try {
+            const az = await azureFor(vm.provider_account_id);
+            const outcome = await reconcileProvisioningAgainstAzure(az, {
+              azureVmId: vm.azure_vm_id,
+              currentPrivateIp: vm.private_ip ?? null,
+            });
+            if (outcome.kind === "promoted") {
+              await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+              promoted = true;
+              results.push(
+                `Stuck provisioning VM ${vm.id.substring(0, 8)}: Azure Running → promoted to running (no dealloc)`,
+              );
+            } else if (outcome.kind === "mapped" && outcome.status === "failed") {
+              // Azure already failed — mark failed without deallocate attempt noise.
+              await markVmEnded(supabase, vm.id, {
+                status: "failed",
+                ended_by: SOURCE,
+                ended_reason: "stuck_provisioning",
+                ended_at: now.toISOString(),
+              });
+              results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: Azure failed → marked failed`);
+              continue;
+            }
+          } catch (e) {
+            console.error("stuck provisioning Azure reconcile failed", e);
+          }
+        }
+
+        if (promoted) continue;
+
         // Soft: deallocate if present — do not hard-delete outside admin/cancel/purge paths.
         if (vm.azure_vm_id) {
           const vmName = extractVmName(vm.azure_vm_id);

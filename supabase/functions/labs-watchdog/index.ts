@@ -13,6 +13,10 @@ import { corsHeadersFor, requireAdmin, jsonResponse, errorResponse } from "../_s
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+import {
+  reconcileProvisioningAgainstAzure,
+  applyPromoteToRunning,
+} from "../_shared/azure-reconcile.ts";
 
 const SOURCE = "labs-watchdog";
 const WATCHDOG_USER = "00000000-0000-0000-0000-000000000000";
@@ -185,6 +189,56 @@ Deno.serve(async (req) => {
       }
     }
 
+    // 0b. Reconcile DB status=provisioning → running when Azure PowerState/running.
+    // Prevents Lex-soak holds from staying "provisioning" forever (admin never polls).
+    if (!dryRun) {
+      const { data: provisioningVms } = await supabase
+        .from("virtual_machines")
+        .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, private_ip, created_at")
+        .eq("status", "provisioning")
+        .not("azure_vm_id", "is", null)
+        .limit(MAX_PER_RUN);
+
+      const azureCacheEarly = new Map<string, Promise<{ token: string; subscriptionId: string; resourceGroup: string }>>();
+      const azureForEarly = (accountId?: string | null) => {
+        const key = accountId ?? "__default__";
+        let entry = azureCacheEarly.get(key);
+        if (!entry) {
+          entry = (async () => {
+            const rt = await resolveAzureRuntime(supabase, accountId ?? null);
+            return {
+              token: await getAzureToken(rt.tenantId, rt.clientId, rt.clientSecret),
+              subscriptionId: rt.subscriptionId,
+              resourceGroup: rt.resourceGroup,
+            };
+          })();
+          azureCacheEarly.set(key, entry);
+        }
+        return entry;
+      };
+
+      for (const vm of provisioningVms ?? []) {
+        try {
+          const az = await azureForEarly(vm.provider_account_id);
+          const outcome = await reconcileProvisioningAgainstAzure(az, {
+            azureVmId: vm.azure_vm_id,
+            currentPrivateIp: vm.private_ip ?? null,
+          });
+          if (outcome.kind === "promoted") {
+            await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+            actions.push(`vm ${vm.id.slice(0, 8)}: reconciled provisioning→running`);
+          } else if (outcome.kind === "mapped" && (outcome.status === "failed" || outcome.status === "deallocated" || outcome.status === "stopped")) {
+            // Mirror check-vm-status: sync terminal Azure states into Hub.
+            await supabase.from("virtual_machines").update({ status: outcome.status }).eq("id", vm.id);
+            actions.push(`vm ${vm.id.slice(0, 8)}: reconciled provisioning→${outcome.status}`);
+          }
+        } catch (e) {
+          console.error(`watchdog reconcile ${vm.id}:`, e);
+          skipped.push(`vm ${vm.id.slice(0, 8)}: reconcile-error`);
+        }
+      }
+    }
+
     // 1. Labs past expires_at, plus labs wedged in provisioning far too long.
     const { data: expiredVms } = await supabase
       .from("virtual_machines")
@@ -325,7 +379,58 @@ Deno.serve(async (req) => {
 
         let azureDeallocated = false;
         let azureDeleted = false;
-        if (vm.azure_vm_id) {
+        let nextStatus = hardDeleteAllowed ? "terminated" : "deallocated";
+        let promotedRunning = false;
+        let privateIp: string | null = null;
+
+        // CRITICAL (Lex soak): stuck_provisioning must Azure-check FIRST.
+        // If PowerState/running → promote DB to running (+ IP); NEVER deallocate.
+        // Only fail/soft-dealloc when Azure is still creating / failed / not found.
+        if (endedReason === "stuck_provisioning" && vm.azure_vm_id) {
+          try {
+            const az = await azureFor(vm.provider_account_id);
+            const outcome = await reconcileProvisioningAgainstAzure(az, {
+              azureVmId: vm.azure_vm_id,
+              currentPrivateIp: null,
+            });
+            if (outcome.kind === "promoted") {
+              await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+              promotedRunning = true;
+              privateIp = outcome.private_ip;
+              nextStatus = "running";
+              await timeline.success(SOURCE, "watchdog-reconcile", "Stuck provisioning was actually Azure Running — promoted to running", {
+                private_ip: privateIp,
+              });
+              const response = {
+                success: true,
+                vm_id: vm.id,
+                azure_deallocated: false,
+                azure_deleted: false,
+                status: "running",
+                ended_reason: "reconciled_running",
+                correlation_id: correlationId,
+                private_ip: privateIp,
+              };
+              await completeIdempotency(supabase, { key, userId, action: "watchdog-cleanup", response });
+              actions.push(`vm ${vm.id.slice(0, 8)}: stuck→running (azure PowerState/running; no dealloc)`);
+              continue;
+            }
+            // mapped failed/stopped/deallocated or still_provisioning / unavailable → fall through to soft/hard release
+            if (outcome.kind === "mapped") {
+              await timeline.start(SOURCE, "watchdog-cleanup", `Stuck provisioning Azure mapped to ${outcome.status} — releasing`, {
+                azure_mapped: outcome.status,
+              });
+            }
+          } catch (e) {
+            await timeline.failed(
+              SOURCE,
+              "azure-reconcile",
+              e instanceof Error ? e.message : "Azure reconcile failed; proceeding to soft release",
+            );
+          }
+        }
+
+        if (!promotedRunning && vm.azure_vm_id) {
           try {
             const az = await azureFor(vm.provider_account_id);
             const vmName = extractVmName(vm.azure_vm_id);
@@ -347,7 +452,7 @@ Deno.serve(async (req) => {
         // Soft path: always deallocated (even if Azure call failed / no azure_vm_id)
         // so we never leave status running and never mark terminated without an explicit delete.
         // Hard path (ALLOW_AUTO_TERMINATE): terminated only when delete was attempted.
-        const nextStatus = hardDeleteAllowed ? "terminated" : "deallocated";
+        // (Skipped when we already promoted stuck→running above.)
         await markVmEnded(supabase, vm.id, {
           status: nextStatus,
           ended_by: SOURCE,

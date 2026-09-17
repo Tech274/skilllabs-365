@@ -2,7 +2,7 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Search,
   RotateCcw,
@@ -91,6 +91,16 @@ export default function VirtualMachines() {
   const [bulkDeleteConfirmText, setBulkDeleteConfirmText] = useState("");
   const [deleteConfirmVmId, setDeleteConfirmVmId] = useState<string | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  const statusPollInFlight = useRef(false);
+  const provisioningIdsKey = useMemo(
+    () =>
+      vms
+        .filter((vm) => vm.status === "provisioning")
+        .map((vm) => vm.id)
+        .sort()
+        .join(","),
+    [vms],
+  );
 
   const fetchVMs = useCallback(async () => {
     setLoading(true);
@@ -306,6 +316,54 @@ export default function VirtualMachines() {
       supabase.removeChannel(channel);
     };
   }, [fetchVMs]);
+
+  // Admin Allocation does not use learner use-provisioning — poll check-vm-status
+  // for rows still in provisioning so Azure Running flips Hub status to running.
+  // Throttled: at most one wave every 15s, sequential invokes, max 8 per wave.
+  useEffect(() => {
+    if (!provisioningIdsKey) return;
+
+    const POLL_MS = 15_000;
+    const MAX_PER_WAVE = 8;
+    const provisioningIds = provisioningIdsKey.split(",").filter(Boolean).slice(0, MAX_PER_WAVE);
+
+    const pollProvisioning = async () => {
+      if (statusPollInFlight.current) return;
+      statusPollInFlight.current = true;
+      try {
+        for (const vmId of provisioningIds) {
+          try {
+            const { data } = await supabase.functions.invoke("check-vm-status", {
+              body: { vm_id: vmId },
+            });
+            const nextStatus = data?.status as string | undefined;
+            if (!nextStatus || nextStatus === "provisioning") continue;
+            setVms((prev) =>
+              prev.map((vm) =>
+                vm.id === vmId
+                  ? {
+                      ...vm,
+                      status: nextStatus,
+                      private_ip: data?.private_ip ?? vm.private_ip,
+                    }
+                  : vm,
+              ),
+            );
+          } catch {
+            // Ignore individual poll errors; next wave retries.
+          }
+        }
+      } finally {
+        statusPollInFlight.current = false;
+      }
+    };
+
+    void pollProvisioning();
+    const timer = window.setInterval(() => {
+      void pollProvisioning();
+    }, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [provisioningIdsKey]);
 
   const filtered = vms.filter((vm) => {
     const q = search.toLowerCase();
