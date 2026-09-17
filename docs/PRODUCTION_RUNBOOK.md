@@ -160,6 +160,11 @@ Manual pre-go-live checks:
 1. Check `GUACAMOLE_URL` reachability and admin credentials.
 2. Run `clear-guacamole` to drop stale connections, then reconnect.
 3. If the gateway container is down, restart the Docker stack; sessions reconnect on next launch.
+4. **Public gateway (`guac.skillhub365.co.in`)** — iframe HTML on `/guacamole/` must be HTTPS. Guacamole also needs a tunnel:
+   - Preferred: WebSocket at `/guacamole/websocket-tunnel` with nginx `Upgrade` / `Connection` headers.
+   - Fallback: HTTP tunnel at `/guacamole/tunnel` (Guacamole returns 400 without a query string — that is expected for a bare probe).
+   - If the UI loads but the session immediately errors/reconnects, verify nginx proxies both tunnel paths to the Guacamole servlet and that guacd can reach the lab VM **private IP:22/3389** on the lab VNet.
+5. Hub `guacamole-proxy` create-session cannot TCP-probe private lab IPs from the edge runtime (reachability-precheck is skipped). SSH readiness is only guaranteed once guacd can open the port — prefer a short settle after Azure reports the VM running, and fail closed in the Hub UI instead of reminting sessions forever.
 
 ### AI outages
 1. `/admin/ai-status` shows provider health, 24h latency/failure graph and breaker state.

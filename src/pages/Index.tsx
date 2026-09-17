@@ -39,7 +39,8 @@ import { AiInsightCard } from "@/components/AiInsightCard";
 import { ProvisioningProgress } from "@/components/ProvisioningProgress";
 import { useProvisioning } from "@/hooks/use-provisioning";
 import { estimateLabCost } from "@/lib/azure-pricing";
-import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency"
+import { fetchTokenizedGuacUrl, stashGuacReady } from "@/lib/guac-connect";
 
 interface QuotaItem {
   name: string;
@@ -158,6 +159,14 @@ const Index = () => {
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
 
       if (data.status === "running") {
+        // Already running: mint tokenized Guac before navigation (same gate as cold start).
+        try {
+          const guac = await fetchTokenizedGuacUrl(data.vm_id);
+          stashGuacReady(data.vm_id, guac);
+        } catch (gateErr) {
+          console.warn("Guac gate for running VM:", gateErr);
+          // LabSession will retry create-session; do not block navigation forever.
+        }
         toast({ title: "VM Ready", description: "Redirecting to your lab session..." });
         navigate(`/labs/session/${lab.id}?vm_id=${data.vm_id}`);
       } else {
