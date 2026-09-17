@@ -25,6 +25,35 @@ interface GuacConnection {
   parameters?: Record<string, string>;
 }
 
+
+/** Browser-facing Guac origin. Never expose http://IP:port to the iframe. */
+function toPublicIframeBase(apiBaseUrl: string): string {
+  const raw = (Deno.env.get("GUACAMOLE_PUBLIC_URL") || "https://guac.skillhub365.co.in").trim().replace(/\/+$/, "");
+  const publicBase = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  try {
+    const api = new URL(apiBaseUrl);
+    const pub = new URL(publicBase);
+    // Force https for browser
+    pub.protocol = "https:";
+    const apiPath = api.pathname.replace(/\/+$/, "") || "";
+    let pubPath = pub.pathname.replace(/\/+$/, "") || "";
+    // Preserve /guacamole suffix when API base has it and public URL is origin-only
+    if (apiPath.endsWith("/guacamole") && !pubPath.endsWith("/guacamole")) {
+      pubPath = `${pubPath}/guacamole`.replace(/\/+/g, "/");
+    } else if (!pubPath && apiPath) {
+      pubPath = apiPath;
+    }
+    return `${pub.origin}${pubPath}`;
+  } catch {
+    return "https://guac.skillhub365.co.in/guacamole";
+  }
+}
+
+function buildPublicIframeUrl(apiBaseUrl: string, clientId: string, token: string): string {
+  const base = toPublicIframeBase(apiBaseUrl);
+  return `${base}/#/client/${encodeURIComponent(clientId)}?token=${token}`;
+}
+
 function buildGuacBaseCandidates(rawUrl: string): string[] {
   const withoutHash = rawUrl.split("#")[0] || "";
   const withoutQuery = withoutHash.split("?")[0] || "";
@@ -266,7 +295,7 @@ Deno.serve(async (req) => {
           const reusedClientId = btoa(`${liveSession.guac_connection_id}\0c\0${dataSource}`);
           const reused = {
             session_id: liveSession.id,
-            iframe_url: `${guacBaseUrl}/#/client/${encodeURIComponent(reusedClientId)}?token=${scoped.token}`,
+            iframe_url: buildPublicIframeUrl(guacBaseUrl, reusedClientId, scoped.token),
             protocol: (labTemplateProtocol(vm) === "ssh" ? "SSH" : "RDP"),
             vm_ip: vm.private_ip,
             region: vm.region ?? null,
@@ -345,7 +374,7 @@ Deno.serve(async (req) => {
       }
 
       const clientId = btoa(`${connectionId}\0c\0${dataSource}`);
-      const iframeUrl = `${guacBaseUrl}/#/client/${encodeURIComponent(clientId)}?token=${scopedToken}`;
+      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, clientId, scopedToken);
 
       const { data: session, error: sessionError } = await supabase
         .from("sessions")
@@ -415,7 +444,7 @@ Deno.serve(async (req) => {
       }
       const scoped = await getGuacToken(GUACAMOLE_URL, sess.guac_username, newPassword);
       const clientId = btoa(`${sess.guac_connection_id}\0c\0${dataSource}`);
-      const iframeUrl = `${guacBaseUrl}/#/client/${encodeURIComponent(clientId)}?token=${scoped.token}`;
+      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, clientId, scoped.token);
       const { data: prevSess } = await supabase
         .from("sessions").select("reconnects").eq("id", session_id).maybeSingle();
       await supabase.from("sessions")

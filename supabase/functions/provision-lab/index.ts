@@ -604,6 +604,7 @@ Deno.serve(async (req) => {
     const regionMap: Record<string, string> = {
       "East US": "eastus",
       "West US": "westus2",
+      "Central US": "centralus",
       "Central India": "centralindia",
       "West Europe": "westeurope",
       "Southeast Asia": "southeastasia",
@@ -620,7 +621,8 @@ Deno.serve(async (req) => {
         user_id: userId,
         lab_template_id: template.id,
         provider_account_id: azure.accountId,
-        region: template.region === "All Regions" ? "East US" : template.region,
+        // Persist actual Azure location (not template display label like "East US")
+        region: azureRegion,
         vm_size: template.vm_size,
         status: "provisioning",
         expires_at: new Date(Date.now() + template.duration * 60 * 1000).toISOString(),

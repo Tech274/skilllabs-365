@@ -8,6 +8,29 @@ import { supabase } from "@/integrations/supabase/client";
 import { idempotencyHeaders } from "@/lib/idempotency";
 import { readFunctionError } from "@/lib/function-error";
 
+
+/** Rewrite private/http Guac API hosts to the public HTTPS gateway for iframes. */
+export function toBrowserSafeGuacUrl(url: string): string {
+  const PUBLIC = "https://guac.skillhub365.co.in";
+  try {
+    const u = new URL(url);
+    const isPrivate =
+      u.protocol === "http:" ||
+      /^\d{1,3}(?:\.\d{1,3}){3}$/.test(u.hostname) ||
+      u.port === "8080";
+    if (!isPrivate && u.protocol === "https:") return url;
+    let path = (u.pathname || "").replace(/\/+$/, "");
+    if (!path.endsWith("/guacamole") && !path.includes("/guacamole")) {
+      path = path ? `${path}/guacamole` : "/guacamole";
+    }
+    // Guac client URLs use /guacamole/#/client/...
+    if (!path.endsWith("/")) path = `${path}/`;
+    return `${PUBLIC}${path}${u.hash || ""}${u.search || ""}`;
+  } catch {
+    return url;
+  }
+}
+
 /** True when URL carries a Guacamole auth token (query or hash). */
 export function isTokenizedGuacUrl(url: string | null | undefined): boolean {
   if (!url || typeof url !== "string") return false;
@@ -62,7 +85,9 @@ export async function fetchTokenizedGuacUrl(
     throw new Error(await readFunctionError(error, data));
   }
 
-  const iframeUrl = data?.iframe_url as string | undefined;
+  const iframeUrl = data?.iframe_url
+    ? toBrowserSafeGuacUrl(String(data.iframe_url))
+    : undefined;
   if (!isTokenizedGuacUrl(iframeUrl)) {
     throw new Error(
       "Secure lab desktop is not ready yet (missing connection token). Please hold and try again.",
