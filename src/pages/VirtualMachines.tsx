@@ -90,6 +90,9 @@ export default function VirtualMachines() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkLoading, setBulkLoading] = useState(false);
   const [showBulkDeleteConfirm, setShowBulkDeleteConfirm] = useState(false);
+  const [bulkDeleteConfirmText, setBulkDeleteConfirmText] = useState("");
+  const [deleteConfirmVmId, setDeleteConfirmVmId] = useState<string | null>(null);
+  const [deleteConfirmText, setDeleteConfirmText] = useState("");
 
   const fetchVMs = useCallback(async () => {
     setLoading(true);
@@ -183,11 +186,13 @@ export default function VirtualMachines() {
     }
   };
 
-  const handleDeleteVM = async (vmId: string) => {
+  const handleDeleteVM = async (vmId: string, reason = "admin_delete") => {
     setActionLoading(vmId);
+    setDeleteConfirmVmId(null);
+    setDeleteConfirmText("");
     try {
       const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
-        body: { action: "delete-vm", vm_id: vmId },
+        body: { action: "delete-vm", vm_id: vmId, reason },
       });
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
@@ -229,12 +234,13 @@ export default function VirtualMachines() {
   const handleBulkDelete = async () => {
     setBulkLoading(true);
     setShowBulkDeleteConfirm(false);
+    setBulkDeleteConfirmText("");
     const ids = Array.from(selectedIds);
     let deleted = 0;
     for (const vmId of ids) {
       try {
         const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
-          body: { action: "delete-vm", vm_id: vmId },
+          body: { action: "delete-vm", vm_id: vmId, reason: "admin_delete" },
         });
         if (!error && !data?.error) deleted++;
       } catch {
@@ -420,7 +426,13 @@ export default function VirtualMachines() {
                 {bulkLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <StopCircle className="h-3.5 w-3.5" />}
                 Stop All
               </Button>
-              <AlertDialog open={showBulkDeleteConfirm} onOpenChange={setShowBulkDeleteConfirm}>
+              <AlertDialog
+                open={showBulkDeleteConfirm}
+                onOpenChange={(open) => {
+                  setShowBulkDeleteConfirm(open);
+                  if (!open) setBulkDeleteConfirmText("");
+                }}
+              >
                 <AlertDialogTrigger asChild>
                   <Button
                     variant="outline"
@@ -437,14 +449,24 @@ export default function VirtualMachines() {
                     <AlertDialogDescription>
                       This will permanently terminate {selectedIds.size} machine
                       {selectedIds.size > 1 ? "s" : ""} and delete their cloud resources. This action cannot be
-                      undone.
+                      undone. Type <span className="font-mono font-semibold text-foreground">DELETE</span> to
+                      confirm.
                     </AlertDialogDescription>
                   </AlertDialogHeader>
+                  <Input
+                    value={bulkDeleteConfirmText}
+                    onChange={(e) => setBulkDeleteConfirmText(e.target.value)}
+                    placeholder='Type DELETE to confirm'
+                    className="font-mono"
+                    autoComplete="off"
+                    aria-label="Type DELETE to confirm bulk delete"
+                  />
                   <AlertDialogFooter>
                     <AlertDialogCancel>Cancel</AlertDialogCancel>
                     <AlertDialogAction
                       onClick={handleBulkDelete}
-                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                      disabled={bulkDeleteConfirmText !== "DELETE"}
+                      className="bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-40"
                     >
                       Delete {selectedIds.size} machines
                     </AlertDialogAction>
@@ -578,7 +600,18 @@ export default function VirtualMachines() {
                             </TooltipTrigger>
                             <TooltipContent>Stop / deallocate</TooltipContent>
                           </Tooltip>
-                          <AlertDialog>
+                          <AlertDialog
+                            open={deleteConfirmVmId === vm.id}
+                            onOpenChange={(open) => {
+                              if (open) {
+                                setDeleteConfirmVmId(vm.id);
+                                setDeleteConfirmText("");
+                              } else if (deleteConfirmVmId === vm.id) {
+                                setDeleteConfirmVmId(null);
+                                setDeleteConfirmText("");
+                              }
+                            }}
+                          >
                             <AlertDialogTrigger asChild>
                               <button
                                 className="p-1.5 rounded hover:bg-destructive/10 text-destructive transition-colors disabled:opacity-40"
@@ -596,14 +629,25 @@ export default function VirtualMachines() {
                                   <span className="font-mono">
                                     {vm.instanceName || `${vm.id.slice(0, 8)}…`}
                                   </span>{" "}
-                                  and delete its cloud resources. This action cannot be undone.
+                                  and delete its cloud resources. This action cannot be undone. Type{" "}
+                                  <span className="font-mono font-semibold text-foreground">DELETE</span> to
+                                  confirm.
                                 </AlertDialogDescription>
                               </AlertDialogHeader>
+                              <Input
+                                value={deleteConfirmVmId === vm.id ? deleteConfirmText : ""}
+                                onChange={(e) => setDeleteConfirmText(e.target.value)}
+                                placeholder='Type DELETE to confirm'
+                                className="font-mono"
+                                autoComplete="off"
+                                aria-label="Type DELETE to confirm VM delete"
+                              />
                               <AlertDialogFooter>
                                 <AlertDialogCancel>Cancel</AlertDialogCancel>
                                 <AlertDialogAction
-                                  onClick={() => handleDeleteVM(vm.id)}
-                                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                  onClick={() => handleDeleteVM(vm.id, "admin_delete")}
+                                  disabled={deleteConfirmText !== "DELETE"}
+                                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-40"
                                 >
                                   Delete machine
                                 </AlertDialogAction>

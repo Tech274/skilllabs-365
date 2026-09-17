@@ -109,6 +109,45 @@ function extractVmName(azureVmId: string): string {
   return azureVmId;
 }
 
+
+/** Persist end metadata on virtual_machines (deallocate / terminate / fail paths). */
+async function markVmEnded(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  vmId: string,
+  patch: { status: string; ended_by: string; ended_reason: string; ended_at?: string },
+) {
+  const ended_at = patch.ended_at ?? new Date().toISOString();
+  await supabase.from("virtual_machines").update({
+    status: patch.status,
+    ended_by: patch.ended_by,
+    ended_reason: patch.ended_reason,
+    ended_at,
+  }).eq("id", vmId);
+}
+
+/** Notify learner (if any) + all admins via notifications table. */
+async function notifyLearnerAndAdmins(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  opts: { userId?: string | null; type: string; title: string; message: string },
+) {
+  const { data: adminRoles } = await supabase.from("user_roles").select("user_id").eq("role", "admin");
+  const adminIds: string[] = (adminRoles ?? []).map((r: { user_id: string }) => r.user_id);
+  const recipients = new Set<string>(adminIds);
+  if (opts.userId) recipients.add(opts.userId);
+  if (recipients.size === 0) return;
+  const rows = [...recipients].map((uid) => ({
+    user_id: uid,
+    type: opts.type,
+    title: opts.title,
+    message: opts.message,
+  }));
+  const { error } = await supabase.from("notifications").insert(rows);
+  if (error) console.error("notifyLearnerAndAdmins failed:", error.message);
+}
+
+
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
@@ -119,11 +158,15 @@ Deno.serve(async (req) => {
     // Parse optional body for manual trigger (before auth so we can branch on action)
     let action = "auto-cleanup";
     let targetVmId: string | null = null;
+    let actionReason: string | null = null;
     let rawBody: Record<string, unknown> = {};
     try {
       rawBody = await req.json();
       action = (rawBody.action as string) || action;
       targetVmId = (rawBody.vm_id as string) || null;
+      actionReason = typeof rawBody.reason === "string" && rawBody.reason.trim()
+        ? (rawBody.reason as string).trim()
+        : null;
     } catch { /* no body = scheduled run */ }
     const correlationId = correlationIdFrom(req);
 
@@ -206,7 +249,11 @@ Deno.serve(async (req) => {
           }
         }
 
-        await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", targetVmId);
+        await markVmEnded(supabase, targetVmId, {
+          status: "terminated",
+          ended_by: auth.userId,
+          ended_reason: actionReason || "cancel_provisioning",
+        });
         const response = { success: true, action: "cancelled", vm_id: targetVmId, correlation_id: correlationId };
         await completeIdempotency(supabase, {
           key: cancelKey,
@@ -248,20 +295,47 @@ Deno.serve(async (req) => {
           const az = await azureFor(vm.provider_account_id);
           await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         }
-        await supabase.from("virtual_machines").update({ status: "deallocated" }).eq("id", targetVmId);
+        await markVmEnded(supabase, targetVmId, {
+          status: "deallocated",
+          ended_by: auth.userId,
+          ended_reason: actionReason || "admin_stop",
+        });
+        console.log(JSON.stringify({
+          event: "vm_stop",
+          vm_id: targetVmId,
+          actor: auth.userId,
+          reason: actionReason || "admin_stop",
+        }));
         return new Response(JSON.stringify({ success: true, action: "stopped", vm_id: targetVmId }), {
           status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
       if (action === "delete-vm") {
+        const deleteReason = actionReason || "admin_delete";
         if (vm.azure_vm_id) {
           const vmName = extractVmName(vm.azure_vm_id);
           const az = await azureFor(vm.provider_account_id);
           await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         }
-        await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", targetVmId);
-        return new Response(JSON.stringify({ success: true, action: "deleted", vm_id: targetVmId }), {
+        await markVmEnded(supabase, targetVmId, {
+          status: "terminated",
+          ended_by: auth.userId,
+          ended_reason: deleteReason,
+        });
+        console.log(JSON.stringify({
+          event: "vm_admin_delete",
+          vm_id: targetVmId,
+          actor: auth.userId,
+          reason: deleteReason,
+        }));
+        return new Response(JSON.stringify({
+          success: true,
+          action: "deleted",
+          vm_id: targetVmId,
+          ended_by: auth.userId,
+          ended_reason: deleteReason,
+        }), {
           status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
@@ -418,11 +492,13 @@ Deno.serve(async (req) => {
     }
 
     // 3. Find expired VMs
+    // TODO(v2): soft-hold purge — days after lab_window_expired deallocate, optionally
+    // hard-delete Azure + DB under explicit admin / ALLOW_AUTO_TERMINATE. Parked.
+
     const { data: expiredVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, status, expires_at, provider_account_id")
-      .in("status", ["running", "provisioning"])
-      .not("azure_vm_id", "is", null)
+      .select("id, azure_vm_id, status, expires_at, provider_account_id, user_id")
+      .in("status", ["running", "provisioning", "starting"])
       .lt("expires_at", now.toISOString());
 
     // Process idle sessions: end session + deallocate VM
@@ -453,7 +529,12 @@ Deno.serve(async (req) => {
             const az = await azureFor(vm.provider_account_id);
             const deallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
             if (deallocated) {
-              await supabase.from("virtual_machines").update({ status: "deallocated" }).eq("id", session.vm_id);
+              await markVmEnded(supabase, session.vm_id, {
+                status: "deallocated",
+                ended_by: SOURCE,
+                ended_reason: "idle_timeout",
+                ended_at: now.toISOString(),
+              });
               results.push(`Idle session ${session.id}: deallocated VM ${vmName}`);
             }
           }
@@ -471,32 +552,88 @@ Deno.serve(async (req) => {
         const az = await azureFor(vm.provider_account_id);
         const deallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
         if (deallocated) {
-          await supabase.from("virtual_machines").update({ status: "deallocated" }).eq("id", vm.id);
+          await markVmEnded(supabase, vm.id, {
+            status: "deallocated",
+            ended_by: SOURCE,
+            ended_reason: "orphan_no_session",
+            ended_at: now.toISOString(),
+          });
           results.push(`Orphan VM ${vmName}: deallocated`);
         }
       }
     }
 
-    // Process expired VMs
+    // Process expired VMs — soft path: deallocate + DB deallocated (NEVER silent hard-delete).
+    // Hard delete remains admin-only (delete-vm / cancel-provisioning / purge-failed).
     if (expiredVMs?.length) {
       for (const vm of expiredVMs) {
-        if (!vm.azure_vm_id) continue;
-
         // End any active sessions for this VM
         await supabase
           .from("sessions")
-          .update({ ended_at: now.toISOString(), status: "completed" })
+          .update({ ended_at: now.toISOString(), status: "completed", disconnect_reason: "lab_window_expired" })
           .eq("vm_id", vm.id)
           .eq("status", "active");
 
-        const vmName = extractVmName(vm.azure_vm_id);
-        const az = await azureFor(vm.provider_account_id);
-        const deleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
-        if (deleted) {
-          await supabase.from("virtual_machines").update({ status: "terminated" }).eq("id", vm.id);
-          results.push(`Expired VM ${vmName}: deleted`);
+        let azureOk = true;
+        if (vm.azure_vm_id) {
+          const vmName = extractVmName(vm.azure_vm_id);
+          try {
+            const az = await azureFor(vm.provider_account_id);
+            azureOk = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+          } catch (e) {
+            azureOk = false;
+            console.error("expired soft-path deallocate failed", e);
+          }
         }
+
+        // Always move DB to deallocated so expiry never leaves a "running" lab that
+        // another sweeper might hard-delete; Azure failure is logged but not silent-terminate.
+        await markVmEnded(supabase, vm.id, {
+          status: "deallocated",
+          ended_by: SOURCE,
+          ended_reason: "lab_window_expired",
+          ended_at: now.toISOString(),
+        });
+
+        const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
+        await notifyLearnerAndAdmins(supabase, {
+          userId: vm.user_id,
+          type: "lab_expired",
+          title: "Lab window expired — VM deallocated",
+          message: `Lab VM ${label} reached expires_at and was soft-stopped (deallocated). Resources are held, not deleted. Contact an admin to resume or purge.`,
+        });
+        results.push(`Expired VM ${label}: deallocated (soft)${azureOk ? "" : " [azure deallocate failed]"}`);
       }
+    }
+
+    // 3b. Pre-expiry warning (T-15m): notify learner+admins once per lab window.
+    try {
+      const warnHorizon = new Date(now.getTime() + 15 * 60 * 1000).toISOString();
+      const { data: soonExpiring } = await supabase
+        .from("virtual_machines")
+        .select("id, user_id, azure_vm_id, expires_at")
+        .in("status", ["running", "provisioning", "starting"])
+        .not("expires_at", "is", null)
+        .gt("expires_at", now.toISOString())
+        .lte("expires_at", warnHorizon)
+        .is("expiry_warned_at", null)
+        .limit(100);
+
+      for (const vm of soonExpiring ?? []) {
+        const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
+        await notifyLearnerAndAdmins(supabase, {
+          userId: vm.user_id,
+          type: "lab_expiry_warning",
+          title: "Lab expires in ~15 minutes",
+          message: `Lab VM ${label} expires at ${vm.expires_at}. Save work now — at expiry the VM will be deallocated (not deleted).`,
+        });
+        await supabase.from("virtual_machines").update({
+          expiry_warned_at: now.toISOString(),
+        }).eq("id", vm.id);
+        results.push(`Pre-expiry warn: ${label}`);
+      }
+    } catch (e) {
+      console.error("Pre-expiry T-15m warn failed:", e);
     }
 
     // 4. Mark VMs stuck in 'provisioning' for 10+ minutes as 'failed'
@@ -508,20 +645,28 @@ Deno.serve(async (req) => {
 
     if (stuckVMs?.length) {
       for (const vm of stuckVMs) {
-        // If it has an Azure VM, try to clean it up
+        // Soft: deallocate if present — do not hard-delete outside admin/cancel/purge paths.
         if (vm.azure_vm_id) {
           const vmName = extractVmName(vm.azure_vm_id);
-          const az = await azureFor(vm.provider_account_id);
-          await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+          try {
+            const az = await azureFor(vm.provider_account_id);
+            await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+          } catch (e) {
+            console.error("stuck provisioning deallocate failed", e);
+          }
         }
-        // End any sessions tied to this VM
         await supabase
           .from("sessions")
           .update({ ended_at: now.toISOString(), status: "completed" })
           .eq("vm_id", vm.id)
           .eq("status", "active");
 
-        await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm.id);
+        await markVmEnded(supabase, vm.id, {
+          status: "failed",
+          ended_by: SOURCE,
+          ended_reason: "stuck_provisioning",
+          ended_at: now.toISOString(),
+        });
         results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: marked failed (created ${vm.created_at})`);
       }
     }
