@@ -186,10 +186,10 @@ Deno.serve(async (req) => {
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
   const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
-  let guacBaseUrl: string | undefined;
-  let adminToken: string | undefined;
-  let guacAdminUrl: string | undefined;
-  let guacPublicBase: string | undefined;
+  let guacBaseUrl = "";
+  let adminToken = "";
+  let guacAdminUrl = "";
+  let guacPublicBase = "";
   let cloudProvider: GuacCloudProvider = "aws";
 
   try {
@@ -235,6 +235,9 @@ Deno.serve(async (req) => {
       const auth = await getGuacToken(endpoint.adminUrl, endpoint.adminUsername, endpoint.adminPassword);
       adminToken = auth.token;
       guacBaseUrl = auth.baseUrl;
+      if (!guacBaseUrl || !adminToken || !guacPublicBase) {
+        throw new Error("Guacamole admin bind incomplete");
+      }
       return await getDataSource(guacBaseUrl, adminToken);
     };
 
@@ -311,7 +314,7 @@ Deno.serve(async (req) => {
           const reusedClientId = btoa(`${liveSession.guac_connection_id}\0c\0${dataSource}`);
           const reused = {
             session_id: liveSession.id,
-            iframe_url: buildPublicIframeUrl(guacBaseUrl, guacPublicBase!, reusedClientId, scoped.token),
+            iframe_url: buildPublicIframeUrl(guacBaseUrl, guacPublicBase, reusedClientId, scoped.token),
             protocol: (labTemplateProtocol(vm) === "ssh" ? "SSH" : "RDP"),
             vm_ip: vm.private_ip,
             region: vm.region ?? null,
@@ -443,7 +446,7 @@ Deno.serve(async (req) => {
       }
 
       const clientId = btoa(`${connectionId}\0c\0${dataSource}`);
-      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, guacPublicBase!, clientId, scopedToken);
+      const iframeUrl = buildPublicIframeUrl(guacBaseUrl, guacPublicBase, clientId, scopedToken);
 
       const { data: session, error: sessionError } = await supabase
         .from("sessions")
@@ -524,7 +527,7 @@ Deno.serve(async (req) => {
       }
       const scoped = await getGuacToken(guacAdminUrl!, sess.guac_username, newPassword);
       const clientId = btoa(`${sess.guac_connection_id}\0c\0${dataSource}`);
-      const iframeUrl = buildPublicIframeUrl(guacBaseUrl!, guacPublicBase!, clientId, scoped.token);
+      const iframeUrl = buildPublicIframeUrl(guacBaseUrl, guacPublicBase, clientId, scoped.token);
       const { data: prevSess } = await supabase
         .from("sessions").select("reconnects").eq("id", session_id).maybeSingle();
       await supabase.from("sessions")
@@ -576,8 +579,8 @@ Deno.serve(async (req) => {
         reason: disconnectReason, correlation_id: correlationId,
       });
 
-      if (sess.guac_username) await deleteScopedGuacUser(guacBaseUrl!, adminToken!, dataSource, sess.guac_username);
-      if (sess.guac_connection_id) await deleteGuacConnection(guacBaseUrl!, adminToken!, dataSource, sess.guac_connection_id);
+      if (sess.guac_username) await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, sess.guac_username);
+      if (sess.guac_connection_id) await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, sess.guac_connection_id);
 
       timeline.attach({ sessionId: session_id });
       await timeline.success(SOURCE, "session-end", "Session ended, Guacamole user and connection removed");
