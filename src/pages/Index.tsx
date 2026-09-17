@@ -22,18 +22,40 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import {
-  AreaChart,
-  Area,
   XAxis,
   YAxis,
-  CartesianGrid,
   Tooltip,
   ResponsiveContainer,
   BarChart,
   Bar,
 } from "recharts";
 import { Progress } from "@/components/ui/progress";
-import { AiInsightCard } from "@/components/AiInsightCard";
+
+
+/** Extract VM / instance name from azure_vm_id (full ARM path or bare name). */
+function extractInstanceName(azureVmId: string | null | undefined): string | null {
+  if (!azureVmId) return null;
+  const trimmed = azureVmId.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes("/")) {
+    const parts = trimmed.split("/").filter(Boolean);
+    return parts[parts.length - 1] || trimmed;
+  }
+  return trimmed;
+}
+
+function formatDateTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
 
 interface QuotaItem {
   name: string;
@@ -49,8 +71,12 @@ interface VMRow {
   vm_size: string;
   private_ip: string | null;
   idle_minutes: number;
+  created_at?: string;
+  azure_vm_id?: string | null;
   userName?: string;
   labName?: string;
+  instanceName?: string | null;
+  cloud?: string;
 }
 
 
@@ -74,11 +100,22 @@ const Index = () => {
       const { data: fallback } = await supabase.from("virtual_machines").select("*").order("created_at", { ascending: false }).limit(8);
       if (fallback) setVms(fallback.map((vm: any) => ({ ...vm, userName: "—", labName: "—" })));
     } else if (data) {
-      setVms(data.map((vm: any) => ({
-        ...vm,
-        userName: vm.profiles?.display_name || "—",
-        labName: vm.lab_templates?.name || "—",
-      })));
+      setVms(data.map((vm: any) => {
+        const azureId = vm.azure_vm_id as string | null;
+        let cloud = "—";
+        if (azureId) {
+          if (azureId.includes("/subscriptions/") || azureId.toLowerCase().includes("microsoft")) cloud = "Azure";
+          else if (azureId.startsWith("i-") || azureId.startsWith("arn:")) cloud = "AWS";
+          else cloud = "Cloud";
+        }
+        return {
+          ...vm,
+          userName: vm.profiles?.display_name || "—",
+          labName: vm.lab_templates?.name || "—",
+          instanceName: extractInstanceName(azureId) || vm.lab_templates?.name || null,
+          cloud,
+        };
+      }));
     }
     setVmLoading(false);
   }, []);
@@ -228,28 +265,14 @@ const Index = () => {
           )}
         </AnimatePresence>
 
-        {/* AI Insights */}
-        <AiInsightCard
-          type="cost_insight"
-          data={{
-            vm_counts: vmStatusCounts,
-            total_running: totalRunning,
-            total_idle: totalIdle,
-            total_failed: totalFailed,
-            quotas,
-          }}
-          title="AI Platform Insights"
-          buttonLabel="Analyze"
-        />
-
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          <MetricCard title="Active VMs" value={totalRunning + totalIdle} icon={Server} variant="primary" />
-          <MetricCard title="Provisioning" value={totalProvisioning} icon={Clock} variant="default" />
-          <MetricCard title="Idle VMs" value={totalIdle} icon={Activity} variant="warning" subtitle="Auto-stop in ≤15min" />
-          <MetricCard title="Failed" value={totalFailed} icon={AlertTriangle} variant={totalFailed > 0 ? "warning" : "default"} />
-          <MetricCard title="Deallocated" value={totalDeallocated} icon={Server} variant="default" />
-          <MetricCard title="Regions" value="2/2" icon={Globe} variant="success" subtitle="All healthy" />
+          <MetricCard title="Active VMs" value={totalRunning + totalIdle} icon={Server} variant="primary" to="/vms?status=active" />
+          <MetricCard title="Provisioning" value={totalProvisioning} icon={Clock} variant="default" to="/vms?status=provisioning" />
+          <MetricCard title="Idle VMs" value={totalIdle} icon={Activity} variant="warning" subtitle="Auto-stop in ≤15min" to="/vms?status=idle" />
+          <MetricCard title="Failed" value={totalFailed} icon={AlertTriangle} variant={totalFailed > 0 ? "warning" : "default"} to="/vms?status=failed" />
+          <MetricCard title="Deallocated" value={totalDeallocated} icon={Server} variant="default" to="/vms?status=deallocated" />
+          <MetricCard title="Regions" value="2/2" icon={Globe} variant="success" subtitle="All healthy" to="/vms" />
         </div>
 
         {/* Azure Quota Widget + VM Status Chart */}
@@ -334,41 +357,11 @@ const Index = () => {
           </motion.div>
         </div>
 
-        {/* Region Status — from live VM data */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {['East US', 'Central India'].map((region) => {
-            const regionVMs = vms.filter(v => v.region === region);
-            const activeCount = regionVMs.filter(v => ['running', 'idle'].includes(v.status)).length;
-            return (
-              <motion.div key={region} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="rounded-xl border border-border bg-card p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <div className="flex items-center gap-2">
-                    <Globe className="h-4 w-4 text-primary" />
-                    <h3 className="text-sm font-medium text-foreground">{region}</h3>
-                  </div>
-                  <StatusBadge status={activeCount > 0 ? "running" : "stopped"} />
-                </div>
-                <div className="grid grid-cols-3 gap-3 text-center">
-                  {[
-                    { label: 'Active VMs', value: activeCount },
-                    { label: 'Total VMs', value: regionVMs.length },
-                    { label: 'Status', value: activeCount > 0 ? 'Healthy' : 'Idle' },
-                  ].map((m) => (
-                    <div key={m.label} className="rounded-lg bg-muted/50 p-2">
-                      <p className="text-lg font-mono font-semibold text-foreground">{m.value}</p>
-                      <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{m.label}</p>
-                    </div>
-                  ))}
-                </div>
-              </motion.div>
-            );
-          })}
-        </div>
 
-        {/* Recent VMs Table — Live Data */}
+        {/* Recent allocations — plain instance names, no /vms/:id links */}
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }} className="rounded-xl border border-border bg-card">
           <div className="p-5 border-b border-border flex items-center justify-between">
-            <h3 className="text-sm font-medium text-foreground">Recent Virtual Machines</h3>
+            <h3 className="text-sm font-medium text-foreground">Recent Allocations</h3>
             <Link to="/vms" className="text-xs text-primary hover:underline">View All →</Link>
           </div>
           {vmLoading ? (
@@ -380,7 +373,7 @@ const Index = () => {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border text-left">
-                    {['VM ID', 'User', 'Lab', 'Region', 'IP', 'Size', 'Status', 'Idle'].map((h) => (
+                    {['Username', 'Instance', 'Status', 'Created', 'Cloud', 'Lab'].map((h) => (
                       <th key={h} className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
                     ))}
                   </tr>
@@ -388,24 +381,20 @@ const Index = () => {
                 <tbody>
                   {vms.map((vm) => (
                     <tr key={vm.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                      <td className="px-5 py-3 font-mono text-xs text-primary">
-                        <Link to={`/vms/${vm.id}`} className="hover:underline">{vm.id.slice(0, 8)}…</Link>
-                      </td>
                       <td className="px-5 py-3 text-foreground">{vm.userName}</td>
-                      <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
-                      <td className="px-5 py-3 text-muted-foreground">{vm.region}</td>
-                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.private_ip || "—"}</td>
-                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.vm_size}</td>
+                      <td className="px-5 py-3 font-mono text-xs text-foreground">{vm.instanceName || "—"}</td>
                       <td className="px-5 py-3"><StatusBadge status={vm.status as VMStatus} /></td>
-                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{vm.idle_minutes > 0 ? `${vm.idle_minutes}m` : '—'}</td>
+                      <td className="px-5 py-3 text-xs text-muted-foreground whitespace-nowrap">{formatDateTime(vm.created_at)}</td>
+                      <td className="px-5 py-3 text-xs text-muted-foreground">{vm.cloud || "—"}</td>
+                      <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
                     </tr>
                   ))}
                   {vms.length === 0 && (
                     <tr>
-                      <td colSpan={8} className="px-5 py-12 text-center">
+                      <td colSpan={6} className="px-5 py-12 text-center">
                         <Server className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
                         <p className="text-sm font-medium text-foreground">No Virtual Machines</p>
-                        <p className="text-xs text-muted-foreground mt-1">Launch a lab to see VMs appear here in real-time.</p>
+                        <p className="text-xs text-muted-foreground mt-1">Launch a lab to see allocations appear here in real-time.</p>
                       </td>
                     </tr>
                   )}

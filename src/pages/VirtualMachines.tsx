@@ -3,7 +3,7 @@ import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search,
   RotateCcw,
@@ -83,6 +83,7 @@ function formatDateTime(iso: string | null | undefined): string {
 
 export default function VirtualMachines() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [vms, setVms] = useState<VMRow[]>([]);
@@ -94,6 +95,15 @@ export default function VirtualMachines() {
   const [bulkDeleteConfirmText, setBulkDeleteConfirmText] = useState("");
   const [deleteConfirmVmId, setDeleteConfirmVmId] = useState<string | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
+
+  // Honor Overview KPI deep-links: /vms?status=running|idle|active|...
+  useEffect(() => {
+    const raw = searchParams.get("status");
+    if (!raw) return;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized) setStatusFilter(normalized);
+  }, [searchParams]);
+
   const statusPollInFlight = useRef(false);
   const provisioningIdsKey = useMemo(
     () =>
@@ -378,7 +388,10 @@ export default function VirtualMachines() {
       (vm.instanceName || "").toLowerCase().includes(q) ||
       (vm.labName || "").toLowerCase().includes(q) ||
       (vm.azure_vm_id || "").toLowerCase().includes(q);
-    const matchStatus = statusFilter === "all" || vm.status === statusFilter;
+    const matchStatus =
+      statusFilter === "all" ||
+      (statusFilter === "active" && ["running", "idle"].includes(vm.status)) ||
+      vm.status === statusFilter;
     return matchSearch && matchStatus;
   });
 
@@ -453,6 +466,7 @@ export default function VirtualMachines() {
             </SelectTrigger>
             <SelectContent>
               <SelectItem value="all">All Status</SelectItem>
+              <SelectItem value="active">Active (running + idle)</SelectItem>
               {allStatuses.map((s) => (
                 <SelectItem key={s} value={s} className="capitalize">
                   {s.charAt(0).toUpperCase() + s.slice(1)}
