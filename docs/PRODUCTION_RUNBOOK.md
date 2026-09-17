@@ -163,8 +163,9 @@ Manual pre-go-live checks:
 4. **Public gateway (`guac.skillhub365.co.in`)** — iframe HTML on `/guacamole/` must be HTTPS. Guacamole also needs a tunnel:
    - Preferred: WebSocket at `/guacamole/websocket-tunnel` with nginx `Upgrade` / `Connection` headers.
    - Fallback: HTTP tunnel at `/guacamole/tunnel` (Guacamole returns 400 without a query string — that is expected for a bare probe).
-   - If the UI loads but the session immediately errors/reconnects, verify nginx proxies both tunnel paths to the Guacamole servlet and that guacd can reach the lab VM **private IP:22/3389** on the lab VNet.
-5. Hub `guacamole-proxy` create-session cannot TCP-probe private lab IPs from the edge runtime (reachability-precheck is skipped). SSH readiness is only guaranteed once guacd can open the port — prefer a short settle after Azure reports the VM running, and fail closed in the Hub UI instead of reminting sessions forever.
+   - If the UI loads but the canvas is black / “remote desktop closed”, the usual cause is **guacd ↔ lab private IP** routing, not the iframe. See **[GUAC_NETWORKING.md](./GUAC_NETWORKING.md)**.
+5. Hub `guacamole-proxy` create-session sets `hostname=vm.private_ip` and cannot TCP-probe those IPs from the edge (reachability-precheck is skipped). SSH readiness is only guaranteed once guacd can open the port — prefer a short settle after Azure reports the VM running, and fail closed in the Hub UI instead of reminting sessions forever.
+6. **Cross-cloud (verified):** Guac currently runs on AWS EC2 (`3.6.228.159`, ap-south-1); labs use Azure private IPs (e.g. `172.18.0.21` on `vnet-centralus`). Azure VNet peering alone **cannot** fix this while Guac stays on EC2. Fix options (operator choice — no relocate commitment in-repo): **(A)** relocate Guac web+guacd into Azure same/peered VNet + DNS/cert cutover, or **(B)** AWS↔Azure S2S VPN. Verify from the Guac host: `nc -vz <lab-private-ip> 22`. Full RCA, verify steps, and Lex Connect unblock criteria: **[GUAC_NETWORKING.md](./GUAC_NETWORKING.md)**.
 
 ### AI outages
 1. `/admin/ai-status` shows provider health, 24h latency/failure graph and breaker state.
