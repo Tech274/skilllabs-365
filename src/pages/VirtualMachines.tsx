@@ -13,8 +13,6 @@ import {
   CheckSquare,
   X,
   Server,
-  Play,
-  RefreshCw,
   Info,
 } from "lucide-react";
 import { Link } from "react-router-dom";
@@ -51,22 +49,36 @@ interface VMRow {
   created_at: string;
   updated_at: string | null;
   expires_at: string | null;
-  participantName?: string;
-  labName?: string;
-  labAccountName?: string;
-  labAccountProvider?: string | null;
+  assigneeName?: string;
+  assigneeEmail?: string | null;
+  labUsername?: string | null;
+  instanceName?: string | null;
+  labName?: string | null;
 }
 
-function formatRelative(iso: string | null | undefined): string {
+/** Extract VM / instance name from azure_vm_id (full ARM path or bare name). */
+function extractInstanceName(azureVmId: string | null | undefined): string | null {
+  if (!azureVmId) return null;
+  const trimmed = azureVmId.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes("/")) {
+    const parts = trimmed.split("/").filter(Boolean);
+    return parts[parts.length - 1] || trimmed;
+  }
+  return trimmed;
+}
+
+function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
-  const ms = Date.now() - new Date(iso).getTime();
-  if (Number.isNaN(ms)) return "—";
-  const mins = Math.floor(ms / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
-  const hrs = Math.floor(mins / 60);
-  if (hrs < 48) return `${hrs}h ago`;
-  return `${Math.floor(hrs / 24)}d ago`;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export default function VirtualMachines() {
@@ -84,9 +96,11 @@ export default function VirtualMachines() {
     const { data: vmData, error } = await supabase
       .from("virtual_machines")
       .select(
-        "*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name), cloud_provider_accounts(display_name, provider, slug)",
+        "*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name, email)",
       )
       .order("created_at", { ascending: false });
+
+    let rows: VMRow[] = [];
 
     if (error) {
       const { data: fallbackData } = await supabase
@@ -95,36 +109,57 @@ export default function VirtualMachines() {
         .order("created_at", { ascending: false });
 
       if (fallbackData) {
-        setVms(
-          fallbackData.map((vm: VMRow) => ({
-            ...vm,
-            participantName: "—",
-            labName: "—",
-            labAccountName: "—",
-            labAccountProvider: null,
-          })),
-        );
+        rows = fallbackData.map((vm: VMRow) => ({
+          ...vm,
+          assigneeName: "—",
+          assigneeEmail: null,
+          labUsername: null,
+          instanceName: extractInstanceName(vm.azure_vm_id),
+          labName: null,
+        }));
       }
     } else if (vmData) {
-      setVms(
-        vmData.map((vm: Record<string, unknown>) => {
-          const profiles = vm.profiles as { display_name?: string } | null;
-          const labs = vm.lab_templates as { name?: string } | null;
-          const account = vm.cloud_provider_accounts as {
-            display_name?: string;
-            provider?: string;
-            slug?: string;
-          } | null;
-          return {
-            ...(vm as unknown as VMRow),
-            participantName: profiles?.display_name || "—",
-            labName: labs?.name || "—",
-            labAccountName: account?.display_name || "—",
-            labAccountProvider: account?.provider ?? null,
-          };
-        }),
-      );
+      rows = vmData.map((vm: Record<string, unknown>) => {
+        const profiles = vm.profiles as { display_name?: string; email?: string | null } | null;
+        const labs = vm.lab_templates as { name?: string } | null;
+        const azureVmId = (vm.azure_vm_id as string | null) ?? null;
+        return {
+          ...(vm as unknown as VMRow),
+          assigneeName: profiles?.display_name || "—",
+          assigneeEmail: profiles?.email ?? null,
+          labUsername: null,
+          instanceName: extractInstanceName(azureVmId),
+          labName: labs?.name || null,
+        };
+      });
     }
+
+    // Lab username: latest sessions.guac_username per vm_id (no dedicated lab_username on VMs).
+    if (rows.length > 0) {
+      const vmIds = rows.map((r) => r.id);
+      const { data: sessionRows } = await supabase
+        .from("sessions")
+        .select("vm_id, guac_username, started_at")
+        .in("vm_id", vmIds)
+        .not("guac_username", "is", null)
+        .order("started_at", { ascending: false });
+
+      if (sessionRows && sessionRows.length > 0) {
+        const latestByVm = new Map<string, string>();
+        for (const s of sessionRows) {
+          if (!s.vm_id || !s.guac_username) continue;
+          if (!latestByVm.has(s.vm_id)) {
+            latestByVm.set(s.vm_id, s.guac_username);
+          }
+        }
+        rows = rows.map((r) => ({
+          ...r,
+          labUsername: latestByVm.get(r.id) ?? null,
+        }));
+      }
+    }
+
+    setVms(rows);
     setLoading(false);
   }, []);
 
@@ -242,9 +277,16 @@ export default function VirtualMachines() {
         { event: "*", schema: "public", table: "virtual_machines" },
         (payload) => {
           if (payload.eventType === "UPDATE") {
+            const next = payload.new as VMRow;
             setVms((prev) =>
               prev.map((vm) =>
-                vm.id === (payload.new as VMRow).id ? { ...vm, ...(payload.new as VMRow) } : vm,
+                vm.id === next.id
+                  ? {
+                      ...vm,
+                      ...next,
+                      instanceName: extractInstanceName(next.azure_vm_id ?? vm.azure_vm_id),
+                    }
+                  : vm,
               ),
             );
           } else if (payload.eventType === "INSERT") {
@@ -265,9 +307,11 @@ export default function VirtualMachines() {
     const q = search.toLowerCase();
     const matchSearch =
       vm.id.toLowerCase().includes(q) ||
-      (vm.participantName || "").toLowerCase().includes(q) ||
+      (vm.assigneeName || "").toLowerCase().includes(q) ||
+      (vm.assigneeEmail || "").toLowerCase().includes(q) ||
+      (vm.labUsername || "").toLowerCase().includes(q) ||
+      (vm.instanceName || "").toLowerCase().includes(q) ||
       (vm.labName || "").toLowerCase().includes(q) ||
-      (vm.labAccountName || "").toLowerCase().includes(q) ||
       (vm.azure_vm_id || "").toLowerCase().includes(q);
     const matchStatus = statusFilter === "all" || vm.status === statusFilter;
     return matchSearch && matchStatus;
@@ -294,7 +338,7 @@ export default function VirtualMachines() {
           <div>
             <h1 className="text-2xl font-semibold text-foreground">Virtual Machines</h1>
             <p className="text-sm text-muted-foreground mt-1">
-              Fleet view — {vms.length} machine{vms.length === 1 ? "" : "s"}
+              Allocation status — {vms.length} machine{vms.length === 1 ? "" : "s"}
               <span className="ml-2 inline-flex items-center gap-1 text-success text-[10px] font-medium">
                 <span className="h-1.5 w-1.5 rounded-full bg-success animate-pulse" />
                 Live
@@ -310,15 +354,20 @@ export default function VirtualMachines() {
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
           <div className="space-y-0.5">
             <p>
-              <span className="font-medium text-foreground">Heartbeat</span> uses{" "}
-              <code className="text-[10px]">virtual_machines.updated_at</code> (no dedicated{" "}
-              <code className="text-[10px]">heartbeat_at</code> field yet).
+              <span className="font-medium text-foreground">Allocation view</span> — assignee, lab
+              username, instance name, status, start, and end from Hub data (not Orchestrator fleet
+              theater).
             </p>
             <p>
-              <span className="font-medium text-foreground">Start / Reset</span> are shown for parity with
-              Orchestrator fleet clarity but are disabled —{" "}
-              <code className="text-[10px]">cleanup-idle-labs</code> currently exposes stop/delete only
-              (no <code className="text-[10px]">start-vm</code> / <code className="text-[10px]">reset-vm</code>).
+              <span className="font-medium text-foreground">Lab username</span> comes from the latest{" "}
+              <code className="text-[10px]">sessions.guac_username</code> for the VM when present;
+              otherwise “—”. No dedicated <code className="text-[10px]">lab_username</code> column on{" "}
+              <code className="text-[10px]">virtual_machines</code> yet.
+            </p>
+            <p>
+              Actions: <span className="font-medium text-foreground">Stop / Delete</span> via{" "}
+              <code className="text-[10px]">cleanup-idle-labs</code>. Start / Reset / Heartbeat are not
+              shown (no backend support).
             </p>
           </div>
         </div>
@@ -327,7 +376,7 @@ export default function VirtualMachines() {
           <div className="relative flex-1 max-w-sm">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-muted-foreground" />
             <Input
-              placeholder="Search machine, participant, lab, account…"
+              placeholder="Search assignee, lab user, instance…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="pl-9 bg-card"
@@ -416,7 +465,7 @@ export default function VirtualMachines() {
         >
           {loading ? (
             <div className="p-12 flex items-center justify-center gap-2 text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading fleet…
+              <Loader2 className="h-4 w-4 animate-spin" /> Loading allocations…
             </div>
           ) : (
             <div className="overflow-x-auto">
@@ -430,22 +479,16 @@ export default function VirtualMachines() {
                         aria-label="Select all"
                       />
                     </th>
-                    {[
-                      "Machine",
-                      "Lab account",
-                      "Status",
-                      "Heartbeat",
-                      "Participant",
-                      "Lab",
-                      "Actions",
-                    ].map((h) => (
-                      <th
-                        key={h}
-                        className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider"
-                      >
-                        {h}
-                      </th>
-                    ))}
+                    {["Assignee", "Lab username", "Instance / VM name", "Status", "Start", "End", "Actions"].map(
+                      (h) => (
+                        <th
+                          key={h}
+                          className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider"
+                        >
+                          {h}
+                        </th>
+                      ),
+                    )}
                   </tr>
                 </thead>
                 <tbody>
@@ -464,56 +507,60 @@ export default function VirtualMachines() {
                         />
                       </td>
                       <td className="px-5 py-3">
-                        <Link
-                          to={`/vms/${vm.id}`}
-                          className="font-mono text-xs text-primary hover:underline inline-flex items-center gap-1"
-                        >
-                          {vm.id.slice(0, 8)}…
-                          <ExternalLink className="h-3 w-3" />
-                        </Link>
-                        <div className="mt-0.5 text-[10px] text-muted-foreground font-mono">
-                          {vm.vm_size} · {vm.region}
-                          {vm.private_ip ? ` · ${vm.private_ip}` : ""}
-                        </div>
+                        <div className="text-foreground text-sm">{vm.assigneeName || "—"}</div>
+                        {vm.assigneeEmail && (
+                          <div className="text-[10px] text-muted-foreground">{vm.assigneeEmail}</div>
+                        )}
+                        {vm.labName && (
+                          <div className="text-[10px] text-muted-foreground mt-0.5">{vm.labName}</div>
+                        )}
                       </td>
                       <td className="px-5 py-3">
-                        <div className="text-foreground text-sm">{vm.labAccountName}</div>
-                        {vm.labAccountProvider && (
-                          <div className="text-[10px] text-muted-foreground uppercase tracking-wide">
-                            {vm.labAccountProvider}
+                        {vm.labUsername ? (
+                          <span className="font-mono text-xs text-foreground">{vm.labUsername}</span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
+                      </td>
+                      <td className="px-5 py-3">
+                        {vm.instanceName ? (
+                          <div>
+                            <Link
+                              to={`/vms/${vm.id}`}
+                              className="font-mono text-xs text-primary hover:underline inline-flex items-center gap-1"
+                            >
+                              {vm.instanceName}
+                              <ExternalLink className="h-3 w-3" />
+                            </Link>
+                            <div className="mt-0.5 text-[10px] text-muted-foreground">
+                              {vm.vm_size} · {vm.region}
+                              {vm.private_ip ? ` · ${vm.private_ip}` : ""}
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            <Link
+                              to={`/vms/${vm.id}`}
+                              className="font-mono text-xs text-muted-foreground hover:underline inline-flex items-center gap-1"
+                            >
+                              {vm.id.slice(0, 8)}…
+                              <ExternalLink className="h-3 w-3" />
+                            </Link>
+                            <div className="mt-0.5 text-[10px] text-muted-foreground">No azure_vm_id yet</div>
                           </div>
                         )}
                       </td>
                       <td className="px-5 py-3">
                         <StatusBadge status={vm.status as VMStatus} />
                       </td>
-                      <td className="px-5 py-3">
-                        <div className="font-mono text-xs text-muted-foreground">
-                          {formatRelative(vm.updated_at)}
-                        </div>
-                        {vm.idle_minutes > 0 && (
-                          <div className="text-[10px] text-muted-foreground">Idle {vm.idle_minutes}m</div>
-                        )}
+                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground whitespace-nowrap">
+                        {formatDateTime(vm.created_at)}
                       </td>
-                      <td className="px-5 py-3 text-foreground">{vm.participantName}</td>
-                      <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
+                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground whitespace-nowrap">
+                        {formatDateTime(vm.expires_at)}
+                      </td>
                       <td className="px-5 py-3">
                         <div className="flex gap-1">
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                className="p-1.5 rounded text-muted-foreground/50 cursor-not-allowed"
-                                title="Start"
-                                disabled
-                                aria-disabled
-                              >
-                                <Play className="h-3.5 w-3.5" />
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              Start not available — backend has no start-vm action yet
-                            </TooltipContent>
-                          </Tooltip>
                           <Tooltip>
                             <TooltipTrigger asChild>
                               <button
@@ -531,21 +578,6 @@ export default function VirtualMachines() {
                             </TooltipTrigger>
                             <TooltipContent>Stop / deallocate</TooltipContent>
                           </Tooltip>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <button
-                                className="p-1.5 rounded text-muted-foreground/50 cursor-not-allowed"
-                                title="Reset"
-                                disabled
-                                aria-disabled
-                              >
-                                <RefreshCw className="h-3.5 w-3.5" />
-                              </button>
-                            </TooltipTrigger>
-                            <TooltipContent>
-                              Reset not available — backend has no reset-vm action yet
-                            </TooltipContent>
-                          </Tooltip>
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
                               <button
@@ -560,9 +592,11 @@ export default function VirtualMachines() {
                               <AlertDialogHeader>
                                 <AlertDialogTitle>Delete Virtual Machine</AlertDialogTitle>
                                 <AlertDialogDescription>
-                                  This will permanently terminate machine{" "}
-                                  <span className="font-mono">{vm.id.slice(0, 8)}…</span> and delete its cloud
-                                  resources. This action cannot be undone.
+                                  This will permanently terminate{" "}
+                                  <span className="font-mono">
+                                    {vm.instanceName || `${vm.id.slice(0, 8)}…`}
+                                  </span>{" "}
+                                  and delete its cloud resources. This action cannot be undone.
                                 </AlertDialogDescription>
                               </AlertDialogHeader>
                               <AlertDialogFooter>
@@ -589,8 +623,8 @@ export default function VirtualMachines() {
               <Server className="h-10 w-10 text-muted-foreground/40 mb-3" />
               <p className="text-sm font-medium text-foreground">No Virtual Machines</p>
               <p className="text-xs text-muted-foreground mt-1 max-w-sm">
-                No VMs have been provisioned yet. Launch a lab from the Student Dashboard to see machines appear
-                here in real-time.
+                No VMs have been provisioned yet. Launch a lab from the Student Dashboard to see
+                allocations appear here in real-time.
               </p>
             </div>
           )}
