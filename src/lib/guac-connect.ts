@@ -27,8 +27,10 @@ export function toBrowserSafeGuacUrl(url: string): string {
         : "/guacamole";
     const hash = u.hash || "";
     const search = u.search || "";
-    // Prefer hash token form: #/client/...?token=
-    return `${PUBLIC}${guacPath}${hash}${search}`;
+    // Prefer Guac form /guacamole/#/client/...?token= (slash before hash)
+    const pathPart = guacPath.replace(/\/+$/, "") || "/guacamole";
+    const hashPart = hash.startsWith("#") ? `/${hash}` : hash;
+    return `${PUBLIC}${pathPart}${hashPart}${search}`;
   } catch {
     return url;
   }

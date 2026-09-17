@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isTokenizedGuacUrl } from "./guac-connect";
+import { isTokenizedGuacUrl, toBrowserSafeGuacUrl } from "./guac-connect";
 
 describe("isTokenizedGuacUrl", () => {
   it("accepts Guac client URL with token", () => {
@@ -15,8 +15,6 @@ describe("isTokenizedGuacUrl", () => {
     expect(isTokenizedGuacUrl("https://guac.example/#/client/abc")).toBe(false);
   });
 });
-
-import { toBrowserSafeGuacUrl } from "./guac-connect";
 
 describe("toBrowserSafeGuacUrl", () => {
   it("rewrites http IP:8080 Guac URL to public HTTPS gateway", () => {
