@@ -35,22 +35,38 @@ export default function VMDetail() {
   const { vmId } = useParams<{ vmId: string }>();
   const [vm, setVm] = useState<VMDetailData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [events, setEvents] = useState<any[]>([]);
 
   const fetchVM = useCallback(async () => {
     if (!vmId) return;
+    setLoadError(null);
     const { data, error } = await supabase
       .from("virtual_machines")
       .select("*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name)")
       .eq("id", vmId)
       .single();
 
-    if (!error && data) {
+    if (error) {
+      // PGRST116 = no rows; anything else is often RLS/join failure, not a missing VM
+      const isNotFound = error.code === "PGRST116";
+      setVm(null);
+      setLoadError(
+        isNotFound
+          ? null
+          : error.message ||
+              "Could not load this VM (permission or related-record lookup failed).",
+      );
+    } else if (data) {
       setVm({
         ...data,
         userName: (data as any).profiles?.display_name || "—",
         labName: (data as any).lab_templates?.name || "—",
       });
+      setLoadError(null);
+    } else {
+      setVm(null);
+      setLoadError(null);
     }
     setLoading(false);
   }, [vmId]);
@@ -89,8 +105,22 @@ export default function VMDetail() {
   if (!vm) {
     return (
       <DashboardLayout>
-        <div className="text-center py-16">
-          <p className="text-muted-foreground">VM not found.</p>
+        <div className="text-center py-16 space-y-2">
+          <p className="text-muted-foreground">
+            {loadError
+              ? "Unable to load VM details."
+              : "VM not found."}
+          </p>
+          {loadError && (
+            <p className="text-sm text-destructive max-w-md mx-auto font-mono">
+              {loadError}
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground max-w-md mx-auto">
+            {loadError
+              ? "This is often a permissions (RLS) or related-record join issue — not proof the VM id is missing."
+              : "No virtual_machines row matched this id."}
+          </p>
           <Link to="/vms" className="text-primary hover:underline text-sm mt-2 inline-block">← Back to VMs</Link>
         </div>
       </DashboardLayout>

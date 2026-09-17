@@ -8,14 +8,12 @@ import {
   RotateCcw,
   StopCircle,
   Trash2,
-  ExternalLink,
   Loader2,
   CheckSquare,
   X,
   Server,
   Info,
 } from "lucide-react";
-import { Link } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/types";
 import { motion, AnimatePresence } from "framer-motion";
@@ -547,13 +545,9 @@ export default function VirtualMachines() {
                       <td className="px-5 py-3">
                         {vm.instanceName ? (
                           <div>
-                            <Link
-                              to={`/vms/${vm.id}`}
-                              className="font-mono text-xs text-primary hover:underline inline-flex items-center gap-1"
-                            >
+                            <span className="font-mono text-xs text-foreground">
                               {vm.instanceName}
-                              <ExternalLink className="h-3 w-3" />
-                            </Link>
+                            </span>
                             <div className="mt-0.5 text-[10px] text-muted-foreground">
                               {vm.vm_size} · {vm.region}
                               {vm.private_ip ? ` · ${vm.private_ip}` : ""}
@@ -561,13 +555,9 @@ export default function VirtualMachines() {
                           </div>
                         ) : (
                           <div>
-                            <Link
-                              to={`/vms/${vm.id}`}
-                              className="font-mono text-xs text-muted-foreground hover:underline inline-flex items-center gap-1"
-                            >
+                            <span className="font-mono text-xs text-muted-foreground">
                               {vm.id.slice(0, 8)}…
-                              <ExternalLink className="h-3 w-3" />
-                            </Link>
+                            </span>
                             <div className="mt-0.5 text-[10px] text-muted-foreground">No azure_vm_id yet</div>
                           </div>
                         )}
