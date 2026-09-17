@@ -241,7 +241,7 @@ export default function StudentDashboard() {
                   <p className="text-xs text-muted-foreground line-clamp-2">{lab.description}</p>
                   <div className="grid grid-cols-3 gap-2 text-center">
                     <div className="rounded-lg bg-muted/50 p-2">
-                      <p className="text-sm font-mono font-semibold text-foreground">{lab.duration}m</p>
+                      <p className="text-sm font-mono font-semibold text-foreground">{lab.is_persistent ? "Persistent" : `${lab.duration}m`}</p>
                       <p className="text-[9px] text-muted-foreground uppercase">Duration</p>
                     </div>
                     <div className="rounded-lg bg-muted/50 p-2">

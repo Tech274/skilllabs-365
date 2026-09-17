@@ -507,7 +507,7 @@ Deno.serve(async (req) => {
             region: awsRegion,
             vm_size: instanceType,
             status: "provisioning",
-            expires_at: new Date(Date.now() + template.duration * 60 * 1000).toISOString(),
+            expires_at: template.is_persistent ? null : new Date(Date.now() + template.duration * 60 * 1000).toISOString(),
           })
           .select()
           .single();
@@ -792,7 +792,7 @@ Deno.serve(async (req) => {
         region: azureRegion,
         vm_size: template.vm_size,
         status: "provisioning",
-        expires_at: new Date(Date.now() + template.duration * 60 * 1000).toISOString(),
+        expires_at: template.is_persistent ? null : new Date(Date.now() + template.duration * 60 * 1000).toISOString(),
       })
       .select()
       .single();
