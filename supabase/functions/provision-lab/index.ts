@@ -229,6 +229,49 @@ Deno.serve(async (req) => {
 
     trace.attach({ userId });
 
+    // Policy v1: any active manual_access_grants row unlocks published labs.
+    // Cert-scoped matching (SKU / certification_slug) comes later.
+    await trace.start(SOURCE, "manual-grant-check", "Verifying active Lab Grant for this user");
+    const { data: activeGrants, error: grantError } = await supabase
+      .from("manual_access_grants")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("active", true)
+      .limit(1);
+    if (grantError) {
+      console.error("provision-lab manual grant check failed:", grantError);
+      await trace.failed(SOURCE, "manual-grant-check", grantError.message);
+      return new Response(
+        JSON.stringify({
+          error: "Unable to verify lab access grant. Please try again or contact Ops.",
+          code: "LAB_GRANT_CHECK_FAILED",
+          correlation_id: correlationId,
+          stage: "manual-grant-check",
+        }),
+        { status: 403, headers: traceHeaders },
+      );
+    }
+    if (!activeGrants?.length) {
+      const message =
+        "Lab access denied: no active Lab Grant. After payment, Ops unlocks labs via Admin → Lab Grants.";
+      await trace.failed(SOURCE, "manual-grant-check", message);
+      return new Response(
+        JSON.stringify({
+          error: message,
+          code: "NO_ACTIVE_LAB_GRANT",
+          correlation_id: correlationId,
+          stage: "manual-grant-check",
+        }),
+        { status: 403, headers: traceHeaders },
+      );
+    }
+    await trace.success(
+      SOURCE,
+      "manual-grant-check",
+      "Active lab grant present (policy v1: any active grant unlocks published labs)",
+      { grant_id: activeGrants[0].id },
+    );
+
     const body = await req.json();
     const { lab_template_id } = body;
     if (!lab_template_id) throw new Error("lab_template_id is required");

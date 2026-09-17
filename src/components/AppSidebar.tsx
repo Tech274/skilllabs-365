@@ -1,7 +1,7 @@
 import {
   LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
   Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
-  Loader2, X, KeyRound, Sparkles, Download, RotateCcw, MonitorPlay, ClipboardList } from "lucide-react";
+  Loader2, X, KeyRound, Sparkles, Download, RotateCcw, MonitorPlay, ClipboardList, Unlock } from "lucide-react";
 
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -24,7 +24,8 @@ const adminItems = [
   { title: "Regions", url: "/regions", icon: Globe },
   { title: "Cost Analytics", url: "/costs", icon: DollarSign },
   { title: "Lab Management", url: "/labs", icon: BookOpen },
-  { title: "Cloud Access", url: "/admin/access-catalogue", icon: KeyRound },
+  { title: "Cloud Access Catalogue", url: "/admin/access-catalogue", icon: KeyRound },
+  { title: "Lab Grants", url: "/admin/manual-grants", icon: Unlock },
   { title: "Cloud Reports", url: "/admin/cloud-reports", icon: FileText },
   { title: "Resource Providers", url: "/admin/resource-providers", icon: Cloud },
   { title: "AI Status", url: "/admin/ai-status", icon: Sparkles },
@@ -150,7 +151,7 @@ export function AppSidebar() {
           <SidebarGroupContent>
             <SidebarMenu>
               {navItems.map((item) => (
-                <SidebarMenuItem key={item.title}>
+                <SidebarMenuItem key={item.url}>
                   <SidebarMenuButton asChild isActive={isActive(item.url)}>
                     <NavLink to={item.url} end>
                       <item.icon className="h-4 w-4" />
@@ -168,7 +169,7 @@ export function AppSidebar() {
             <SidebarGroupContent>
               <SidebarMenu>
                 {systemItems.map((item) => (
-                  <SidebarMenuItem key={item.title}>
+                  <SidebarMenuItem key={item.url}>
                     <SidebarMenuButton asChild isActive={isActive(item.url)}>
                       <NavLink to={item.url} end>
                         <item.icon className="h-4 w-4" />
