@@ -32,3 +32,6 @@ verify_jwt = false
 
 [functions.capacity-cost-alerts]
 verify_jwt = false
+
+[functions.cloud-quotas]
+verify_jwt = false
