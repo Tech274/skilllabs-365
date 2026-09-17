@@ -258,6 +258,7 @@ export default function StudentDashboard() {
                     <ProvisioningErrorPanel
                       message={launchErrors[lab.id]}
                       payload={launchErrorPayloads[lab.id]}
+                      learnerFacing
                     />
                   )}
                   {provisioning.isProvisioning && provisioning.labId === lab.id && (

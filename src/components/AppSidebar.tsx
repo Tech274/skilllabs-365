@@ -124,11 +124,11 @@ export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
   const location = useLocation();
-  const { role, isAdmin, isInstructor } = useAuth();
+  const { role, isAdmin, isSuperAdmin, isInstructor } = useAuth();
   const isActive = (path: string) => location.pathname === path;
 
   const navItems = isAdmin ? adminItems : isInstructor ? instructorItems : studentItems;
-  const roleLabel = isAdmin ? "Platform Admin" : isInstructor ? "Instructor" : "Student";
+  const roleLabel = isSuperAdmin ? "Super Admin" : isAdmin ? "Platform Admin" : isInstructor ? "Instructor" : "Student";
 
   return (
     <Sidebar collapsible="icon">

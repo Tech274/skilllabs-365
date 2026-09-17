@@ -316,6 +316,7 @@ const Index = () => {
               <ProvisioningProgress
                 startedAt={provisioning.startedAt!}
                 vmId={provisioning.vmId}
+                showTechnicalTrace
                 onCancel={provisioning.cancelProvisioning}
                 cancelling={provisioning.cancelling}
                 className="mt-4"

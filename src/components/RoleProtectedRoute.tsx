@@ -1,7 +1,7 @@
 import { useAuth } from "@/hooks/use-auth";
 import { Navigate } from "react-router-dom";
 
-type AppRole = "admin" | "instructor" | "student";
+type AppRole = "admin" | "instructor" | "student" | "super_admin" | "content_admin";
 
 interface RoleProtectedRouteProps {
   children: React.ReactNode;
@@ -23,9 +23,18 @@ const RoleProtectedRoute = ({ children, allowedRoles }: RoleProtectedRouteProps)
     return <Navigate to="/login" replace />;
   }
 
-  if (role && !allowedRoles.includes(role)) {
-    // Redirect to appropriate dashboard based on role
-    const redirectPath = role === "admin" ? "/" : role === "instructor" ? "/instructor" : "/student";
+  const effectiveAllowed =
+    allowedRoles.includes("admin") && !allowedRoles.includes("super_admin")
+      ? [...allowedRoles, "super_admin" as const]
+      : allowedRoles;
+
+  if (role && !effectiveAllowed.includes(role)) {
+    const redirectPath =
+      role === "admin" || role === "super_admin"
+        ? "/"
+        : role === "instructor"
+          ? "/instructor"
+          : "/student";
     return <Navigate to={redirectPath} replace />;
   }
 

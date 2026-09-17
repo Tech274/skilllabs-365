@@ -137,7 +137,9 @@ export function ProvisioningTimeline({ vmId, correlationId, className, limit = 4
 
   return (
     <div className={cn("space-y-3 rounded-lg border border-border/60 bg-card/50 p-4", className)}>
-      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Provisioning activity</p>
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        Provisioning activity <span className="normal-case font-normal">(Ops / debug)</span>
+      </p>
 
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {PHASES.map((phase) => {
