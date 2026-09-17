@@ -1,8 +1,11 @@
 import { corsHeadersFor, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
-import { azureStatusToVmStatus } from "../_shared/vm-state.ts";
 import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
 import { getAzureToken } from "../_shared/azure-preflight.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
+import {
+  reconcileProvisioningAgainstAzure,
+  applyPromoteToRunning,
+} from "../_shared/azure-reconcile.ts";
 
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
@@ -29,52 +32,32 @@ Deno.serve(async (req) => {
       return jsonResponse({ status: vm.status });
     }
 
-    // Extract VM name from azure_vm_id
-    const azureVmId = vm.azure_vm_id;
-    if (!azureVmId) {
+    if (!vm.azure_vm_id) {
       return jsonResponse({ status: "provisioning" });
     }
-    const vmName = azureVmId.split("/").pop()!;
 
     // Credentials come from the Resource Providers registry that created this VM.
     const admin = serviceClient();
     const azure = await resolveAzureRuntime(admin, vm.provider_account_id);
     const azureToken = await getAzureToken(azure.tenantId, azure.clientId, azure.clientSecret);
 
-    // Check VM instance view
-    const ivRes = await fetch(
-      `https://management.azure.com/subscriptions/${azure.subscriptionId}/resourceGroups/${azure.resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}/instanceView?api-version=2024-03-01`,
-      { headers: { Authorization: `Bearer ${azureToken}` } },
+    const outcome = await reconcileProvisioningAgainstAzure(
+      {
+        token: azureToken,
+        subscriptionId: azure.subscriptionId,
+        resourceGroup: azure.resourceGroup,
+      },
+      { azureVmId: vm.azure_vm_id, currentPrivateIp: vm.private_ip },
     );
 
-    if (!ivRes.ok) {
-      return jsonResponse({ status: "provisioning" });
+    if (outcome.kind === "promoted") {
+      await applyPromoteToRunning(supabase, vm_id, outcome.private_ip);
+      return jsonResponse({ status: "running", private_ip: outcome.private_ip });
     }
 
-    const ivData = await ivRes.json();
-    const statuses = ivData.statuses || [];
-    const mapped = azureStatusToVmStatus(statuses);
-
-    if (mapped === "running") {
-      // Get updated private IP
-      const nicName = `${vmName}-nic`;
-      const nicRes = await fetch(
-        `https://management.azure.com/subscriptions/${azure.subscriptionId}/resourceGroups/${azure.resourceGroup}/providers/Microsoft.Network/networkInterfaces/${nicName}?api-version=2024-03-01`,
-        { headers: { Authorization: `Bearer ${azureToken}` } },
-      );
-      let privateIp = vm.private_ip;
-      if (nicRes.ok) {
-        const nicData = await nicRes.json();
-        privateIp = nicData?.properties?.ipConfigurations?.[0]?.properties?.privateIPAddress || privateIp;
-      }
-
-      await supabase.from("virtual_machines").update({ status: "running", private_ip: privateIp }).eq("id", vm_id);
-      return jsonResponse({ status: "running", private_ip: privateIp });
-    }
-
-    if (mapped === "failed" || mapped === "deallocated" || mapped === "stopped") {
-      await supabase.from("virtual_machines").update({ status: mapped }).eq("id", vm_id);
-      return jsonResponse({ status: mapped });
+    if (outcome.kind === "mapped") {
+      await supabase.from("virtual_machines").update({ status: outcome.status }).eq("id", vm_id);
+      return jsonResponse({ status: outcome.status });
     }
 
     return jsonResponse({ status: "provisioning" });
