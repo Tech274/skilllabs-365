@@ -49,21 +49,25 @@ Deno.serve(async (req) => {
       if (acct?.provider) provider = String(acct.provider);
     }
 
+    // Status writes MUST use the service role. Learners only have SELECT on
+    // virtual_machines (RLS: "Users view own VMs"); admin FOR ALL is admin-only.
+    // Promoting with the user JWT silently no-ops → Hub stays "provisioning"
+    // forever even when EC2/Azure is already Running (loadtest02 prv_ca91e584).
     if (provider === "aws") {
       const aws = await resolveAwsRuntime(admin, vm.provider_account_id);
       // Prefer the VM's stored region when present
       if (vm.region) aws.defaultRegion = String(vm.region);
       const desc = await describeAwsInstance(aws, vm.azure_vm_id);
       if (desc.state === "running") {
-        await applyPromoteToRunning(supabase, vm_id, desc.privateIp);
+        await applyPromoteToRunning(admin, vm_id, desc.privateIp);
         return jsonResponse({ status: "running", private_ip: desc.privateIp });
       }
       if (desc.state === "terminated" || desc.state === "shutting-down") {
-        await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm_id);
+        await admin.from("virtual_machines").update({ status: "failed" }).eq("id", vm_id);
         return jsonResponse({ status: "failed" });
       }
       if (desc.state === "stopped" || desc.state === "stopping") {
-        await supabase.from("virtual_machines").update({ status: "stopped" }).eq("id", vm_id);
+        await admin.from("virtual_machines").update({ status: "stopped" }).eq("id", vm_id);
         return jsonResponse({ status: "stopped" });
       }
       return jsonResponse({ status: "provisioning" });
@@ -82,12 +86,12 @@ Deno.serve(async (req) => {
     );
 
     if (outcome.kind === "promoted") {
-      await applyPromoteToRunning(supabase, vm_id, outcome.private_ip);
+      await applyPromoteToRunning(admin, vm_id, outcome.private_ip);
       return jsonResponse({ status: "running", private_ip: outcome.private_ip });
     }
 
     if (outcome.kind === "mapped") {
-      await supabase.from("virtual_machines").update({ status: outcome.status }).eq("id", vm_id);
+      await admin.from("virtual_machines").update({ status: outcome.status }).eq("id", vm_id);
       return jsonResponse({ status: outcome.status });
     }
 

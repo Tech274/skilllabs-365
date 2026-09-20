@@ -781,7 +781,7 @@ Deno.serve(async (req) => {
     // Only fail/soft-dealloc when Azure is still creating / failed / not found / unavailable.
     const { data: stuckVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, created_at, provider_account_id, private_ip")
+      .select("id, azure_vm_id, created_at, provider_account_id, private_ip, region")
       .eq("status", "provisioning")
       .lt("created_at", stuckCutoff);
 
@@ -793,6 +793,7 @@ Deno.serve(async (req) => {
             const provider = await providerOf(supabase, vm.provider_account_id);
             if (provider === "aws") {
               const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+              if (vm.region) aws.defaultRegion = String(vm.region);
               const desc = await describeAwsInstance(aws, vm.azure_vm_id);
               if (desc.state === "running") {
                 await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
