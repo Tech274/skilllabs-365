@@ -97,3 +97,23 @@ export function formatMinutes(minutes: number): string {
   const m = minutes % 60;
   return m ? `${h}h ${m}m` : `${h}h`;
 }
+
+/** Start/Launch is blocked when minutes are exhausted or the persistent window ended. */
+export function isStartBlocked(wallet: LabWallet): boolean {
+  return wallet.exhausted || wallet.windowEnded;
+}
+
+/** Human equation e.g. "1200 − 40 = 1160". */
+export function walletEquation(wallet: LabWallet): string {
+  return `${wallet.allocatedMinutes} − ${wallet.usedMinutes} = ${wallet.remainingMinutes}`;
+}
+
+export function startBlockedMessage(wallet: LabWallet): string {
+  if (wallet.windowEnded) {
+    return "This lab’s date window has ended. Start is blocked. Your machine is held (not deleted) — contact Ops for an extension.";
+  }
+  if (wallet.exhausted) {
+    return `Lab minutes used up (${walletEquation(wallet)}). Start is blocked until more minutes are granted. Your machine is held (not deleted).`;
+  }
+  return "";
+}

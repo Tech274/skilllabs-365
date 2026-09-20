@@ -1,12 +1,12 @@
 /**
  * Persistent lab REMINT / resume.
  *
- * Disconnect is not deallocate. A learner who stops, leaves or returns inside the
- * grant + template window must get the SAME allocation back: we start the existing
- * VM instead of creating a new one (and never destroy it on Start).
+ * Learner Leave soft-stops (deallocates) the VM but keeps the allocation.
+ * A Start inside the grant + template window (and with wallet minutes remaining)
+ * must power the SAME VM back on — never create or destroy on Start.
  *
- * Only the soft-expiry job (end_date EOD IST, or minutes exhausted for
- * non-persistent labs) deallocates + notifies — never a silent terminate.
+ * Soft-expiry (end_date EOD IST, or minutes exhausted) also deallocates + notifies.
+ * Exhausted wallet blocks Start; the VM is held, never silently terminated.
  */
 
 import { ec2Action, resolveAwsRuntime } from "./aws-runtime.ts";

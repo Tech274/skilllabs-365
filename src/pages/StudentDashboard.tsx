@@ -25,7 +25,7 @@ import { listGrants } from "@/lib/manual-grants.functions";
 import { HUB_WHATSAPP_UPSELL, readStoredHandoff } from "@/lib/skilltrack-handoff";
 import { MessageCircle } from "lucide-react";
 import { LabWalletPanel } from "@/components/LabWalletPanel";
-import { buildLabWallet } from "@/lib/lab-wallet";
+import { buildLabWallet, isStartBlocked, startBlockedMessage } from "@/lib/lab-wallet";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -84,6 +84,13 @@ export default function StudentDashboard() {
       toast({ title: "Lab access pending", description: "Ops must grant Hub access after payment.", variant: "destructive" });
       return;
     }
+    const wallet = buildLabWallet(lab, sessions);
+    if (isStartBlocked(wallet)) {
+      const message = startBlockedMessage(wallet);
+      setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
+      toast({ title: wallet.exhausted ? "Lab minutes used up" : "Lab window ended", description: message, variant: "destructive" });
+      return;
+    }
     setLaunchingId(lab.id);
     setLaunchErrors((prev) => ({ ...prev, [lab.id]: "" }));
     try {
@@ -93,6 +100,10 @@ export default function StudentDashboard() {
       });
       if (error || data?.error) {
         if (data?.error) setLaunchErrorPayloads((prev) => ({ ...prev, [lab.id]: data }));
+        const code = String(data?.code ?? "");
+        if (code === "LAB_MINUTES_EXHAUSTED" || code === "LAB_WINDOW_ENDED") {
+          throw new Error(String(data.error));
+        }
         throw new Error(await readFunctionError(error, data));
       }
 
@@ -256,30 +267,54 @@ export default function StudentDashboard() {
                     <Badge variant="outline" className="text-[10px] font-mono">{lab.vm_size}</Badge>
                     <Badge variant="outline" className="text-[10px]">{lab.region}</Badge>
                   </div>
-                  {launchErrors[lab.id] && (
-                    <ProvisioningErrorPanel
-                      message={launchErrors[lab.id]}
-                      payload={launchErrorPayloads[lab.id]}
-                      learnerFacing
-                    />
-                  )}
-                  {provisioning.isProvisioning && provisioning.labId === lab.id && (
-                    <ProvisioningProgress
-                      startedAt={provisioning.startedAt!}
-                      vmId={provisioning.vmId}
-                      onCancel={provisioning.cancelProvisioning}
-                      cancelling={provisioning.cancelling}
-                    />
-                  )}
-                  <Button size="sm" className="w-full gap-2" disabled={launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)} onClick={() => handleLaunchLab(lab)}>
-                    {(launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)) ? (
-                      <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</>
-                    ) : launchErrors[lab.id] ? (
-                      <><AlertCircle className="h-3.5 w-3.5" /> Retry Launch</>
-                    ) : (
-                      <><Play className="h-3.5 w-3.5" /> Launch Lab</>
-                    )}
-                  </Button>
+                  {(() => {
+                    const wallet = buildLabWallet(lab, sessions);
+                    const blocked = isStartBlocked(wallet);
+                    return (
+                      <>
+                        {blocked && (
+                          <p className="text-[11px] text-destructive leading-snug">
+                            {startBlockedMessage(wallet)}
+                          </p>
+                        )}
+                        {launchErrors[lab.id] && !blocked && (
+                          <ProvisioningErrorPanel
+                            message={launchErrors[lab.id]}
+                            payload={launchErrorPayloads[lab.id]}
+                            learnerFacing
+                          />
+                        )}
+                        {provisioning.isProvisioning && provisioning.labId === lab.id && (
+                          <ProvisioningProgress
+                            startedAt={provisioning.startedAt!}
+                            vmId={provisioning.vmId}
+                            onCancel={provisioning.cancelProvisioning}
+                            cancelling={provisioning.cancelling}
+                          />
+                        )}
+                        <Button
+                          size="sm"
+                          className="w-full gap-2"
+                          disabled={
+                            blocked ||
+                            launchingId === lab.id ||
+                            (provisioning.isProvisioning && provisioning.labId === lab.id)
+                          }
+                          onClick={() => handleLaunchLab(lab)}
+                        >
+                          {(launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)) ? (
+                            <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</>
+                          ) : blocked ? (
+                            <><AlertCircle className="h-3.5 w-3.5" /> {wallet.exhausted ? "Minutes used up" : "Window ended"}</>
+                          ) : launchErrors[lab.id] ? (
+                            <><AlertCircle className="h-3.5 w-3.5" /> Retry Launch</>
+                          ) : (
+                            <><Play className="h-3.5 w-3.5" /> Launch Lab</>
+                          )}
+                        </Button>
+                      </>
+                    );
+                  })()}
                 </motion.div>
               ))}
             </div>

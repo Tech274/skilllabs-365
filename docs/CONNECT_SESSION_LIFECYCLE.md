@@ -12,6 +12,7 @@ SkillHub Labs Connect is a **desktop tunnel to an already-running lab VM**. Clos
 | **Idle cleanup** (`cleanup-idle-labs`, no session activity) | Cleaned if orphaned | **Deallocate** (soft stop) |
 | **Soft-expiry** (`expires_at` / `labs-watchdog`) | Session ends | **Deallocate** (soft stop; not hard-delete by default) |
 | **Intentional power-off** (`cleanup-idle-labs` `stop-vm`, or Azure deallocate) | Must reconnect after power-on | `deallocated` / stopped until started again |
+| **Learner Leave** (toolbar Leave / soft-stop) | Ended (billable minutes deducted) | **Deallocate** soft-stop — same VM kept for Start remint; never delete |
 | **Intentional power-on / start** after power-off | Remint Connect after VM is `running` again | Separate case from disconnect |
 
 ## Operator / soak notes

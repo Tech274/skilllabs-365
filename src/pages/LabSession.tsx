@@ -97,7 +97,7 @@ export default function LabSession() {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const { isAdmin, isSuperAdmin, user } = useAuth();
   const [labTemplateId, setLabTemplateId] = useState<string | null>(null);
-  /** Persistent labs keep their allocation: leaving disconnects, it never deallocates. */
+  /** Persistent labs keep their allocation: Leave soft-stops (deallocate), Start remints same VM. */
   const [isPersistentLab, setIsPersistentLab] = useState(false);
   /** VM facts (persistence + power state) must be loaded before Leave/Connect act. */
   const [vmFactsLoaded, setVmFactsLoaded] = useState(false);
@@ -615,9 +615,8 @@ export default function LabSession() {
 
 
   const handleEndSession = async () => {
-    // Persistence MUST be known before Leave acts. If facts have not landed yet,
-    // resolve them now — we must never manual-stop a persistent allocation.
-    let persistent = isPersistentLab;
+    // Leave = soft-stop: end the Guac/session (billable minutes deduct) + deallocate
+    // the SAME VM. Never delete. Start later remints this allocation when wallet allows.
     if (!vmFactsLoaded && vmId) {
       const { data: vm } = await supabase
         .from("virtual_machines")
@@ -625,8 +624,7 @@ export default function LabSession() {
         .eq("id", vmId)
         .maybeSingle();
       const tpl = Array.isArray(vm?.lab_templates) ? vm?.lab_templates[0] : vm?.lab_templates;
-      persistent = Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent);
-      setIsPersistentLab(persistent);
+      setIsPersistentLab(Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent));
     }
 
     if (dbSessionId) {
@@ -653,30 +651,27 @@ export default function LabSession() {
     setDesktopConfirmed(false);
     setAwaitingDesktop(false);
 
-
-    // Persistent labs: leaving is a DISCONNECT only. The allocation stays so the
-    // learner can start/return inside the window and get the same machine back.
-    // Only soft-expiry (end_date EOD IST) or exhausted minutes deallocate + notify.
-    if (persistent) {
-      toast({
-        title: "Left the lab",
-        description: "Your lab machine is kept for you — reopen it any time inside your lab window.",
-      });
-      navigate("/labs");
-      return;
-    }
-
-    // Trigger VM cleanup/deallocation (non-persistent labs only)
+    let walletNote = "Machine soft-stopped (not deleted). Start resumes the same lab when minutes remain.";
     if (vmId) {
       try {
-        await supabase.functions.invoke("cleanup-idle-labs", {
-          body: { action: "manual-stop" },
+        const { data } = await supabase.functions.invoke("cleanup-idle-labs", {
+          body: { action: "learner-leave", vm_id: vmId, reason: "learner_leave" },
         });
+        const w = data?.wallet as
+          | { allocated_minutes?: number; used_minutes?: number; remaining_minutes?: number }
+          | undefined;
+        if (w && typeof w.remaining_minutes === "number" && typeof w.allocated_minutes === "number") {
+          const used = typeof w.used_minutes === "number" ? w.used_minutes : w.allocated_minutes - w.remaining_minutes;
+          walletNote = `${w.allocated_minutes} − ${used} = ${w.remaining_minutes} minutes remaining. Machine soft-stopped (not deleted).`;
+        }
       } catch (err) {
-        console.error("Failed to trigger VM cleanup:", err);
+        console.error("Failed to soft-stop lab on Leave:", err);
       }
     }
-    toast({ title: "Session ended", description: "Your lab session has ended and the machine is being deallocated (not deleted).", variant: "destructive" });
+    toast({
+      title: "Left the lab",
+      description: walletNote,
+    });
     navigate("/labs");
   };
 
@@ -893,7 +888,7 @@ export default function LabSession() {
                   </Button>
                 </TooltipTrigger>
                 <TooltipContent>
-                  {isPersistentLab ? "Leave lab (machine stays allocated)" : "End Session"}
+                  {isPersistentLab ? "Leave lab (soft-stop — Start resumes same VM)" : "Leave lab (soft-stop)"}
                 </TooltipContent>
               </Tooltip>
             </div>

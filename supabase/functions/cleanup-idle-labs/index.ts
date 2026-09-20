@@ -11,6 +11,7 @@ import {
   resolveAwsRuntime, stopAwsInstance, terminateAwsInstance, describeAwsInstance,
 } from "../_shared/cloud-providers/aws-runtime.ts";
 import { startCloudVm, RESUMABLE_VM_STATUSES } from "../_shared/cloud-providers/vm-resume.ts";
+import { buildWalletSnapshot } from "../_shared/lab-wallet.ts";
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -228,9 +229,11 @@ Deno.serve(async (req) => {
     } catch { /* no body = scheduled run */ }
     const correlationId = correlationIdFrom(req);
 
-    // `cancel-provisioning` is the only student-callable action: it is scoped to
-    // the caller's own VM. Everything else stays admin / service-role only.
-    const auth = action === "cancel-provisioning"
+    // Student-callable actions (scoped to the caller's own VM):
+    //   cancel-provisioning — hard cancel while provisioning
+    //   learner-leave       — Leave / soft-stop: end session (wallet deduct) + deallocate, never delete
+    // Everything else stays admin / service-role only.
+    const auth = (action === "cancel-provisioning" || action === "learner-leave")
       ? await requireUser(req)
       : await requireAdmin(req);
     if (auth instanceof Response) return auth;
@@ -324,6 +327,112 @@ Deno.serve(async (req) => {
         await releaseIdempotency(supabase, { key: cancelKey, userId: auth.userId, action: "cancel-provisioning" });
         throw e;
       }
+    }
+
+    // Learner Leave / soft-stop: end active sessions (billable minutes deduct) +
+    // deallocate the SAME allocation. Never delete. Start later remints this VM.
+    if (action === "learner-leave") {
+      if (!targetVmId) return errorResponse("vm_id required", 400);
+
+      const { data: vm } = await supabase
+        .from("virtual_machines")
+        .select("id, azure_vm_id, status, user_id, lab_template_id, provider_account_id, region, private_ip, expires_at")
+        .eq("id", targetVmId)
+        .maybeSingle();
+      if (!vm) return errorResponse("VM not found", 404);
+
+      const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
+      if (forbidden) return forbidden;
+
+      const nowIso = new Date().toISOString();
+      const nowMs = Date.now();
+
+      // Close Guac/session rows first so wallet usage includes this Leave interval.
+      await supabase
+        .from("sessions")
+        .update({
+          ended_at: nowIso,
+          status: "completed",
+          disconnect_reason: "learner_leave",
+        })
+        .eq("vm_id", targetVmId)
+        .eq("status", "active");
+
+      const live = ["running", "provisioning", "starting", "idle"].includes(String(vm.status || "").toLowerCase());
+      let stopped = !live;
+      if (live && vm.azure_vm_id) {
+        try {
+          stopped = await stopCloudVm(supabase, azureFor, vm);
+        } catch (e) {
+          console.error("learner-leave stop failed", e);
+          stopped = false;
+        }
+      }
+      if (live) {
+        await markVmEnded(supabase, targetVmId, {
+          status: "deallocated",
+          ended_by: auth.userId,
+          ended_reason: "learner_leave",
+          ended_at: nowIso,
+        });
+      }
+
+      let wallet = {
+        allocated_minutes: 0,
+        used_minutes: 0,
+        remaining_minutes: 0,
+        exhausted: false,
+        window_ended: false,
+      };
+      if (vm.lab_template_id && vm.user_id) {
+        const { data: tpl } = await supabase
+          .from("lab_templates")
+          .select("id, duration, is_persistent, end_date")
+          .eq("id", vm.lab_template_id)
+          .maybeSingle();
+        const { data: usage } = await supabase
+          .from("sessions")
+          .select("started_at, ended_at")
+          .eq("user_id", vm.user_id)
+          .eq("lab_template_id", vm.lab_template_id)
+          .limit(500);
+        if (tpl) {
+          const snap = buildWalletSnapshot({
+            duration: tpl.duration,
+            endDate: tpl.end_date,
+            isPersistent: tpl.is_persistent,
+            sessions: usage ?? [],
+            nowMs,
+          });
+          wallet = {
+            allocated_minutes: snap.allocatedMinutes,
+            used_minutes: snap.usedMinutes,
+            remaining_minutes: snap.remainingMinutes,
+            exhausted: snap.exhausted,
+            window_ended: snap.windowEnded,
+          };
+        }
+      }
+
+      console.log(JSON.stringify({
+        event: "learner_leave",
+        vm_id: targetVmId,
+        actor: auth.userId,
+        stopped,
+        wallet,
+      }));
+
+      return jsonResponse({
+        success: true,
+        action: "learner-leave",
+        vm_id: targetVmId,
+        status: "deallocated",
+        soft_stop: true,
+        deleted: false,
+        cloud_stop_ok: stopped,
+        wallet,
+        correlation_id: correlationId,
+      });
     }
 
     // Handle targeted stop/delete actions

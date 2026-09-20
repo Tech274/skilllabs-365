@@ -148,6 +148,10 @@ const LEARNER_HOLD =
 
 export function learnerConnectHoldCopy(raw?: string | null): string {
   if (!raw) return LEARNER_HOLD;
+  // Wallet / Start-gate messages are intentional learner copy — keep them.
+  if (/lab minutes used up|date window has ended|start is blocked|minutes are granted/i.test(raw)) {
+    return raw.length > 280 ? raw.slice(0, 277) + "…" : raw;
+  }
   // Never surface Guac / Azure / RDP / SSH / provider strings to learners
   if (
     /guacamole|token|rdp|ssh|azure|arm|nsg|timeout|401|403|500|ECONN|refused|password|auth/i.test(

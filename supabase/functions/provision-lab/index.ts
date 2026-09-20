@@ -18,6 +18,7 @@ import {
 import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
 import { findResumableVm, RESUMABLE_VM_STATUSES, startCloudVm } from "../_shared/cloud-providers/vm-resume.ts";
+import { buildWalletSnapshot, walletBlockMessage } from "../_shared/lab-wallet.ts";
 
 const SOURCE = "provision-lab";
 
@@ -432,11 +433,54 @@ Deno.serve(async (req) => {
       throw new Error(`Lab template not found: ${templateError?.message || lab_template_id}`);
     }
 
+    // --- Lab wallet Start gate --------------------------------------------
+    // Exhausted minutes (or ended date window) block Start/Launch with a clear
+    // message. Do NOT delete the VM — soft-stop / Leave already held it.
+    {
+      const { data: usage } = await supabase
+        .from("sessions")
+        .select("started_at, ended_at")
+        .eq("user_id", userId)
+        .eq("lab_template_id", template.id)
+        .limit(500);
+      const snap = buildWalletSnapshot({
+        duration: template.duration,
+        endDate: template.end_date,
+        isPersistent: template.is_persistent,
+        sessions: usage ?? [],
+      });
+      const blocked = walletBlockMessage(snap);
+      if (blocked) {
+        await trace.failed(SOURCE, "wallet-gate", blocked.error, {
+          code: blocked.code,
+          allocated: snap.allocatedMinutes,
+          used: snap.usedMinutes,
+          remaining: snap.remainingMinutes,
+        });
+        const failure = {
+          error: blocked.error,
+          code: blocked.code,
+          wallet: {
+            allocated_minutes: snap.allocatedMinutes,
+            used_minutes: snap.usedMinutes,
+            remaining_minutes: snap.remainingMinutes,
+            exhausted: snap.exhausted,
+            window_ended: snap.windowEnded,
+          },
+          correlation_id: correlationId,
+          stage: "wallet-gate",
+        };
+        await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
+        idem = null;
+        return new Response(JSON.stringify(failure), { status: 403, headers: traceHeaders });
+      }
+    }
+
     // --- Persistent lab REMINT --------------------------------------------
-    // Disconnect ≠ deallocate. Inside the grant/template window a Start after a
-    // Stop / Leave must hand back the SAME allocation: resume the existing VM
-    // instead of creating (or destroying) anything. Only the soft-expiry job
-    // (end_date EOD IST, or minutes exhausted) deallocates + notifies.
+    // Leave / soft-stop deallocates compute but keeps the allocation. Inside the
+    // grant/template window a Start after Leave must hand back the SAME VM.
+    // Soft-expiry (end_date EOD IST) or exhausted minutes still deallocate + notify;
+    // Start is blocked above when the wallet is empty — never delete here.
     if (template.is_persistent) {
       const existingVm = await findResumableVm(supabase, { userId, labTemplateId: lab_template_id });
       if (existingVm) {
