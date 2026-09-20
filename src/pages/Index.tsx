@@ -30,6 +30,7 @@ import {
   Bar,
 } from "recharts";
 import { Progress } from "@/components/ui/progress";
+import { NetworkHealthPanel } from "@/components/NetworkHealthPanel";
 
 
 /** Extract VM / instance name from azure_vm_id (full ARM path or bare name). */
@@ -264,6 +265,9 @@ const Index = () => {
             </motion.div>
           )}
         </AnimatePresence>
+
+        {/* Network Health — live probes of the Guacamole gateways and the Hub */}
+        <NetworkHealthPanel />
 
         {/* Metrics */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">

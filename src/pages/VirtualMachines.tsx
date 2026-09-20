@@ -34,6 +34,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { useAuth } from "@/hooks/use-auth";
 
 interface VMRow {
   id: string;
@@ -44,6 +45,7 @@ interface VMRow {
   status: string;
   idle_minutes: number;
   azure_vm_id: string | null;
+  provider?: string | null;
   lab_template_id: string | null;
   provider_account_id: string | null;
   created_at: string;
@@ -83,6 +85,7 @@ function formatDateTime(iso: string | null | undefined): string {
 
 export default function VirtualMachines() {
   const navigate = useNavigate();
+  const { isSuperAdmin } = useAuth();
   const [searchParams] = useSearchParams();
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -648,23 +651,32 @@ export default function VirtualMachines() {
                       </td>
                       <td className="px-5 py-3">
                         <div className="flex gap-1">
-                          {["running", "idle"].includes(vm.status) && (
+                          {/* Super Admin barge-in: Connect is ALWAYS visible, whoever owns the
+                              VM and whatever its status. Other roles keep the live-only Connect.
+                              Learner Connect UX is untouched. */}
+                          {(isSuperAdmin || ["running", "idle"].includes(vm.status)) && (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <button
                                   className="p-1.5 rounded hover:bg-primary/10 text-primary transition-colors disabled:opacity-40"
-                                  title="Connect (admin)"
+                                  title={isSuperAdmin ? "Admin Connect (barge-in)" : "Connect (admin)"}
                                   disabled={actionLoading === vm.id}
                                   onClick={() =>
                                     navigate(
-                                      `/labs/session/${vm.lab_template_id || vm.id}?vm_id=${vm.id}`,
+                                      `/labs/session/${vm.lab_template_id || vm.id}?vm_id=${vm.id}${isSuperAdmin ? "&admin=1" : ""}`,
                                     )
                                   }
                                 >
                                   <Monitor className="h-3.5 w-3.5" />
                                 </button>
                               </TooltipTrigger>
-                              <TooltipContent>Connect (admin)</TooltipContent>
+                              <TooltipContent>
+                                {isSuperAdmin
+                                  ? ["running", "idle"].includes(vm.status)
+                                    ? "Admin Connect (barge-in) — joins this learner's desktop"
+                                    : "Admin Connect (barge-in) — machine is not live; start it first"
+                                  : "Connect (admin)"}
+                              </TooltipContent>
                             </Tooltip>
                           )}
                           <Tooltip>

@@ -1,0 +1,99 @@
+/**
+ * Lab wallet: allocated − used = remaining.
+ *
+ * Minutes are consumed by SESSION USAGE only (time actually spent in a lab),
+ * never by merely being assigned a grant. A grant unlocks the lab; the wallet
+ * tracks the minutes.
+ *
+ * Persistent labs additionally carry a start/end date window (Asia/Kolkata).
+ * Soft-expiry fires at end_date EOD IST, or when remaining minutes hit zero —
+ * always deallocate + notify, never a silent terminate.
+ */
+
+import { formatIstDate } from "@/lib/lab-template-window";
+
+export type WalletSession = {
+  lab_template_id?: string | null;
+  started_at?: string | null;
+  ended_at?: string | null;
+};
+
+export type WalletTemplate = {
+  id: string;
+  duration?: number | null;
+  is_persistent?: boolean | null;
+  start_date?: string | null;
+  end_date?: string | null;
+};
+
+export type LabWallet = {
+  allocatedMinutes: number;
+  usedMinutes: number;
+  remainingMinutes: number;
+  percentUsed: number;
+  exhausted: boolean;
+  isPersistent: boolean;
+  startLabel: string | null;
+  endLabel: string | null;
+  /** True once the persistent window's end date has passed (EOD IST). */
+  windowEnded: boolean;
+};
+
+/** Minutes actually spent in sessions for one lab template (open sessions count so far). */
+export function usedMinutesForTemplate(
+  sessions: WalletSession[],
+  templateId: string,
+  now: number = Date.now(),
+): number {
+  const total = sessions.reduce((acc, s) => {
+    if (s.lab_template_id !== templateId || !s.started_at) return acc;
+    const start = new Date(s.started_at).getTime();
+    if (Number.isNaN(start)) return acc;
+    const end = s.ended_at ? new Date(s.ended_at).getTime() : now;
+    if (Number.isNaN(end) || end <= start) return acc;
+    return acc + (end - start) / 60000;
+  }, 0);
+  return Math.round(total);
+}
+
+/** End of the persistent window: 23:59:59.999 IST on end_date. */
+export function endOfDayIst(endDateIso: string): number {
+  const d = new Date(endDateIso);
+  if (Number.isNaN(d.getTime())) return Number.NaN;
+  // Shift into IST, snap to the end of that calendar day, shift back to UTC.
+  const istMs = d.getTime() + 5.5 * 60 * 60 * 1000;
+  const ist = new Date(istMs);
+  ist.setUTCHours(23, 59, 59, 999);
+  return ist.getTime() - 5.5 * 60 * 60 * 1000;
+}
+
+export function buildLabWallet(
+  template: WalletTemplate,
+  sessions: WalletSession[],
+  now: number = Date.now(),
+): LabWallet {
+  const allocatedMinutes = Math.max(Math.round(template.duration ?? 0), 0);
+  const usedMinutes = usedMinutesForTemplate(sessions, template.id, now);
+  const remainingMinutes = Math.max(allocatedMinutes - usedMinutes, 0);
+  const isPersistent = Boolean(template.is_persistent);
+  const endMs = template.end_date ? endOfDayIst(template.end_date) : Number.NaN;
+
+  return {
+    allocatedMinutes,
+    usedMinutes,
+    remainingMinutes,
+    percentUsed: allocatedMinutes > 0 ? Math.min((usedMinutes / allocatedMinutes) * 100, 100) : 0,
+    exhausted: allocatedMinutes > 0 && remainingMinutes <= 0,
+    isPersistent,
+    startLabel: isPersistent && template.start_date ? formatIstDate(template.start_date) : null,
+    endLabel: isPersistent && template.end_date ? formatIstDate(template.end_date) : null,
+    windowEnded: isPersistent && !Number.isNaN(endMs) && now > endMs,
+  };
+}
+
+export function formatMinutes(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m ? `${h}h ${m}m` : `${h}h`;
+}

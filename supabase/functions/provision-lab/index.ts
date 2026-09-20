@@ -17,6 +17,7 @@ import {
 } from "../_shared/cloud-providers/aws-runtime.ts";
 import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
+import { findResumableVm, RESUMABLE_VM_STATUSES, startCloudVm } from "../_shared/cloud-providers/vm-resume.ts";
 
 const SOURCE = "provision-lab";
 
@@ -429,6 +430,69 @@ Deno.serve(async (req) => {
 
     if (templateError || !template) {
       throw new Error(`Lab template not found: ${templateError?.message || lab_template_id}`);
+    }
+
+    // --- Persistent lab REMINT --------------------------------------------
+    // Disconnect ≠ deallocate. Inside the grant/template window a Start after a
+    // Stop / Leave must hand back the SAME allocation: resume the existing VM
+    // instead of creating (or destroying) anything. Only the soft-expiry job
+    // (end_date EOD IST, or minutes exhausted) deallocates + notifies.
+    if (template.is_persistent) {
+      const existingVm = await findResumableVm(supabase, { userId, labTemplateId: lab_template_id });
+      if (existingVm) {
+        trace.attach({ vmId: existingVm.id });
+        const needsStart = (RESUMABLE_VM_STATUSES as readonly string[]).includes(existingVm.status);
+        let started = false;
+        if (needsStart) {
+          await trace.start(SOURCE, "remint", "Resuming your existing persistent lab VM (no new machine)");
+          try {
+            started = await startCloudVm(supabase, (template.provider || "azure") as string, existingVm);
+          } catch (e) {
+            console.error("persistent remint start failed", e);
+          }
+          if (started) {
+            await supabase
+              .from("virtual_machines")
+              .update({ status: "starting", ended_at: null, ended_by: null, ended_reason: null })
+              .eq("id", existingVm.id);
+          }
+          if (!started) {
+            await trace.failed(SOURCE, "remint", "Could not power the existing lab VM back on");
+            const failure = {
+              error:
+                "Your persistent lab machine could not be powered back on. It has NOT been deleted — please retry in a minute or contact support.",
+              code: "REMINT_START_FAILED",
+              vm_id: existingVm.id,
+              correlation_id: correlationId,
+              stage: "remint",
+            };
+            await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
+            idem = null;
+            return new Response(JSON.stringify(failure), { status: 503, headers: traceHeaders });
+          }
+        }
+        const resumed = {
+          vm_id: existingVm.id,
+          azure_vm_id: existingVm.azure_vm_id,
+          private_ip: existingVm.private_ip,
+          status: needsStart ? "starting" : existingVm.status,
+          reused_existing: true,
+          reminted: needsStart,
+          persistent: true,
+          correlation_id: correlationId,
+        };
+        await trace.success(
+          SOURCE,
+          "remint",
+          needsStart
+            ? "Existing persistent lab VM is starting again — same allocation, nothing destroyed"
+            : "Existing persistent lab VM is still allocated — reconnecting to it",
+          { vm_id: existingVm.id, status: resumed.status },
+        );
+        await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: resumed });
+        idem = null;
+        return new Response(JSON.stringify(resumed), { status: 200, headers: traceHeaders });
+      }
     }
 
     // --- Resource Provider ------------------------------------------------

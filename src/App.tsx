@@ -41,6 +41,7 @@ import AdminProvisioningRetries from "./pages/AdminProvisioningRetries";
 import AdminProvisioningStatus from "./pages/AdminProvisioningStatus";
 import AdminManualLabGrants from "./pages/AdminManualLabGrants";
 import AdminCloudQuotas from "./pages/AdminCloudQuotas";
+import AdminNetworkHealth from "./pages/AdminNetworkHealth";
 import { SkillTrackHandoffCapture } from "./components/SkillTrackHandoffCapture";
 
 
@@ -85,6 +86,7 @@ const App = () => (
                 <Route path="/admin/provisioning-retries" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminProvisioningRetries /></RoleProtectedRoute>} />
                 <Route path="/admin/manual-grants" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminManualLabGrants /></RoleProtectedRoute>} />
                 <Route path="/admin/cloud-quotas" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminCloudQuotas /></RoleProtectedRoute>} />
+                <Route path="/admin/network-health" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminNetworkHealth /></RoleProtectedRoute>} />
                 <Route path="/cloud-access" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
                 <Route path="/cloud-access/:id" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
 

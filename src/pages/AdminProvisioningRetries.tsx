@@ -14,6 +14,7 @@ import {
 import { EmptyState } from "@/components/EmptyState";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { ProvisioningAdminTabs } from "@/components/ProvisioningAdminTabs";
 
 interface RetryRow {
   id: string;
@@ -110,6 +111,7 @@ export default function AdminProvisioningRetries() {
             <RefreshCw className={`mr-2 h-4 w-4 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
         </div>
+        <ProvisioningAdminTabs />
 
         <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
           <TabsList>

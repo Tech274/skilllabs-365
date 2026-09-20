@@ -33,7 +33,9 @@ function CatalogueView() {
         .select("*")
         .eq("status", "published")
         .order("created_at", { ascending: false });
-      setTemplates(data || []);
+      setTemplates((data || []).filter((template) =>
+        ACTIVE_CLOUD_PROVIDERS.some((provider) => provider === template.provider),
+      ));
       setLoading(false);
     })();
   }, []);

@@ -29,6 +29,7 @@ const adminItems = [
   { title: "Cloud Reports", url: "/admin/cloud-reports", icon: FileText },
   { title: "Resource Providers", url: "/admin/resource-providers", icon: Cloud },
   { title: "Cloud Quotas", url: "/admin/cloud-quotas", icon: Gauge },
+  { title: "Network Health", url: "/admin/network-health", icon: Activity },
   { title: "AI Status", url: "/admin/ai-status", icon: Sparkles },
   { title: "Provisioning Export", url: "/admin/provisioning-export", icon: Download },
   { title: "Provisioning Status", url: "/admin/provisioning-status", icon: Activity },
@@ -140,7 +141,7 @@ export function AppSidebar() {
           </div>
           {!collapsed && (
             <div>
-              <h2 className="text-sm font-semibold text-foreground">CloudLab</h2>
+              <h2 className="text-sm font-semibold text-foreground">SkillHub Labs</h2>
               <p className="text-xs text-muted-foreground">{roleLabel}</p>
             </div>
           )}

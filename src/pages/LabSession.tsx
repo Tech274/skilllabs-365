@@ -15,29 +15,55 @@ import {
   Power,
   AlertTriangle,
   Loader2,
+  KeyRound,
+  Keyboard,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
+import { LabWorkbenchPanel } from "@/components/LabWorkbenchPanel";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  needsRemint,
+  remintAndWaitRunning,
+  REMINT_CALM_COPY,
+  REMINT_FAIL_CODE,
+} from "@/lib/lab-remint";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
 import { LearnerProvisioningPanel } from "@/components/LearnerProvisioningPanel";
 import { useAuth } from "@/hooks/use-auth";
 import { HUB_WHATSAPP_UPSELL } from "@/lib/skilltrack-handoff";
 import {
+  checkGuacSessionReady,
   fetchTokenizedGuacUrl,
   isTokenizedGuacUrl,
-  takeGuacReady,
+  clearGuacReady,
+  isLabPortUnreachable,
 } from "@/lib/guac-connect";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 /** Cap learner retries so Guac error pages never spin reconnect forever. */
 const MAX_LEARNER_RECONNECTS = 3;
+/** One silent fresh create-session after detected Guac chrome; then calm Hub error. */
+const MAX_GUAC_CHROME_RETRIES = 1;
+/**
+ * Readiness comes ONLY from the server (guacamole-proxy connection-health):
+ * guac.* is cross-origin, so its DOM is opaque and must never be inspected.
+ */
+const GUAC_DESKTOP_POLL_MS = 1_000;
+const GUAC_DESKTOP_CLEAN_TICKS = 3;
+const GUAC_DESKTOP_CONFIRM_TIMEOUT_MS = 30_000;
+/** Gateway says the lab port is not answering yet — calm Hub wait, then retry. */
+const MAX_PORT_WAIT_RETRIES = 6;
+const PORT_WAIT_RETRY_MS = 10_000;
+/** Watchdog interval for Guac chrome appearing AFTER the desktop was confirmed. */
+const GUAC_CHROME_WATCH_MS = 2_000;
 const isMixedContent = (url: string) => {
   try {
     return window.location.protocol === "https:" && new URL(url).protocol === "http:";
@@ -69,7 +95,14 @@ export default function LabSession() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const iframeRef = useRef<HTMLIFrameElement>(null);
-  const { isAdmin, isSuperAdmin } = useAuth();
+  const { isAdmin, isSuperAdmin, user } = useAuth();
+  const [labTemplateId, setLabTemplateId] = useState<string | null>(null);
+  /** Persistent labs keep their allocation: leaving disconnects, it never deallocates. */
+  const [isPersistentLab, setIsPersistentLab] = useState(false);
+  /** VM facts (persistence + power state) must be loaded before Leave/Connect act. */
+  const [vmFactsLoaded, setVmFactsLoaded] = useState(false);
+  const [vmStatus, setVmStatus] = useState<string | null>(null);
+  const [reminting, setReminting] = useState(false);
   const canDebug = isAdmin || isSuperAdmin;
 
   const [connectionState, setConnectionState] = useState<ConnectionState>("connecting");
@@ -81,16 +114,35 @@ export default function LabSession() {
   const [timeRemaining, setTimeRemaining] = useState("");
   const [session, setSession] = useState<SessionInfo>(defaultSession);
   const [guacIframeUrl, setGuacIframeUrl] = useState("");
+  /**
+   * Windows/RDP keyboard helper: ON by default so learners can type the moment
+   * the desktop appears. Linux/SSH never gets it forced on. Learner can turn it off.
+   */
+  const [keyboardHelper, setKeyboardHelper] = useState(true);
+  const keyboardHelperTouchedRef = useRef(false);
+  const isWindowsRdp = session.protocol === "RDP";
+
 
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
+  const dbSessionIdRef = useRef<string | null>(null);
   const [iframeLoadFailed, setIframeLoadFailed] = useState(false);
   /** Guac shell loaded (cross-origin) but remote SSH/RDP may still be failing inside the iframe. */
   const [awaitingDesktop, setAwaitingDesktop] = useState(false);
+  /** Independent proof bit: a tokenized URL or iframe load can never reveal the frame. */
+  const [desktopConfirmed, setDesktopConfirmed] = useState(false);
   const [idleWarningMinutes, setIdleWarningMinutes] = useState(0);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const reconnectAttemptsRef = useRef(0);
+  /** Native Guacamole chrome is a FAIL; retry with a fresh tokenized session at most twice. */
+  const guacChromeRetryRef = useRef(0);
   const iframeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const desktopSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const guacAttemptRef = useRef(0);
+  const guacFailureInFlightRef = useRef(false);
+  const portWaitRetryRef = useRef(0);
+  const portWaitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** True while the gateway is still waiting for the lab's RDP/SSH port. */
+  const [waitingForLabPort, setWaitingForLabPort] = useState(false);
   const lastActivityRef = useRef<number>(Date.now());
   const idleUpdateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const idleWarningIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -121,7 +173,10 @@ export default function LabSession() {
       if (e instanceof Error && e.message.includes("HTTPS")) throw e;
     }
     setGuacIframeUrl(data.iframe_url);
-    if (data.session_id) setDbSessionId(data.session_id);
+    if (data.session_id) {
+      dbSessionIdRef.current = data.session_id;
+      setDbSessionId(data.session_id);
+    }
     setSession((prev) => ({
       ...prev,
       protocol: (data.protocol as SessionInfo["protocol"]) || prev.protocol,
@@ -131,6 +186,7 @@ export default function LabSession() {
     // Do not claim "Connected" until the iframe document loads. Cross-origin Guac
     // error pages still fire onLoad — we only treat that as shell-ready, then settle.
     setConnectionState("connecting");
+    setDesktopConfirmed(false);
     setIframeLoadFailed(false);
     setAwaitingDesktop(true);
     if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
@@ -144,22 +200,67 @@ export default function LabSession() {
     }, 20000);
   }, []);
 
+  /**
+   * Always mint a FRESH tokenized session. After Leave, any stashed URL or old
+   * session_id points at a torn-down Guacamole connection, which lands the
+   * learner on the Apache Guacamole username/password wall. So: drop the stash,
+   * reset the idempotency key, and create-session with vm_id every time.
+   */
   const createGuacSession = useCallback(async (targetVmId: string) => {
     try {
-      const stashed = takeGuacReady(targetVmId);
-      if (stashed) {
-        applyGuacResult(stashed);
-        return;
-      }
+      guacAttemptRef.current += 1;
+      if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
+      if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
+      clearGuacReady(targetVmId); // never reuse a stashed URL on return Connect
+      dbSessionIdRef.current = null;
+      setDbSessionId(null);
+      setGuacIframeUrl("");
+      setDesktopConfirmed(false);
+      setAwaitingDesktop(true);
+      setConnectionState("connecting");
+      setIframeLoadFailed(false);
+      setLastError(null);
+      resetIdempotency(`guac-session:${targetVmId}`);
       const data = await fetchTokenizedGuacUrl(targetVmId);
       applyGuacResult(data);
+      setWaitingForLabPort(false);
+      portWaitRetryRef.current = 0;
     } catch (err) {
       console.error("Failed to create Guacamole session:", err);
       resetIdempotency(`guac-session:${targetVmId}`);
-      setLastError(err instanceof Error ? err.message : "Connection failed");
+      // 503 rdp_unreachable / ssh_unreachable: the desktop was never minted.
+      // Keep the calm Hub overlay, never touch the iframe, and retry quietly.
+      if (isLabPortUnreachable(err) && portWaitRetryRef.current < MAX_PORT_WAIT_RETRIES) {
+        portWaitRetryRef.current += 1;
+        setWaitingForLabPort(true);
+        setAwaitingDesktop(true);
+        setGuacIframeUrl("");
+        setConnectionState("connecting");
+        setLastError(null);
+        if (portWaitTimerRef.current) clearTimeout(portWaitTimerRef.current);
+        portWaitTimerRef.current = setTimeout(() => {
+          void createGuacSessionRef.current?.(targetVmId);
+        }, PORT_WAIT_RETRY_MS);
+        return;
+      }
+      setWaitingForLabPort(false);
+      setAwaitingDesktop(false);
+      setLastError(
+        isLabPortUnreachable(err)
+          ? "secure_desktop_port_wait"
+          : err instanceof Error ? err.message : "Connection failed",
+      );
       setConnectionState("error");
     }
   }, [applyGuacResult]);
+
+  const createGuacSessionRef = useRef<typeof createGuacSession | null>(null);
+  useEffect(() => {
+    createGuacSessionRef.current = createGuacSession;
+    return () => {
+      if (portWaitTimerRef.current) clearTimeout(portWaitTimerRef.current);
+    };
+  }, [createGuacSession]);
 
   // Load VM facts (region must match Azure/lab — never hardcode East US)
   useEffect(() => {
@@ -168,33 +269,99 @@ export default function LabSession() {
     (async () => {
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("name, region, private_ip, vm_size, lab_templates(name, protocol, duration_minutes)")
+        .select("status, region, private_ip, vm_size, lab_template_id, lab_templates(name, protocol, duration, is_persistent)")
         .eq("id", vmId)
         .maybeSingle();
       if (cancelled || !vm) return;
       const tpl = Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates;
+      setLabTemplateId(vm.lab_template_id ?? null);
+      setIsPersistentLab(Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent));
+      // Persistence + power state must be known BEFORE Leave or Connect run.
+      setVmStatus(String((vm as { status?: string }).status ?? "").toLowerCase());
+      setVmFactsLoaded(true);
       setSession((prev) => ({
         ...prev,
-        labName: (tpl as { name?: string } | null)?.name || vm.name || prev.labName,
+        labName: (tpl as { name?: string } | null)?.name || prev.labName,
         protocol: ((tpl as { protocol?: string } | null)?.protocol?.toUpperCase() === "SSH" ? "SSH" : "RDP"),
         vmSize: vm.vm_size || prev.vmSize,
         region: (vm.region && String(vm.region).trim()) || prev.region,
         privateIp: vm.private_ip || prev.privateIp,
-        duration: (tpl as { duration_minutes?: number } | null)?.duration_minutes || prev.duration,
+        duration: (tpl as { duration?: number } | null)?.duration || prev.duration,
       }));
     })();
     return () => { cancelled = true; };
   }, [vmId]);
 
-  // Init: require vm_id + tokenized Guac; stay on calm panel until ready (no demo fake-connect)
+  // Default the keyboard helper ON for Windows/RDP, OFF for Linux/SSH — unless learner chose.
   useEffect(() => {
-    if (vmId) {
-      createGuacSession(vmId);
+    if (keyboardHelperTouchedRef.current) return;
+    setKeyboardHelper(isWindowsRdp);
+  }, [isWindowsRdp]);
+
+  // Hand keyboard focus straight to the remote desktop while the helper is on.
+  useEffect(() => {
+    if (!keyboardHelper || !isWindowsRdp) return;
+    if (connectionState !== "connected" || !guacamoleUrl) return;
+
+    const grab = () => {
+      const frame = iframeRef.current;
+      if (!frame) return;
+      try {
+        frame.focus();
+        frame.contentWindow?.focus();
+      } catch {
+        // cross-origin focus attempts can throw — safe to ignore
+      }
+    };
+
+    grab();
+    const timers = [250, 1000, 2500, 5000].map((ms) => setTimeout(grab, ms));
+    window.addEventListener("focus", grab);
+    return () => {
+      timers.forEach(clearTimeout);
+      window.removeEventListener("focus", grab);
+    };
+  }, [keyboardHelper, isWindowsRdp, connectionState, guacamoleUrl]);
+
+  // Init: remint first when the allocation is powered off, then require tokenized Guac.
+  // Never open Guacamole (or claim Connected) while deallocated/stopped/starting.
+  useEffect(() => {
+    if (!vmId) {
+      setLastError("This lab session is missing a VM. Go back to Labs and launch again.");
+      setConnectionState("error");
       return;
     }
-    setLastError("This lab session is missing a VM. Go back to Labs and launch again.");
-    setConnectionState("error");
-  }, [vmId, createGuacSession]);
+    if (!vmFactsLoaded) return;
+    let cancelled = false;
+    (async () => {
+      if (needsRemint(vmStatus)) {
+        setReminting(true);
+        setConnectionState("connecting");
+        try {
+          await remintAndWaitRunning({
+            vmId,
+            labTemplateId,
+            alreadyStarting: vmStatus === "starting",
+          });
+        } catch (err) {
+          console.error("[remint] failed:", err);
+          if (cancelled) return;
+          setReminting(false);
+          setLastError(REMINT_FAIL_CODE);
+          setConnectionState("error");
+          toast({ title: "Lab is still waking up", description: REMINT_CALM_COPY });
+          return;
+        }
+        if (cancelled) return;
+        setReminting(false);
+        setVmStatus("running");
+      }
+      if (!cancelled) await createGuacSession(vmId);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [vmId, vmFactsLoaded, vmStatus, labTemplateId, createGuacSession]);
 
   // Idle activity tracking: detect mouse/keyboard near iframe and update last_activity_at
   useEffect(() => {
@@ -314,7 +481,154 @@ export default function LabSession() {
     toast({ title: "Clipboard synced", description: "Clipboard content sent to remote session." });
   };
 
+  /** Apache Guacamole login/reconnect chrome stays covered and gets a fresh session. */
+  const handleGuacChromeFailure = async () => {
+    if (guacFailureInFlightRef.current) return;
+    guacFailureInFlightRef.current = true;
+    guacAttemptRef.current += 1;
+    if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
+    if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
+    iframeRef.current?.removeAttribute("src");
+    setAwaitingDesktop(true);
+    setDesktopConfirmed(false);
+    setConnectionState("connecting");
+    const failedSessionId = dbSessionIdRef.current;
+    dbSessionIdRef.current = null;
+    setDbSessionId(null);
+    setGuacIframeUrl("");
+    if (vmId) {
+      clearGuacReady(vmId);
+      resetIdempotency(`guac-session:${vmId}`);
+    }
+    if (guacChromeRetryRef.current < MAX_GUAC_CHROME_RETRIES && vmId) {
+      guacChromeRetryRef.current += 1;
+      setIframeLoadFailed(false);
+      setLastError(null);
+      if (failedSessionId) {
+        try {
+          const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
+            body: { action: "end-session", session_id: failedSessionId, reason: "guac_chrome_hard_fail" },
+          });
+          if (error || data?.error) throw error ?? new Error(String(data.error));
+        } catch (err) {
+          console.error("Failed to clear unusable Guacamole session:", err);
+          guacFailureInFlightRef.current = false;
+          setAwaitingDesktop(false);
+          setIframeLoadFailed(true);
+          setConnectionState("error");
+          setLastError("secure_desktop_login_wall");
+          return;
+        }
+      }
+      resetIdempotency(`guac-session:${vmId}`);
+      guacFailureInFlightRef.current = false;
+      await createGuacSession(vmId);
+      return;
+    }
+    guacFailureInFlightRef.current = false;
+    setAwaitingDesktop(false);
+    setIframeLoadFailed(true);
+    setConnectionState("error");
+    setLastError("secure_desktop_login_wall");
+  };
+
+  /**
+   * onLoad alone is NOT proof of a desktop: Guac error pages and the native
+   * login wall fire it too. The gateway frame is cross-origin, so its DOM is
+   * never read. The ONLY ready signal is the server tunnel check
+   * (guacamole-proxy connection-health), which reports ready:true only while a
+   * live remote connection exists for this session.
+   */
+  const handleIframeLoad = () => {
+    if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
+    if (!isTokenizedGuacUrl(guacamoleUrl) || !/#\/client\//.test(guacamoleUrl)) {
+      void handleGuacChromeFailure();
+      return;
+    }
+    setIframeLoadFailed(false);
+    setAwaitingDesktop(true);
+    if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
+    const attempt = guacAttemptRef.current;
+    const startedAt = Date.now();
+    let cleanTicks = 0;
+
+    const pollDesktop = async () => {
+      if (attempt !== guacAttemptRef.current) return;
+      if (!isTokenizedGuacUrl(guacamoleUrl) || !/#\/client\//.test(guacamoleUrl)) {
+        void handleGuacChromeFailure();
+        return;
+      }
+
+      let tunnelReady = false;
+      try {
+        tunnelReady = dbSessionIdRef.current ? await checkGuacSessionReady(dbSessionIdRef.current) : false;
+      } catch {
+        tunnelReady = false;
+      }
+      if (attempt !== guacAttemptRef.current) return;
+
+      cleanTicks = tunnelReady ? cleanTicks + 1 : 0;
+      if (cleanTicks >= GUAC_DESKTOP_CLEAN_TICKS) {
+        setDesktopConfirmed(true);
+        setConnectionState("connected");
+        setAwaitingDesktop(false);
+        guacChromeRetryRef.current = 0;
+        return;
+      }
+      // Never ready within the window == login wall / dead tunnel: remint calmly.
+      if (Date.now() - startedAt >= GUAC_DESKTOP_CONFIRM_TIMEOUT_MS) {
+        void handleGuacChromeFailure();
+        return;
+      }
+      desktopSettleRef.current = setTimeout(() => { void pollDesktop(); }, GUAC_DESKTOP_POLL_MS);
+    };
+    void pollDesktop();
+  };
+
+  /**
+   * Even after a confirmed desktop the gateway tunnel can drop (session revoked,
+   * auth failure, reconnect loop). The server check is authoritative: ready:false
+   * is a HARD FAIL — hide the frame, drop the dead tokenized URL, remint calmly.
+   */
+  useEffect(() => {
+    if (connectionState !== "connected") return;
+    const timer = setInterval(async () => {
+      const url = guacamoleUrl;
+      if (!isTokenizedGuacUrl(url) || !/#\/client\//.test(url)) {
+        void handleGuacChromeFailure();
+        return;
+      }
+      try {
+        const tunnelReady = dbSessionIdRef.current
+          ? await checkGuacSessionReady(dbSessionIdRef.current)
+          : false;
+        if (!tunnelReady) void handleGuacChromeFailure();
+      } catch {
+        void handleGuacChromeFailure();
+      }
+    }, GUAC_CHROME_WATCH_MS);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionState, guacamoleUrl]);
+
+
+
+
   const handleEndSession = async () => {
+    // Persistence MUST be known before Leave acts. If facts have not landed yet,
+    // resolve them now — we must never manual-stop a persistent allocation.
+    let persistent = isPersistentLab;
+    if (!vmFactsLoaded && vmId) {
+      const { data: vm } = await supabase
+        .from("virtual_machines")
+        .select("lab_templates(is_persistent)")
+        .eq("id", vmId)
+        .maybeSingle();
+      const tpl = Array.isArray(vm?.lab_templates) ? vm?.lab_templates[0] : vm?.lab_templates;
+      persistent = Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent);
+      setIsPersistentLab(persistent);
+    }
+
     if (dbSessionId) {
       try {
         await supabase.functions.invoke("guacamole-proxy", {
@@ -325,7 +639,34 @@ export default function LabSession() {
       }
     }
 
-    // Trigger VM cleanup/deallocation
+    // Leaving must leave NOTHING behind that a return could reuse: the stashed
+    // ready-URL, the old session id, the old iframe URL and the idempotency key
+    // all die here. Next Connect mints a brand new tokenized session.
+    if (vmId) {
+      clearGuacReady(vmId);
+      resetIdempotency(`guac-session:${vmId}`);
+    }
+    guacChromeRetryRef.current = 0;
+    dbSessionIdRef.current = null;
+    setDbSessionId(null);
+    setGuacIframeUrl("");
+    setDesktopConfirmed(false);
+    setAwaitingDesktop(false);
+
+
+    // Persistent labs: leaving is a DISCONNECT only. The allocation stays so the
+    // learner can start/return inside the window and get the same machine back.
+    // Only soft-expiry (end_date EOD IST) or exhausted minutes deallocate + notify.
+    if (persistent) {
+      toast({
+        title: "Left the lab",
+        description: "Your lab machine is kept for you — reopen it any time inside your lab window.",
+      });
+      navigate("/labs");
+      return;
+    }
+
+    // Trigger VM cleanup/deallocation (non-persistent labs only)
     if (vmId) {
       try {
         await supabase.functions.invoke("cleanup-idle-labs", {
@@ -335,7 +676,7 @@ export default function LabSession() {
         console.error("Failed to trigger VM cleanup:", err);
       }
     }
-    toast({ title: "Session ended", description: "Your lab session has been terminated and VM is being deallocated.", variant: "destructive" });
+    toast({ title: "Session ended", description: "Your lab session has ended and the machine is being deallocated (not deleted).", variant: "destructive" });
     navigate("/labs");
   };
 
@@ -347,7 +688,7 @@ export default function LabSession() {
   };
 
   const connectionLabel: Record<ConnectionState, string> = {
-    connecting: "Getting ready…",
+    connecting: reminting ? "Starting your lab machine…" : "Getting ready…",
     connected: "Connected",
     disconnected: "Disconnected",
     error: "Needs attention",
@@ -435,6 +776,15 @@ export default function LabSession() {
                   ? `${session.privateIp} · ${session.region}`
                   : session.region}
               </span>
+              {/* Operator barge-in marker: tokenized admin join, no learner password wall. */}
+              {isSuperAdmin && searchParams.get("admin") === "1" && (
+                <>
+                  <div className="h-4 w-px bg-border" />
+                  <span className="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                    Admin barge-in
+                  </span>
+                </>
+              )}
               {canDebug && (
                 <>
                   <div className="h-4 w-px bg-border" />
@@ -455,6 +805,57 @@ export default function LabSession() {
 
             {/* Right: Actions */}
             <div className="flex items-center gap-1">
+              {isWindowsRdp && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div className="mr-1 flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1">
+                      <Keyboard className={cn("h-3.5 w-3.5", keyboardHelper ? "text-primary" : "text-muted-foreground")} />
+                      <Switch
+                        id="lab-keyboard-helper"
+                        checked={keyboardHelper}
+                        onCheckedChange={(v) => {
+                          keyboardHelperTouchedRef.current = true;
+                          setKeyboardHelper(v);
+                        }}
+                        className="scale-75 origin-left"
+                      />
+                      <Label htmlFor="lab-keyboard-helper" className="text-[10px] text-muted-foreground cursor-pointer">
+                        Typing
+                      </Label>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {keyboardHelper
+                      ? "Typing goes straight to your Windows desktop (on by default)"
+                      : "Turn on to type straight into your Windows desktop"}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {labTemplateId && (
+                <Sheet>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <SheetTrigger asChild>
+                        <Button variant="ghost" size="icon" className="h-8 w-8">
+                          <KeyRound className="h-3.5 w-3.5" />
+                        </Button>
+                      </SheetTrigger>
+                    </TooltipTrigger>
+                    <TooltipContent>Keys &amp; folders</TooltipContent>
+                  </Tooltip>
+                  <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-md">
+                    <SheetHeader>
+                      <SheetTitle>Keys &amp; folders</SheetTitle>
+                    </SheetHeader>
+                    <LabWorkbenchPanel
+                      labTemplateId={labTemplateId}
+                      userId={user?.id}
+                      dense
+                      className="mt-4 border-none shadow-none"
+                    />
+                  </SheetContent>
+                </Sheet>
+              )}
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleClipboardSync}>
@@ -482,11 +883,18 @@ export default function LabSession() {
               <div className="w-px h-4 bg-border mx-1" />
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive hover:text-destructive" onClick={handleEndSession}>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className={isPersistentLab ? "h-8 w-8" : "h-8 w-8 text-destructive hover:text-destructive"}
+                    onClick={handleEndSession}
+                  >
                     <Power className="h-3.5 w-3.5" />
                   </Button>
                 </TooltipTrigger>
-                <TooltipContent>End Session</TooltipContent>
+                <TooltipContent>
+                  {isPersistentLab ? "Leave lab (machine stays allocated)" : "End Session"}
+                </TooltipContent>
               </Tooltip>
             </div>
           </motion.div>
@@ -513,13 +921,36 @@ export default function LabSession() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-background px-4"
+              role="status"
+              aria-live="polite"
             >
-              <LearnerProvisioningPanel
-                mode="preparing"
-                startedAt={connectStartedAt}
-                vmId={vmId}
-                onBack={() => navigate("/labs")}
-              />
+              {reminting || waitingForLabPort || guacChromeRetryRef.current > 0 ? (
+                <div className="mx-auto w-full max-w-md space-y-5 text-center">
+                  <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-primary/10">
+                    <Loader2 className="h-7 w-7 animate-spin text-primary" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <h2 className="text-lg font-semibold text-foreground">
+                      {reminting
+                        ? "Starting your lab machine…"
+                        : waitingForLabPort
+                          ? "Almost ready — finishing start-up…"
+                          : "Reconnecting securely…"}
+                    </h2>
+                    <p className="text-sm text-muted-foreground">
+                      Please wait — your lab is being {reminting ? "started" : waitingForLabPort ? "prepared" : "reconnected"}.
+                    </p>
+                  </div>
+                  <Button variant="ghost" size="sm" onClick={() => navigate("/labs")}>Back to Labs</Button>
+                </div>
+              ) : (
+                <LearnerProvisioningPanel
+                  mode="preparing"
+                  startedAt={connectStartedAt}
+                  vmId={vmId}
+                  onBack={() => navigate("/labs")}
+                />
+              )}
               {canDebug && showTechnicalTrace && vmId && (
                 <ProvisioningTimeline vmId={vmId} className="mt-6 w-full max-w-lg text-left" />
               )}
@@ -620,57 +1051,41 @@ export default function LabSession() {
                     />
                   </div>
                 )}
-                {awaitingDesktop && !iframeLoadFailed && connectionState === "connected" && (
-                  <div className="absolute bottom-4 left-1/2 z-20 -translate-x-1/2 rounded-full border border-border bg-card/95 px-4 py-2 text-xs text-muted-foreground shadow-sm backdrop-blur-sm flex items-center gap-3">
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-                    <span>Opening your lab desktop…</span>
-                    <button
-                      type="button"
-                      className="font-medium text-primary hover:underline"
-                      onClick={() => {
-                        setAwaitingDesktop(false);
-                        setIframeLoadFailed(true);
-                        setConnectionState("error");
-                        setLastError("secure_desktop_user_reported");
-                      }}
-                    >
-                      Not working?
-                    </button>
+                {(connectionState === "connecting" || awaitingDesktop) && !iframeLoadFailed && (
+                  <div className="absolute inset-0 z-30 flex items-center justify-center bg-background px-6" role="status" aria-live="polite">
+                    <div className="max-w-md text-center space-y-4">
+                      <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full border border-primary/30 bg-primary/10">
+                        <Loader2 className="h-6 w-6 animate-spin text-primary" />
+                      </div>
+                      <div className="space-y-1.5">
+                        <h2 className="text-lg font-semibold text-foreground">
+                          {reminting ? "Starting your lab machine…" : waitingForLabPort ? "Almost ready — finishing start-up…" : guacChromeRetryRef.current > 0 ? "Reconnecting securely…" : "Preparing your lab…"}
+                        </h2>
+                        <p className="text-sm text-muted-foreground">
+                          Please wait — your lab is being {reminting ? "started" : waitingForLabPort ? "prepared" : guacChromeRetryRef.current > 0 ? "reconnected" : "provisioned"}.
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 )}
                 <iframe
                   ref={iframeRef}
-                  src={guacamoleUrl}
-                  className="h-full w-full border-0"
+                  // Fail closed: only a tokenized Guac client deep link may ever load.
+                  // Chicken-and-egg: the frame MUST load (hidden, opacity-0, under the
+                  // Hub cover) so Guac JS can open the tunnel that connection-health
+                  // then observes. Never `display:none` / unmounted — that kills the
+                  // tunnel and ready:true could never happen.
+                  src={isTokenizedGuacUrl(guacamoleUrl) ? guacamoleUrl : undefined}
+                  className={cn(
+                    "h-full w-full border-0 transition-opacity duration-200",
+                    connectionState === "connected" && desktopConfirmed && !awaitingDesktop ? "opacity-100" : "pointer-events-none opacity-0"
+                  )}
+                  aria-hidden={connectionState !== "connected" || !desktopConfirmed || awaitingDesktop}
+                  tabIndex={connectionState === "connected" && desktopConfirmed && !awaitingDesktop ? 0 : -1}
                   style={{ objectFit: "contain" }}
                   allow="clipboard-read; clipboard-write"
                   title="Lab Session"
-                  onLoad={() => {
-                    if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
-                    // Cross-origin Guac pages (including error/reconnect UI) always throw here.
-                    // Treat onLoad as "shell ready" only — NOT proof SSH/RDP succeeded.
-                    try {
-                      const doc = iframeRef.current?.contentDocument;
-                      if (doc && (doc.body?.innerHTML === "" || doc.body?.childElementCount === 0)) {
-                        setIframeLoadFailed(true);
-                        setAwaitingDesktop(false);
-                        setConnectionState("error");
-                        setLastError("secure_desktop_blank_frame");
-                        return;
-                      }
-                      // Same-origin empty check passed — rare for Guac
-                      setIframeLoadFailed(false);
-                      setConnectionState("connected");
-                      setAwaitingDesktop(false);
-                    } catch {
-                      setIframeLoadFailed(false);
-                      setConnectionState("connected");
-                      // Keep a calm settle banner; learner can fail-closed if desktop never appears.
-                      setAwaitingDesktop(true);
-                      if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
-                      desktopSettleRef.current = setTimeout(() => setAwaitingDesktop(false), 12000);
-                    }
-                  }}
+                  onLoad={handleIframeLoad}
                   onError={() => {
                     setIframeLoadFailed(true);
                     setAwaitingDesktop(false);
