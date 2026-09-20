@@ -10,6 +10,12 @@ export type AccessSessionEvent = Tables<"access_session_events">;
 
 export type CloudProvider = "azure" | "aws" | "gcp" | "oci" | "ibm" | "alibaba" | "digitalocean" | "other";
 
+export const ACTIVE_CLOUD_PROVIDERS = ["aws", "azure"] as const satisfies readonly CloudProvider[];
+
+export function isActiveCloudProvider(provider: string): provider is (typeof ACTIVE_CLOUD_PROVIDERS)[number] {
+  return ACTIVE_CLOUD_PROVIDERS.some((activeProvider) => activeProvider === provider);
+}
+
 export const PROVIDER_META: Record<CloudProvider, { label: string; color: string; bg: string; tagline: string; implemented: boolean }> = {
   aws: {
     label: "AWS",

@@ -20,7 +20,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
-import { PROVIDER_META, type CloudProvider } from "@/lib/cloud-access";
+import { ACTIVE_CLOUD_PROVIDERS, PROVIDER_META, isActiveCloudProvider, type CloudProvider } from "@/lib/cloud-access";
 
 interface ProviderAccount {
   id: string;
@@ -46,7 +46,7 @@ type CredField = { key: string; label: string; required: boolean };
 const CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder?: string }[]> = {
   azure: [
     { key: "subscription_id", label: "Subscription ID", placeholder: "00000000-0000-0000-0000-000000000000" },
-    { key: "resource_group", label: "Resource Group (optional)", placeholder: "skilllabs-rg" },
+    { key: "resource_group", label: "Resource Group (optional)", placeholder: "skillhub-labs-rg" },
     { key: "vm_admin_username", label: "VM Admin Username (optional)", placeholder: "labadmin" },
     { key: "key_vault_uri", label: "Key Vault URI (Key Vault auth mode)", placeholder: "https://my-vault.vault.azure.net" },
     { key: "key_vault_secret_name", label: "Key Vault Secret Name (optional)", placeholder: "lab-vm-admin-password" },
@@ -57,7 +57,7 @@ const CONFIG_FIELDS: Record<string, { key: string; label: string; placeholder?: 
     { key: "vpc_id", label: "VPC ID (optional — auto-filled from subnet)", placeholder: "vpc-…" },
     { key: "security_group_id", label: "Security Group ID", placeholder: "sg-…" },
     { key: "ami_id", label: "AMI ID (optional — defaults to Ubuntu 22.04 via SSM)", placeholder: "ami-…" },
-    { key: "key_name", label: "EC2 Key Pair name (optional)", placeholder: "skilllabs-lab" },
+    { key: "key_name", label: "EC2 Key Pair name (optional)", placeholder: "skillhub-labs" },
     { key: "vm_admin_username", label: "VM Admin Username (optional)", placeholder: "ubuntu" },
     { key: "default_role_arn", label: "Default Role ARN (console federation)", placeholder: "arn:aws:iam::123456789012:role/LabAccess" },
     { key: "external_id", label: "External ID (optional)" },
@@ -115,7 +115,7 @@ export default function AdminResourceProviders() {
   useEffect(() => { load(); }, []);
 
   const grouped = useMemo(() => {
-    return accounts.reduce<Record<string, ProviderAccount[]>>((acc, a) => {
+    return accounts.filter((a) => isActiveCloudProvider(a.provider)).reduce<Record<string, ProviderAccount[]>>((acc, a) => {
       (acc[a.provider] ||= []).push(a);
       return acc;
     }, {});
@@ -314,11 +314,11 @@ export default function AdminResourceProviders() {
           <div className="flex items-center justify-center py-24 text-muted-foreground">
             <Loader2 className="h-6 w-6 animate-spin" />
           </div>
-        ) : accounts.length === 0 ? (
+        ) : Object.keys(grouped).length === 0 ? (
           <EmptyState
             icon={Cloud}
             title="No cloud accounts yet"
-            description="Add an Azure subscription, AWS account, or another cloud provider to start issuing lab access."
+            description="Add an AWS account or Azure subscription to start issuing lab access."
             hint="Use the Add provider account button above."
           />
         ) : (
@@ -458,7 +458,7 @@ export default function AdminResourceProviders() {
                 >
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    {(Object.keys(PROVIDER_META) as CloudProvider[]).map((p) => (
+                    {ACTIVE_CLOUD_PROVIDERS.map((p) => (
                       <SelectItem key={p} value={p}>{PROVIDER_META[p].label}</SelectItem>
                     ))}
                   </SelectContent>

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isTokenizedGuacUrl, toBrowserSafeGuacUrl } from "./guac-connect";
+import { inspectGuacDocument, isTokenizedGuacUrl, toBrowserSafeGuacUrl } from "./guac-connect";
 import { DEFAULT_GUAC_PUBLIC_BY_PROVIDER } from "./guac-public-hosts";
 
 describe("isTokenizedGuacUrl", () => {
@@ -44,5 +44,31 @@ describe("toBrowserSafeGuacUrl", () => {
     const raw =
       "https://guac-azure.skillhub365.co.in/guacamole/#/client/xyz?token=tok";
     expect(toBrowserSafeGuacUrl(raw, "azure")).toBe(raw);
+  });
+});
+
+describe("inspectGuacDocument", () => {
+  it("hard-fails a Guacamole username/password login wall", () => {
+    document.body.innerHTML = `
+      <main><h1>Apache Guacamole</h1><input name="username" />
+      <input type="password" /><button>Login</button></main>
+    `;
+    expect(inspectGuacDocument(document)).toEqual({
+      hardFail: true,
+      positiveDesktop: false,
+    });
+  });
+
+  it("hard-fails reconnect and authentication error chrome", () => {
+    document.body.innerHTML = "<p>Too many failed authentication attempts. Reconnecting…</p>";
+    expect(inspectGuacDocument(document).hardFail).toBe(true);
+  });
+
+  it("recognizes a Guacamole canvas as a positive desktop signal", () => {
+    document.body.innerHTML = '<div class="client-view"><canvas></canvas></div>';
+    expect(inspectGuacDocument(document)).toEqual({
+      hardFail: false,
+      positiveDesktop: true,
+    });
   });
 });

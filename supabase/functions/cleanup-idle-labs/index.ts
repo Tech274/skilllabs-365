@@ -650,6 +650,102 @@ Deno.serve(async (req) => {
       }
     }
 
+    // 3a-wallet. Wallet soft-expiry: template end_date EOD IST reached, OR the
+    // learner's remaining minutes (allocated − used-by-session) hit zero.
+    // Soft path only: deallocate + notify. Never a silent terminate/delete.
+    try {
+      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
+      const endOfDayIst = (iso: string): number => {
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return Number.NaN;
+        const ist = new Date(d.getTime() + IST_OFFSET_MS);
+        ist.setUTCHours(23, 59, 59, 999);
+        return ist.getTime() - IST_OFFSET_MS;
+      };
+
+      const { data: liveVMs } = await supabase
+        .from("virtual_machines")
+        .select("id, azure_vm_id, status, user_id, lab_template_id, provider_account_id")
+        .in("status", ["running", "provisioning", "starting", "idle"])
+        .not("lab_template_id", "is", null)
+        .limit(200);
+
+      for (const vm of liveVMs ?? []) {
+        const { data: tpl } = await supabase
+          .from("lab_templates")
+          .select("id, name, duration, is_persistent, end_date")
+          .eq("id", vm.lab_template_id)
+          .maybeSingle();
+        if (!tpl) continue;
+
+        const windowEnded = Boolean(tpl.end_date) && now.getTime() > endOfDayIst(tpl.end_date as string);
+
+        // Used minutes come from real session usage for this learner + template.
+        let usedMinutes = 0;
+        if (vm.user_id) {
+          const { data: usage } = await supabase
+            .from("sessions")
+            .select("started_at, ended_at")
+            .eq("user_id", vm.user_id)
+            .eq("lab_template_id", tpl.id)
+            .limit(500);
+          for (const s of usage ?? []) {
+            if (!s.started_at) continue;
+            const start = new Date(s.started_at).getTime();
+            const end = s.ended_at ? new Date(s.ended_at).getTime() : now.getTime();
+            if (Number.isNaN(start) || Number.isNaN(end) || end <= start) continue;
+            usedMinutes += (end - start) / 60000;
+          }
+        }
+        const allocated = Number(tpl.duration ?? 0);
+        const exhausted = allocated > 0 && usedMinutes >= allocated;
+
+        if (!windowEnded && !exhausted) continue;
+
+        await supabase
+          .from("sessions")
+          .update({
+            ended_at: now.toISOString(),
+            status: "completed",
+            disconnect_reason: windowEnded ? "lab_window_expired" : "lab_minutes_exhausted",
+          })
+          .eq("vm_id", vm.id)
+          .eq("status", "active");
+
+        let azureOk = true;
+        if (vm.azure_vm_id) {
+          try {
+            azureOk = await stopCloudVm(supabase, azureFor, vm);
+          } catch (e) {
+            azureOk = false;
+            console.error("wallet soft-expiry deallocate failed", e);
+          }
+        }
+
+        await markVmEnded(supabase, vm.id, {
+          status: "deallocated",
+          ended_by: SOURCE,
+          ended_reason: windowEnded ? "lab_window_expired" : "lab_minutes_exhausted",
+          ended_at: now.toISOString(),
+        });
+
+        const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
+        await notifyLearnerAndAdmins(supabase, {
+          userId: vm.user_id,
+          type: windowEnded ? "lab_expired" : "lab_minutes_exhausted",
+          title: windowEnded ? "Lab window ended — VM deallocated" : "Lab minutes used up — VM deallocated",
+          message: windowEnded
+            ? `Lab ${tpl.name} reached its end date (EOD IST). VM ${label} was deallocated. Resources are held, not deleted.`
+            : `Lab ${tpl.name} used all ${allocated} allocated minutes. VM ${label} was deallocated. Resources are held, not deleted.`,
+        });
+        results.push(
+          `Wallet soft-expiry ${label}: ${windowEnded ? "window ended" : "minutes exhausted"} → deallocated${azureOk ? "" : " [azure deallocate failed]"}`,
+        );
+      }
+    } catch (e) {
+      console.error("Wallet soft-expiry sweep failed:", e);
+    }
+
     // 3b. Pre-expiry warning (T-15m): notify learner+admins once per lab window.
     try {
       const warnHorizon = new Date(now.getTime() + 15 * 60 * 1000).toISOString();

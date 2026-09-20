@@ -19,6 +19,13 @@ import { supabase } from "@/integrations/supabase/client";
 import { readFunctionError } from "@/lib/function-error";
 import type { Tables, TablesInsert } from "@/integrations/supabase/types";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
+import {
+  endDateFromDuration,
+  istDateToEndIso,
+  istDateToStartIso,
+  toIstDateInput,
+  validateTemplateWindow,
+} from "@/lib/lab-template-window";
 
 type LabTemplate = Tables<"lab_templates">;
 
@@ -36,11 +43,15 @@ interface LabForm {
   region: string;
   status: string;
   provider_account_id: string;
+  /** Persistent labs only — Asia/Kolkata calendar dates (YYYY-MM-DD). */
+  start_date: string;
+  end_date: string;
 }
 
 const emptyForm: LabForm = {
   name: '', description: '', protocol: 'RDP', vm_size: 'Standard_B2s', os_image: 'Windows Server 2022',
   duration: 120, idle_timeout: 20, is_persistent: false, clipboard_enabled: true, file_transfer_enabled: false, region: 'All Regions', status: 'draft', provider_account_id: '',
+  start_date: '', end_date: '',
 };
 
 const statusStyle: Record<string, string> = {
@@ -72,6 +83,12 @@ export default function LabManagement() {
   const [editingLab, setEditingLab] = useState<LabTemplate | null>(null);
   const [form, setForm] = useState<LabForm>(emptyForm);
   const [launchingId, setLaunchingId] = useState<string | null>(null);
+  const [durationDays, setDurationDays] = useState("");
+  const windowError = validateTemplateWindow({
+    isPersistent: form.is_persistent,
+    startDate: form.start_date,
+    endDate: form.end_date,
+  });
 
   // Assignment state
   const [assignDialogOpen, setAssignDialogOpen] = useState(false);
@@ -92,7 +109,9 @@ export default function LabManagement() {
     const { data } = await supabase.functions.invoke<{ accounts: ProviderAccount[] }>("cloud-provider-accounts", {
       body: { action: "list" },
     });
-    setProviderAccounts((data?.accounts ?? []).filter(a => a.provider === "azure" && a.status === "active"));
+    setProviderAccounts((data?.accounts ?? []).filter(a =>
+      (a.provider === "aws" || a.provider === "azure") && a.status === "active",
+    ));
   };
 
   const fetchLabs = async () => {
@@ -107,7 +126,7 @@ export default function LabManagement() {
 
   useEffect(() => { fetchLabs(); fetchProviderAccounts(); }, []);
 
-  const openCreate = () => { setEditingLab(null); setForm(emptyForm); setDialogOpen(true); };
+  const openCreate = () => { setEditingLab(null); setForm(emptyForm); setDurationDays(""); setDialogOpen(true); };
 
   const openEdit = (lab: LabTemplate) => {
     setEditingLab(lab);
@@ -117,21 +136,40 @@ export default function LabManagement() {
       idle_timeout: lab.idle_timeout, is_persistent: lab.is_persistent, clipboard_enabled: lab.clipboard_enabled,
       file_transfer_enabled: lab.file_transfer_enabled, region: lab.region, status: lab.status,
       provider_account_id: lab.provider_account_id ?? '',
+      start_date: toIstDateInput((lab as LabTemplate & { start_date?: string | null }).start_date),
+      end_date: toIstDateInput((lab as LabTemplate & { end_date?: string | null }).end_date),
     });
+    setDurationDays("");
     setDialogOpen(true);
   };
 
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    if (windowError) {
+      toast({ title: "Lab window invalid", description: windowError, variant: "destructive" });
+      return;
+    }
     if (!form.provider_account_id) {
       toast({
         title: "Resource provider required",
-        description: "Pick the Azure account this lab provisions into (Admin → Resource Providers).",
+        description: "Pick the AWS or Azure account this lab provisions into (Admin → Resource Providers).",
         variant: "destructive",
       });
       return;
     }
-    const payload = { ...form, provider: "azure" as const };
+    const selectedProvider = providerAccounts.find((account) => account.id === form.provider_account_id)?.provider;
+    if (selectedProvider !== "aws" && selectedProvider !== "azure") {
+      toast({ title: "Supported provider required", description: "Choose an active AWS or Azure account.", variant: "destructive" });
+      return;
+    }
+    const { start_date, end_date, ...formFields } = form;
+    const payload = {
+      ...formFields,
+      provider: selectedProvider as "aws" | "azure",
+      // Persistent labs carry an IST window; non-persistent keep total minutes only.
+      start_date: form.is_persistent ? istDateToStartIso(start_date) : null,
+      end_date: form.is_persistent ? istDateToEndIso(end_date) : null,
+    };
     if (editingLab) {
       const { error } = await supabase.from("lab_templates").update(payload).eq("id", editingLab.id);
       if (error) { toast({ title: "Error", description: error.message, variant: "destructive" }); return; }
@@ -331,7 +369,7 @@ export default function LabManagement() {
                 <Textarea value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} placeholder="Lab description..." rows={2} />
               </div>
               <div className="space-y-2">
-                <Label>Resource Provider (Azure account)</Label>
+                <Label>Resource Provider</Label>
                 <Select value={form.provider_account_id} onValueChange={v => setForm({ ...form, provider_account_id: v })}>
                   <SelectTrigger><SelectValue placeholder="Select a resource provider account" /></SelectTrigger>
                   <SelectContent>
@@ -344,7 +382,7 @@ export default function LabManagement() {
                 </Select>
                 {providerAccounts.length === 0 && (
                   <p className="text-xs text-muted-foreground">
-                    No active Azure accounts yet — add one under Admin → Resource Providers.
+                    No active AWS or Azure accounts yet — add one under Admin → Resource Providers.
                   </p>
                 )}
               </div>

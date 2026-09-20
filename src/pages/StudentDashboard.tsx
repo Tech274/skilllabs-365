@@ -24,6 +24,8 @@ import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 import { listGrants } from "@/lib/manual-grants.functions";
 import { HUB_WHATSAPP_UPSELL, readStoredHandoff } from "@/lib/skilltrack-handoff";
 import { MessageCircle } from "lucide-react";
+import { LabWalletPanel } from "@/components/LabWalletPanel";
+import { buildLabWallet } from "@/lib/lab-wallet";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -149,7 +151,7 @@ export default function StudentDashboard() {
                   <>
                     <p className="font-medium text-foreground">Labs unlocked</p>
                     <p className="text-muted-foreground text-xs mt-0.5">
-                      SkillTrack handoff{handoff?.cert ? ` · cert ${handoff.cert}` : ""}
+                      SkillHub Labs handoff{handoff?.cert ? ` · cert ${handoff.cert}` : ""}
                       {handoff?.sku ? ` · sku ${handoff.sku}` : ""}. Ops grant is active.
                     </p>
                   </>
@@ -239,11 +241,8 @@ export default function StudentDashboard() {
                     <h3 className="text-sm font-semibold text-foreground">{lab.name}</h3>
                   </div>
                   <p className="text-xs text-muted-foreground line-clamp-2">{lab.description}</p>
-                  <div className="grid grid-cols-3 gap-2 text-center">
-                    <div className="rounded-lg bg-muted/50 p-2">
-                      <p className="text-sm font-mono font-semibold text-foreground">{lab.is_persistent ? "Persistent" : `${lab.duration}m`}</p>
-                      <p className="text-[9px] text-muted-foreground uppercase">Duration</p>
-                    </div>
+                  <LabWalletPanel wallet={buildLabWallet(lab, sessions)} />
+                  <div className="grid grid-cols-2 gap-2 text-center">
                     <div className="rounded-lg bg-muted/50 p-2">
                       <p className="text-sm font-mono font-semibold text-foreground">{lab.protocol}</p>
                       <p className="text-[9px] text-muted-foreground uppercase">Protocol</p>

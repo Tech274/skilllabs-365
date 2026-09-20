@@ -31,6 +31,22 @@ export function learnerFailureCopy(raw?: string | null): {
       tip: "Ops can see the technical details. WhatsApp us if it keeps happening.",
     };
   }
+  if (key === "secure_desktop_port_wait") {
+    return {
+      title: "Your lab is still finishing start-up",
+      detail:
+        "The machine is on, but it is not accepting connections yet, so we held back the desktop instead of showing a broken screen. Please try Connect again in a minute.",
+      tip: "Nothing was lost — your lab machine was not stopped or deleted.",
+    };
+  }
+  if (key === "secure_desktop_login_wall") {
+    return {
+      title: "Your lab desktop needs another moment",
+      detail:
+        "We could not confirm a secure desktop session just now, so we stopped instead of showing you a broken screen. Please try again in a moment.",
+      tip: "If this repeats, message Ops on WhatsApp with the lab name and time.",
+    };
+  }
   if (
     key === "secure_desktop_frame_timeout" ||
     key === "secure_desktop_blank_frame" ||

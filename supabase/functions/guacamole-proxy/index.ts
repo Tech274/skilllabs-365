@@ -20,7 +20,54 @@ function labTemplateProtocol(vm: any): "ssh" | "rdp" {
   return String(tpl?.protocol ?? "").toUpperCase() === "SSH" ? "ssh" : "rdp";
 }
 
+/**
+ * Connection health gate. A minted Guacamole token is worthless while the lab's
+ * RDP/SSH port is still closed — the learner just sees Guac "unreachable /
+ * Reconnecting". So we TCP-probe the lab before minting anything.
+ */
+export interface LabPortHealth {
+  reachable: boolean;
+  host: string;
+  port: number;
+  latency_ms: number | null;
+  attempts: number;
+  error?: string;
+}
 
+async function tcpReachable(host: string, port: number, timeoutMs = 4000): Promise<{ ok: boolean; latency: number; error?: string }> {
+  const started = Date.now();
+  try {
+    const conn = await Promise.race([
+      Deno.connect({ hostname: host, port, transport: "tcp" }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`No answer within ${timeoutMs}ms`)), timeoutMs)
+      ),
+    ]);
+    try { conn.close(); } catch { /* already closed */ }
+    return { ok: true, latency: Date.now() - started };
+  } catch (e) {
+    return { ok: false, latency: Date.now() - started, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/** Probe the lab port with short backoff (default 5 attempts across ~15-20s). */
+export async function probeLabPort(
+  host: string,
+  port: number,
+  opts: { attempts?: number; timeoutMs?: number; gapMs?: number } = {},
+): Promise<LabPortHealth> {
+  const attempts = opts.attempts ?? 5;
+  const gapMs = opts.gapMs ?? 2500;
+  let last: { ok: boolean; latency: number; error?: string } = { ok: false, latency: 0, error: "not probed" };
+  for (let i = 1; i <= attempts; i++) {
+    last = await tcpReachable(host, port, opts.timeoutMs ?? 4000);
+    if (last.ok) {
+      return { reachable: true, host, port, latency_ms: last.latency, attempts: i };
+    }
+    if (i < attempts) await new Promise((r) => setTimeout(r, gapMs));
+  }
+  return { reachable: false, host, port, latency_ms: null, attempts, error: last.error };
+}
 
 interface GuacConnection {
   name: string;
@@ -241,6 +288,134 @@ Deno.serve(async (req) => {
       return await getDataSource(guacBaseUrl, adminToken);
     };
 
+    /**
+     * connection-health — the ONLY readiness signal the SPA is allowed to trust.
+     *
+     * Ready is proven by Guacamole itself reporting an ACTIVE tunnel for this
+     * session's connection (activeConnections). Edge TCP to :3389 is never used
+     * here: the gateway security group makes that probe false-fail.
+     *
+     * Body: { action, session_id? , vm_id? } — session_id preferred; vm_id falls
+     * back to this user's most recent active session for that lab.
+     */
+    if (action === "connection-health") {
+      const { session_id, vm_id: healthVmId } = body;
+      if (!session_id && !healthVmId) throw new Error("session_id or vm_id is required");
+
+      const healthReply = (payload: Record<string, unknown>) =>
+        new Response(JSON.stringify(payload), { status: 200, headers: traceHeaders });
+
+      let sessQuery = supabase
+        .from("sessions")
+        .select("id, user_id, status, guac_connection_id, vm_id")
+        .order("created_at", { ascending: false })
+        .limit(1);
+      sessQuery = session_id
+        ? sessQuery.eq("id", session_id)
+        : sessQuery.eq("vm_id", healthVmId).eq("user_id", user.id).eq("status", "active");
+      const { data: sessRows } = await sessQuery;
+      const sess = sessRows?.[0];
+      if (!sess) {
+        return healthReply({ ready: false, reason: "No lab session found", probe: "guac_missing" });
+      }
+      if (sess.user_id !== user.id && !(await isAdmin())) {
+        return new Response(JSON.stringify({ error: "Forbidden" }), {
+          status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+      if (sess.status !== "active" || !sess.guac_connection_id || !sess.vm_id) {
+        return healthReply({
+          ready: false,
+          reason: "Session is not active on the gateway",
+          probe: "guac_missing",
+          guac_connection_id: sess.guac_connection_id ?? undefined,
+        });
+      }
+
+      const { data: healthVm } = await supabase
+        .from("virtual_machines")
+        .select("public_ip, private_ip, provider_account_id, lab_templates(provider)")
+        .eq("id", sess.vm_id)
+        .maybeSingle();
+      if (!healthVm) {
+        return healthReply({ ready: false, reason: "Lab machine record missing", probe: "unknown" });
+      }
+      const healthVmIp = healthVm.public_ip || healthVm.private_ip || undefined;
+
+      let dataSource: string;
+      try {
+        const healthProvider = await resolveVmCloudProvider(supabase, healthVm);
+        dataSource = await bindGuacForProvider(healthProvider);
+      } catch (_bindErr) {
+        // Gateway admin auth failed — never report a desktop we cannot see.
+        return healthReply({
+          ready: false,
+          reason: "Gateway authentication failed",
+          probe: "auth_fail",
+          vm_ip: healthVmIp,
+          guac_connection_id: sess.guac_connection_id,
+        });
+      }
+
+      const activeRes = await fetch(
+        `${guacBaseUrl}/api/session/data/${dataSource}/activeConnections?token=${adminToken}`,
+      );
+      if (!activeRes.ok) {
+        await activeRes.text();
+        return healthReply({
+          ready: false,
+          reason: activeRes.status === 401 || activeRes.status === 403
+            ? "Gateway rejected the health check"
+            : "Gateway did not report active connections",
+          probe: activeRes.status === 401 || activeRes.status === 403 ? "auth_fail" : "unknown",
+          vm_ip: healthVmIp,
+          guac_connection_id: sess.guac_connection_id,
+        });
+      }
+      const active = await activeRes.json();
+      const actives = Object.values(active || {}).filter(
+        (e): e is Record<string, unknown> => !!e && typeof e === "object",
+      );
+      // Guacamole versions differ on the field carrying the connection id.
+      const wanted = String(sess.guac_connection_id).trim();
+      const idFieldsOf = (entry: Record<string, unknown>) =>
+        [
+          entry.connectionIdentifier,
+          entry.identifier,
+          entry.connectionID,
+          entry.connectionId,
+          entry.connection_id,
+          (entry.connection as Record<string, unknown> | undefined)?.identifier,
+        ]
+          .filter((v) => v !== undefined && v !== null)
+          .map((v) => String(v).trim());
+      const ready = actives.some((entry) => idFieldsOf(entry).includes(wanted));
+
+      if (!ready) {
+        // No secrets: only counts and id shapes, to explain a persistent false.
+        console.log(
+          JSON.stringify({
+            scope: "connection-health",
+            probe: actives.length === 0 ? "no_tunnel" : "id_mismatch",
+            active_count: actives.length,
+            wanted_id: wanted,
+            seen_ids: actives.flatMap(idFieldsOf).slice(0, 20),
+          }),
+        );
+      }
+
+      return healthReply({
+        ready,
+        reason: ready ? undefined : "Remote desktop tunnel is not up yet",
+        // Connection definition exists; an empty active list is simply "no tunnel yet",
+        // never an auth failure.
+        probe: ready ? "guac_active" : actives.length === 0 ? "no_tunnel" : "id_mismatch",
+        active_count: actives.length,
+        vm_ip: healthVmIp,
+        guac_connection_id: sess.guac_connection_id,
+      });
+    }
+
     if (action === "create-session") {
       const { vm_id } = body;
       if (!vm_id) throw new Error("vm_id is required");
@@ -262,6 +437,35 @@ Deno.serve(async (req) => {
       }
 
       timeline.attach({ labTemplateId: vm.lab_template_id });
+
+      // ---- Advisory connection probe (NOT a hard gate) ---------------------
+      // The Guacamole gateway security group only admits the gateway's own IP,
+      // so an edge-runtime TCP dial to the lab times out even when gateway→VM
+      // works. A failed probe is therefore inconclusive: record it as
+      // edge_skipped_or_timeout and continue. Fail-closed still holds in the
+      // SPA — never Connected, never Guac chrome, until a tokenized desktop
+      // is confirmed.
+      const gateProtocol = labTemplateProtocol(vm);
+      const gatePort = gateProtocol === "ssh" ? 22 : 3389;
+      const probeEnabled = (Deno.env.get("GUAC_EDGE_PORT_PROBE") ?? "on").toLowerCase() !== "off";
+      const health = probeEnabled
+        ? await probeLabPort(vm.private_ip, gatePort, { attempts: 2, timeoutMs: 3000, gapMs: 1500 })
+        : null;
+      if (health && !health.reachable) {
+        await timeline.skipped(
+          SOURCE,
+          "guacamole-connect",
+          "Lab port probe was inconclusive from the edge (gateway-only ingress) — continuing",
+          { host: vm.private_ip, port: gatePort, attempts: health.attempts, error: health.error },
+        );
+      }
+      const healthPayload = {
+        probe: !health ? "edge_skipped" : health.reachable ? "edge_ok" : "edge_skipped_or_timeout",
+        reachable: health?.reachable ?? null,
+        host: vm.private_ip,
+        port: gatePort,
+        latency_ms: health?.latency_ms ?? null,
+      };
 
       const vmCloud = await resolveVmCloudProvider(supabase, vm);
       const dataSource = await bindGuacForProvider(vmCloud);
@@ -320,6 +524,7 @@ Deno.serve(async (req) => {
             region: vm.region ?? null,
             cloud_provider: cloudProvider,
             reused_existing: true,
+            health: healthPayload,
             correlation_id: correlationId,
           };
           timeline.attach({ sessionId: liveSession.id });

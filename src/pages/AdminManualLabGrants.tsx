@@ -15,6 +15,7 @@ import { toast } from "@/hooks/use-toast";
 import { supabase } from "@/integrations/supabase/client";
 import { listGrants, revokeGrant, upsertGrant } from "@/lib/manual-grants.functions";
 import { cn } from "@/lib/utils";
+import { formatIstDate, validateGrantWindow } from "@/lib/lab-template-window";
 
 type GrantRow = {
   id: string;
@@ -70,6 +71,28 @@ export default function AdminManualLabGrants() {
   const [resolvedUser, setResolvedUser] = useState<ProfileLite | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [revokingId, setRevokingId] = useState<string | null>(null);
+  /** Furthest end date across live persistent lab templates — grants cannot run past it. */
+  const [templateEndIso, setTemplateEndIso] = useState<string | null>(null);
+
+  useEffect(() => {
+    void (async () => {
+      const { data } = await supabase
+        .from("lab_templates")
+        .select("end_date")
+        .eq("is_persistent", true)
+        .neq("status", "archived")
+        .not("end_date", "is", null)
+        .order("end_date", { ascending: false })
+        .limit(1);
+      const row = (data ?? [])[0] as { end_date?: string | null } | undefined;
+      setTemplateEndIso(row?.end_date ?? null);
+    })();
+  }, []);
+
+  const grantWindowError = validateGrantWindow(
+    fromLocalInputValue(form.ends_at),
+    templateEndIso,
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -180,6 +203,10 @@ export default function AdminManualLabGrants() {
       toast({ title: "Look up a user first", description: "Resolve email → Hub user before granting.", variant: "destructive" });
       return;
     }
+    if (grantWindowError) {
+      toast({ title: "Grant window too long", description: grantWindowError, variant: "destructive" });
+      return;
+    }
     setSaving(true);
     try {
       await upsertGrant({
@@ -261,7 +288,7 @@ export default function AdminManualLabGrants() {
             title={grants.length === 0 ? "No lab grants yet" : "No grants match your filter"}
             description={
               grants.length === 0
-                ? "After SkillTrack payment, Ops grants Hub VM/lab access here by learner email."
+                ? "After payment, Ops grants SkillHub Labs VM/lab access here by learner email."
                 : "Try a different search."
             }
             hint={grants.length === 0 ? 'Click "Grant by email" to unlock a learner.' : undefined}
@@ -403,13 +430,20 @@ export default function AdminManualLabGrants() {
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="grant-ends">Ends at (optional)</Label>
+              <Label htmlFor="grant-ends">Ends at{templateEndIso ? "" : " (optional)"}</Label>
               <Input
                 id="grant-ends"
                 type="datetime-local"
                 value={form.ends_at}
                 onChange={(e) => setForm((f) => ({ ...f, ends_at: e.target.value }))}
               />
+              {grantWindowError ? (
+                <p className="text-xs text-destructive">{grantWindowError}</p>
+              ) : templateEndIso ? (
+                <p className="text-xs text-muted-foreground">
+                  Lab access ends {formatIstDate(templateEndIso)} — a grant cannot run past the lab template end date.
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
               <div>

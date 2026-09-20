@@ -35,3 +35,6 @@ verify_jwt = false
 
 [functions.cloud-quotas]
 verify_jwt = false
+
+[functions.network-health]
+verify_jwt = false

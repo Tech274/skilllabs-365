@@ -57,11 +57,11 @@ const Signup = () => {
           <div className="mx-auto w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center mb-2">
             <Monitor className="w-6 h-6 text-primary" />
           </div>
-          <CardTitle className="text-2xl font-bold text-foreground">Create Account</CardTitle>
+          <CardTitle className="text-2xl font-bold text-foreground">Join SkillHub Labs</CardTitle>
           <CardDescription className="text-muted-foreground">
             {continueAs
-              ? `Continue as ${continueAs} — from SkillTrack`
-              : "Sign up to get started with SkillLabs"}
+              ? `Continue as ${continueAs} — SkillHub Labs`
+              : "Sign up to get started with SkillHub Labs"}
           </CardDescription>
         </CardHeader>
         <form onSubmit={handleSignup}>

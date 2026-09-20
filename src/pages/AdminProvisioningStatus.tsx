@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { motion } from "framer-motion";
 import { Activity, Loader2, RefreshCw } from "lucide-react";
+import { ProvisioningAdminTabs } from "@/components/ProvisioningAdminTabs";
 
 interface EventRow {
   id: string;
@@ -140,6 +141,7 @@ export default function AdminProvisioningStatus() {
             </Button>
           </div>
         </div>
+        <ProvisioningAdminTabs />
 
         {loading ? (
           <div className="flex items-center justify-center py-20 text-muted-foreground">

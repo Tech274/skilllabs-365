@@ -11,6 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { EmptyState } from "@/components/EmptyState";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { ProvisioningAdminTabs } from "@/components/ProvisioningAdminTabs";
 
 interface EventRow {
   created_at: string;
@@ -129,6 +130,7 @@ export default function AdminProvisioningExport() {
             or watchdog attribution — then download it as JSON or CSV.
           </p>
         </div>
+        <ProvisioningAdminTabs />
 
         <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/40 p-3 text-xs text-muted-foreground">
           <ShieldCheck className="mt-0.5 h-4 w-4 text-primary" />

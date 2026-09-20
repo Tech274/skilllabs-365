@@ -10,10 +10,52 @@ export type Database = {
   // Allows to automatically instantiate createClient with right options
   // instead of createClient<Database, { PostgrestVersion: 'XX' }>(URL, KEY)
   __InternalSupabase: {
-    PostgrestVersion: "14.4"
+    PostgrestVersion: "14.5"
   }
   public: {
     Tables: {
+      access_requests: {
+        Row: {
+          created_at: string
+          id: string
+          reason: string | null
+          requester_id: string
+          resource_id: string
+          resource_type: string
+          review_note: string | null
+          reviewed_at: string | null
+          reviewer_id: string | null
+          status: string
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          reason?: string | null
+          requester_id: string
+          resource_id: string
+          resource_type: string
+          review_note?: string | null
+          reviewed_at?: string | null
+          reviewer_id?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          reason?: string | null
+          requester_id?: string
+          resource_id?: string
+          resource_type?: string
+          review_note?: string | null
+          reviewed_at?: string | null
+          reviewer_id?: string | null
+          status?: string
+          updated_at?: string
+        }
+        Relationships: []
+      }
       access_rules: {
         Row: {
           active: boolean
@@ -193,7 +235,10 @@ export type Database = {
           created_by: string | null
           credit_limit: number
           description: string | null
+          desktop_lab_template_id: string | null
+          guided: boolean
           id: string
+          max_sessions: number | null
           name: string
           org_id: string | null
           provider: Database["public"]["Enums"]["cloud_provider"]
@@ -203,6 +248,7 @@ export type Database = {
           region: string | null
           self_enroll: boolean
           session_duration_minutes: number
+          sessions_used: number
           status: Database["public"]["Enums"]["access_template_status"]
           updated_at: string
           validity_days: number
@@ -213,7 +259,10 @@ export type Database = {
           created_by?: string | null
           credit_limit?: number
           description?: string | null
+          desktop_lab_template_id?: string | null
+          guided?: boolean
           id?: string
+          max_sessions?: number | null
           name: string
           org_id?: string | null
           provider: Database["public"]["Enums"]["cloud_provider"]
@@ -223,6 +272,7 @@ export type Database = {
           region?: string | null
           self_enroll?: boolean
           session_duration_minutes?: number
+          sessions_used?: number
           status?: Database["public"]["Enums"]["access_template_status"]
           updated_at?: string
           validity_days?: number
@@ -233,7 +283,10 @@ export type Database = {
           created_by?: string | null
           credit_limit?: number
           description?: string | null
+          desktop_lab_template_id?: string | null
+          guided?: boolean
           id?: string
+          max_sessions?: number | null
           name?: string
           org_id?: string | null
           provider?: Database["public"]["Enums"]["cloud_provider"]
@@ -243,11 +296,19 @@ export type Database = {
           region?: string | null
           self_enroll?: boolean
           session_duration_minutes?: number
+          sessions_used?: number
           status?: Database["public"]["Enums"]["access_template_status"]
           updated_at?: string
           validity_days?: number
         }
         Relationships: [
+          {
+            foreignKeyName: "access_templates_desktop_lab_template_id_fkey"
+            columns: ["desktop_lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
           {
             foreignKeyName: "access_templates_org_id_fkey"
             columns: ["org_id"]
@@ -470,6 +531,33 @@ export type Database = {
           scope?: string
           scope_id?: string | null
           updated_at?: string
+        }
+        Relationships: []
+      }
+      app_user_connections: {
+        Row: {
+          connection_key_ciphertext: string
+          connector_id: string
+          created_at: string
+          id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          connection_key_ciphertext: string
+          connector_id: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          connection_key_ciphertext?: string
+          connector_id?: string
+          created_at?: string
+          id?: string
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
@@ -777,6 +865,323 @@ export type Database = {
           },
         ]
       }
+      lab_folder_notes: {
+        Row: {
+          created_at: string
+          id: string
+          lab_template_id: string
+          note: string | null
+          path: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          lab_template_id: string
+          note?: string | null
+          path: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          lab_template_id?: string
+          note?: string | null
+          path?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lab_folder_notes_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lab_guide_steps: {
+        Row: {
+          body: Json
+          command: string | null
+          created_at: string
+          guide_id: string
+          heading: string | null
+          id: string
+          image_path: string | null
+          note: string | null
+          position: number
+          updated_at: string
+        }
+        Insert: {
+          body?: Json
+          command?: string | null
+          created_at?: string
+          guide_id: string
+          heading?: string | null
+          id?: string
+          image_path?: string | null
+          note?: string | null
+          position: number
+          updated_at?: string
+        }
+        Update: {
+          body?: Json
+          command?: string | null
+          created_at?: string
+          guide_id?: string
+          heading?: string | null
+          id?: string
+          image_path?: string | null
+          note?: string | null
+          position?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lab_guide_steps_guide_id_fkey"
+            columns: ["guide_id"]
+            isOneToOne: false
+            referencedRelation: "lab_guides"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lab_guides: {
+        Row: {
+          access_template_id: string | null
+          cleanup: Json
+          created_at: string
+          difficulty: string | null
+          duration_min: number | null
+          id: string
+          imported_at: string | null
+          imported_by: string | null
+          lab_template_id: string | null
+          objective: string | null
+          prerequisites: Json
+          reference_links: Json
+          source: string
+          source_page_id: string | null
+          source_page_url: string | null
+          status: string
+          tags: Json
+          title: string
+          updated_at: string
+          validation: Json
+          validation_report: Json
+        }
+        Insert: {
+          access_template_id?: string | null
+          cleanup?: Json
+          created_at?: string
+          difficulty?: string | null
+          duration_min?: number | null
+          id?: string
+          imported_at?: string | null
+          imported_by?: string | null
+          lab_template_id?: string | null
+          objective?: string | null
+          prerequisites?: Json
+          reference_links?: Json
+          source?: string
+          source_page_id?: string | null
+          source_page_url?: string | null
+          status?: string
+          tags?: Json
+          title: string
+          updated_at?: string
+          validation?: Json
+          validation_report?: Json
+        }
+        Update: {
+          access_template_id?: string | null
+          cleanup?: Json
+          created_at?: string
+          difficulty?: string | null
+          duration_min?: number | null
+          id?: string
+          imported_at?: string | null
+          imported_by?: string | null
+          lab_template_id?: string | null
+          objective?: string | null
+          prerequisites?: Json
+          reference_links?: Json
+          source?: string
+          source_page_id?: string | null
+          source_page_url?: string | null
+          status?: string
+          tags?: Json
+          title?: string
+          updated_at?: string
+          validation?: Json
+          validation_report?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lab_guides_access_template_id_fkey"
+            columns: ["access_template_id"]
+            isOneToOne: false
+            referencedRelation: "access_templates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "lab_guides_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lab_template_bindings: {
+        Row: {
+          blockers: Json
+          config: Json
+          created_at: string
+          created_by: string | null
+          id: string
+          lab_template_id: string
+          last_checked_at: string | null
+          provider: string
+          provider_account_id: string | null
+          status: string
+          updated_at: string
+          updated_by: string | null
+          warnings: Json
+        }
+        Insert: {
+          blockers?: Json
+          config?: Json
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lab_template_id: string
+          last_checked_at?: string | null
+          provider: string
+          provider_account_id?: string | null
+          status?: string
+          updated_at?: string
+          updated_by?: string | null
+          warnings?: Json
+        }
+        Update: {
+          blockers?: Json
+          config?: Json
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lab_template_id?: string
+          last_checked_at?: string | null
+          provider?: string
+          provider_account_id?: string | null
+          status?: string
+          updated_at?: string
+          updated_by?: string | null
+          warnings?: Json
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lab_template_bindings_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "lab_template_bindings_provider_account_id_fkey"
+            columns: ["provider_account_id"]
+            isOneToOne: false
+            referencedRelation: "cloud_provider_accounts"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lab_template_folders: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          description: string | null
+          id: string
+          lab_template_id: string
+          path: string
+          sort_order: number
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          lab_template_id: string
+          path: string
+          sort_order?: number
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          description?: string | null
+          id?: string
+          lab_template_id?: string
+          path?: string
+          sort_order?: number
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lab_template_folders_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      lab_template_secrets: {
+        Row: {
+          created_at: string
+          created_by: string | null
+          hint: string | null
+          id: string
+          lab_template_id: string
+          label: string
+          secret_value: string
+          sort_order: number
+          updated_at: string
+        }
+        Insert: {
+          created_at?: string
+          created_by?: string | null
+          hint?: string | null
+          id?: string
+          lab_template_id: string
+          label: string
+          secret_value: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Update: {
+          created_at?: string
+          created_by?: string | null
+          hint?: string | null
+          id?: string
+          lab_template_id?: string
+          label?: string
+          secret_value?: string
+          sort_order?: number
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "lab_template_secrets_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       lab_templates: {
         Row: {
           clipboard_enabled: boolean
@@ -784,7 +1189,11 @@ export type Database = {
           created_by: string | null
           description: string | null
           duration: number
+          end_date: string | null
           file_transfer_enabled: boolean
+          gallery_image_id: string | null
+          gallery_image_label: string | null
+          guided: boolean
           id: string
           idle_timeout: number
           is_persistent: boolean
@@ -794,6 +1203,7 @@ export type Database = {
           provider: Database["public"]["Enums"]["cloud_provider"]
           provider_account_id: string | null
           region: string
+          start_date: string | null
           status: string
           updated_at: string
           vm_size: string
@@ -804,7 +1214,11 @@ export type Database = {
           created_by?: string | null
           description?: string | null
           duration?: number
+          end_date?: string | null
           file_transfer_enabled?: boolean
+          gallery_image_id?: string | null
+          gallery_image_label?: string | null
+          guided?: boolean
           id?: string
           idle_timeout?: number
           is_persistent?: boolean
@@ -814,6 +1228,7 @@ export type Database = {
           provider?: Database["public"]["Enums"]["cloud_provider"]
           provider_account_id?: string | null
           region?: string
+          start_date?: string | null
           status?: string
           updated_at?: string
           vm_size?: string
@@ -824,7 +1239,11 @@ export type Database = {
           created_by?: string | null
           description?: string | null
           duration?: number
+          end_date?: string | null
           file_transfer_enabled?: boolean
+          gallery_image_id?: string | null
+          gallery_image_label?: string | null
+          guided?: boolean
           id?: string
           idle_timeout?: number
           is_persistent?: boolean
@@ -834,6 +1253,7 @@ export type Database = {
           provider?: Database["public"]["Enums"]["cloud_provider"]
           provider_account_id?: string | null
           region?: string
+          start_date?: string | null
           status?: string
           updated_at?: string
           vm_size?: string
@@ -851,6 +1271,7 @@ export type Database = {
       manual_access_grants: {
         Row: {
           active: boolean
+          approval_status: string
           asset_id: string | null
           asset_type: string | null
           certification_slug: string | null
@@ -860,12 +1281,17 @@ export type Database = {
           id: string
           note: string | null
           plan_key: string | null
+          review_note: string | null
+          reviewed_at: string | null
+          reviewed_by: string | null
+          source: string
           starts_at: string
           updated_at: string
           user_id: string
         }
         Insert: {
           active?: boolean
+          approval_status?: string
           asset_id?: string | null
           asset_type?: string | null
           certification_slug?: string | null
@@ -875,12 +1301,17 @@ export type Database = {
           id?: string
           note?: string | null
           plan_key?: string | null
+          review_note?: string | null
+          reviewed_at?: string | null
+          reviewed_by?: string | null
+          source?: string
           starts_at?: string
           updated_at?: string
           user_id: string
         }
         Update: {
           active?: boolean
+          approval_status?: string
           asset_id?: string | null
           asset_type?: string | null
           certification_slug?: string | null
@@ -890,6 +1321,10 @@ export type Database = {
           id?: string
           note?: string | null
           plan_key?: string | null
+          review_note?: string | null
+          reviewed_at?: string | null
+          reviewed_by?: string | null
+          source?: string
           starts_at?: string
           updated_at?: string
           user_id?: string
@@ -1056,6 +1491,116 @@ export type Database = {
         }
         Relationships: []
       }
+      platform_application_launch_events: {
+        Row: {
+          created_at: string
+          generated_email: string | null
+          id: string
+          launch_type: string
+          launch_url: string
+          user_id: string
+          workspace_id: string | null
+          workspace_name: string
+        }
+        Insert: {
+          created_at?: string
+          generated_email?: string | null
+          id?: string
+          launch_type?: string
+          launch_url: string
+          user_id: string
+          workspace_id?: string | null
+          workspace_name: string
+        }
+        Update: {
+          created_at?: string
+          generated_email?: string | null
+          id?: string
+          launch_type?: string
+          launch_url?: string
+          user_id?: string
+          workspace_id?: string | null
+          workspace_name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "platform_application_launch_events_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "platform_applications"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      platform_applications: {
+        Row: {
+          access_note: string | null
+          category: string
+          created_at: string
+          created_by: string | null
+          description: string
+          icon: string
+          icon_color: string
+          icon_label: string
+          id: string
+          launch_url: string
+          login_binding_note: string
+          name: string
+          password_placeholder: string
+          slug: string
+          status: string
+          trial_signup_url: string | null
+          updated_at: string
+          updated_by: string | null
+          username_placeholder: string
+          workspace_email_enabled: boolean
+        }
+        Insert: {
+          access_note?: string | null
+          category?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string
+          icon?: string
+          icon_color?: string
+          icon_label?: string
+          id?: string
+          launch_url: string
+          login_binding_note?: string
+          name: string
+          password_placeholder?: string
+          slug: string
+          status?: string
+          trial_signup_url?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          username_placeholder?: string
+          workspace_email_enabled?: boolean
+        }
+        Update: {
+          access_note?: string | null
+          category?: string
+          created_at?: string
+          created_by?: string | null
+          description?: string
+          icon?: string
+          icon_color?: string
+          icon_label?: string
+          id?: string
+          launch_url?: string
+          login_binding_note?: string
+          name?: string
+          password_placeholder?: string
+          slug?: string
+          status?: string
+          trial_signup_url?: string | null
+          updated_at?: string
+          updated_by?: string | null
+          username_placeholder?: string
+          workspace_email_enabled?: boolean
+        }
+        Relationships: []
+      }
       platform_settings: {
         Row: {
           id: string
@@ -1087,6 +1632,7 @@ export type Database = {
           created_at: string
           display_name: string
           email: string | null
+          gcp_principal_email: string | null
           id: string
           updated_at: string
           user_id: string
@@ -1097,6 +1643,7 @@ export type Database = {
           created_at?: string
           display_name?: string
           email?: string | null
+          gcp_principal_email?: string | null
           id?: string
           updated_at?: string
           user_id: string
@@ -1107,6 +1654,7 @@ export type Database = {
           created_at?: string
           display_name?: string
           email?: string | null
+          gcp_principal_email?: string | null
           id?: string
           updated_at?: string
           user_id?: string
@@ -1326,6 +1874,102 @@ export type Database = {
         }
         Relationships: []
       }
+      readiness_metrics: {
+        Row: {
+          bucket_minute: string
+          count: number
+          created_at: string
+          id: string
+          metric: string
+          provider: string | null
+          template_id: string | null
+          updated_at: string
+        }
+        Insert: {
+          bucket_minute: string
+          count?: number
+          created_at?: string
+          id?: string
+          metric: string
+          provider?: string | null
+          template_id?: string | null
+          updated_at?: string
+        }
+        Update: {
+          bucket_minute?: string
+          count?: number
+          created_at?: string
+          id?: string
+          metric?: string
+          provider?: string | null
+          template_id?: string | null
+          updated_at?: string
+        }
+        Relationships: []
+      }
+      reconcile_audit_trail: {
+        Row: {
+          attempt: number
+          backoff_delay_ms: number | null
+          correlation_id: string | null
+          created_at: string
+          detail: Json
+          entity_label: string | null
+          error_cause: string | null
+          error_message: string | null
+          from_state: string | null
+          id: string
+          lab_template_id: string | null
+          max_attempts: number
+          outcome: string
+          provider: string
+          region: string | null
+          step: string
+          to_state: string | null
+          vm_id: string | null
+        }
+        Insert: {
+          attempt?: number
+          backoff_delay_ms?: number | null
+          correlation_id?: string | null
+          created_at?: string
+          detail?: Json
+          entity_label?: string | null
+          error_cause?: string | null
+          error_message?: string | null
+          from_state?: string | null
+          id?: string
+          lab_template_id?: string | null
+          max_attempts?: number
+          outcome?: string
+          provider?: string
+          region?: string | null
+          step: string
+          to_state?: string | null
+          vm_id?: string | null
+        }
+        Update: {
+          attempt?: number
+          backoff_delay_ms?: number | null
+          correlation_id?: string | null
+          created_at?: string
+          detail?: Json
+          entity_label?: string | null
+          error_cause?: string | null
+          error_message?: string | null
+          from_state?: string | null
+          id?: string
+          lab_template_id?: string | null
+          max_attempts?: number
+          outcome?: string
+          provider?: string
+          region?: string | null
+          step?: string
+          to_state?: string | null
+          vm_id?: string | null
+        }
+        Relationships: []
+      }
       resources: {
         Row: {
           created_at: string
@@ -1489,6 +2133,173 @@ export type Database = {
           },
         ]
       }
+      skilltrack_handoff_events: {
+        Row: {
+          captured_at: string | null
+          cert: string | null
+          created_at: string
+          email: string | null
+          handoff: string | null
+          id: string
+          invoice: string | null
+          lead: string | null
+          phone: string | null
+          sku: string | null
+          user_id: string | null
+        }
+        Insert: {
+          captured_at?: string | null
+          cert?: string | null
+          created_at?: string
+          email?: string | null
+          handoff?: string | null
+          id?: string
+          invoice?: string | null
+          lead?: string | null
+          phone?: string | null
+          sku?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          captured_at?: string | null
+          cert?: string | null
+          created_at?: string
+          email?: string | null
+          handoff?: string | null
+          id?: string
+          invoice?: string | null
+          lead?: string | null
+          phone?: string | null
+          sku?: string | null
+          user_id?: string | null
+        }
+        Relationships: []
+      }
+      skilltrack_sku_map: {
+        Row: {
+          access_template_id: string | null
+          active: boolean
+          certification_slug: string | null
+          created_at: string
+          created_by: string | null
+          id: string
+          lab_template_id: string | null
+          label: string | null
+          note: string | null
+          sku: string
+          updated_at: string
+        }
+        Insert: {
+          access_template_id?: string | null
+          active?: boolean
+          certification_slug?: string | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lab_template_id?: string | null
+          label?: string | null
+          note?: string | null
+          sku: string
+          updated_at?: string
+        }
+        Update: {
+          access_template_id?: string | null
+          active?: boolean
+          certification_slug?: string | null
+          created_at?: string
+          created_by?: string | null
+          id?: string
+          lab_template_id?: string | null
+          label?: string | null
+          note?: string | null
+          sku?: string
+          updated_at?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "skilltrack_sku_map_access_template_id_fkey"
+            columns: ["access_template_id"]
+            isOneToOne: false
+            referencedRelation: "access_templates"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "skilltrack_sku_map_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      student_lab_assignment_audit: {
+        Row: {
+          action: string
+          actor_id: string | null
+          assignment_id: string | null
+          created_at: string
+          detail: Json
+          id: string
+          lab_template_id: string
+          student_id: string
+        }
+        Insert: {
+          action: string
+          actor_id?: string | null
+          assignment_id?: string | null
+          created_at?: string
+          detail?: Json
+          id?: string
+          lab_template_id: string
+          student_id: string
+        }
+        Update: {
+          action?: string
+          actor_id?: string | null
+          assignment_id?: string | null
+          created_at?: string
+          detail?: Json
+          id?: string
+          lab_template_id?: string
+          student_id?: string
+        }
+        Relationships: []
+      }
+      student_lab_assignments: {
+        Row: {
+          assigned_at: string
+          assigned_by: string | null
+          id: string
+          lab_template_id: string
+          revoked_at: string | null
+          student_id: string
+        }
+        Insert: {
+          assigned_at?: string
+          assigned_by?: string | null
+          id?: string
+          lab_template_id: string
+          revoked_at?: string | null
+          student_id: string
+        }
+        Update: {
+          assigned_at?: string
+          assigned_by?: string | null
+          id?: string
+          lab_template_id?: string
+          revoked_at?: string | null
+          student_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "student_lab_assignments_lab_template_id_fkey"
+            columns: ["lab_template_id"]
+            isOneToOne: false
+            referencedRelation: "lab_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       subscriptions: {
         Row: {
           created_at: string
@@ -1522,6 +2333,60 @@ export type Database = {
           status?: string
           updated_at?: string
           user_id?: string
+        }
+        Relationships: []
+      }
+      template_access_audit: {
+        Row: {
+          action: string
+          actor_email: string | null
+          actor_id: string | null
+          assignee_email: string | null
+          assignee_id: string | null
+          assignee_type: string
+          assignment_id: string | null
+          azure_object_id_present: boolean
+          created_at: string
+          detail: Json
+          gcp_principal_email_present: boolean
+          id: string
+          provider: string | null
+          template_id: string
+          template_name: string | null
+        }
+        Insert: {
+          action: string
+          actor_email?: string | null
+          actor_id?: string | null
+          assignee_email?: string | null
+          assignee_id?: string | null
+          assignee_type: string
+          assignment_id?: string | null
+          azure_object_id_present?: boolean
+          created_at?: string
+          detail?: Json
+          gcp_principal_email_present?: boolean
+          id?: string
+          provider?: string | null
+          template_id: string
+          template_name?: string | null
+        }
+        Update: {
+          action?: string
+          actor_email?: string | null
+          actor_id?: string | null
+          assignee_email?: string | null
+          assignee_id?: string | null
+          assignee_type?: string
+          assignment_id?: string | null
+          azure_object_id_present?: boolean
+          created_at?: string
+          detail?: Json
+          gcp_principal_email_present?: boolean
+          id?: string
+          provider?: string | null
+          template_id?: string
+          template_name?: string | null
         }
         Relationships: []
       }
@@ -1646,6 +2511,65 @@ export type Database = {
           },
         ]
       }
+      template_seat_events: {
+        Row: {
+          actor_id: string | null
+          created_at: string
+          event_type: string
+          id: string
+          max_sessions: number | null
+          provider: string | null
+          reason: string | null
+          region: string | null
+          seats_delta: number
+          session_id: string | null
+          sessions_used_after: number | null
+          template_id: string
+          template_name: string | null
+          user_id: string | null
+        }
+        Insert: {
+          actor_id?: string | null
+          created_at?: string
+          event_type: string
+          id?: string
+          max_sessions?: number | null
+          provider?: string | null
+          reason?: string | null
+          region?: string | null
+          seats_delta?: number
+          session_id?: string | null
+          sessions_used_after?: number | null
+          template_id: string
+          template_name?: string | null
+          user_id?: string | null
+        }
+        Update: {
+          actor_id?: string | null
+          created_at?: string
+          event_type?: string
+          id?: string
+          max_sessions?: number | null
+          provider?: string | null
+          reason?: string | null
+          region?: string | null
+          seats_delta?: number
+          session_id?: string | null
+          sessions_used_after?: number | null
+          template_id?: string
+          template_name?: string | null
+          user_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "template_seat_events_template_id_fkey"
+            columns: ["template_id"]
+            isOneToOne: false
+            referencedRelation: "access_templates"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       template_workspace_batches: {
         Row: {
           created_at: string
@@ -1733,18 +2657,24 @@ export type Database = {
       virtual_machines: {
         Row: {
           azure_vm_id: string | null
+          cost_currency: string
           created_at: string
           ended_at: string | null
           ended_by: string | null
           ended_reason: string | null
           expires_at: string | null
           expiry_warned_at: string | null
+          hourly_rate: number | null
           id: string
           idle_minutes: number
           lab_template_id: string | null
+          network_info: Json
           private_ip: string | null
+          provider: string
           provider_account_id: string | null
+          public_ip: string | null
           region: string
+          resource_tags: Json
           status: Database["public"]["Enums"]["vm_status"]
           updated_at: string
           user_id: string | null
@@ -1752,18 +2682,24 @@ export type Database = {
         }
         Insert: {
           azure_vm_id?: string | null
+          cost_currency?: string
           created_at?: string
           ended_at?: string | null
           ended_by?: string | null
           ended_reason?: string | null
           expires_at?: string | null
           expiry_warned_at?: string | null
+          hourly_rate?: number | null
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null
+          network_info?: Json
           private_ip?: string | null
+          provider?: string
           provider_account_id?: string | null
+          public_ip?: string | null
           region?: string
+          resource_tags?: Json
           status?: Database["public"]["Enums"]["vm_status"]
           updated_at?: string
           user_id?: string | null
@@ -1771,18 +2707,24 @@ export type Database = {
         }
         Update: {
           azure_vm_id?: string | null
+          cost_currency?: string
           created_at?: string
           ended_at?: string | null
           ended_by?: string | null
           ended_reason?: string | null
           expires_at?: string | null
           expiry_warned_at?: string | null
+          hourly_rate?: number | null
           id?: string
           idle_minutes?: number
           lab_template_id?: string | null
+          network_info?: Json
           private_ip?: string | null
+          provider?: string
           provider_account_id?: string | null
+          public_ip?: string | null
           region?: string
+          resource_tags?: Json
           status?: Database["public"]["Enums"]["vm_status"]
           updated_at?: string
           user_id?: string | null
@@ -1805,11 +2747,265 @@ export type Database = {
           },
         ]
       }
+      vm_access_credentials: {
+        Row: {
+          created_at: string
+          password: string
+          username: string
+          vm_id: string
+        }
+        Insert: {
+          created_at?: string
+          password: string
+          username: string
+          vm_id: string
+        }
+        Update: {
+          created_at?: string
+          password?: string
+          username?: string
+          vm_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "vm_access_credentials_vm_id_fkey"
+            columns: ["vm_id"]
+            isOneToOne: true
+            referencedRelation: "virtual_machines"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      workspace_assignments: {
+        Row: {
+          assigned_at: string
+          assigned_by: string | null
+          created_at: string
+          id: string
+          revoked_at: string | null
+          updated_at: string
+          user_id: string
+          workspace_id: string
+        }
+        Insert: {
+          assigned_at?: string
+          assigned_by?: string | null
+          created_at?: string
+          id?: string
+          revoked_at?: string | null
+          updated_at?: string
+          user_id: string
+          workspace_id: string
+        }
+        Update: {
+          assigned_at?: string
+          assigned_by?: string | null
+          created_at?: string
+          id?: string
+          revoked_at?: string | null
+          updated_at?: string
+          user_id?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "workspace_assignments_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "platform_applications"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      workspace_credential_events: {
+        Row: {
+          created_at: string
+          credential_id: string | null
+          detail: Json
+          event_type: string
+          id: string
+          user_id: string
+          workspace_id: string | null
+          workspace_name: string
+        }
+        Insert: {
+          created_at?: string
+          credential_id?: string | null
+          detail?: Json
+          event_type: string
+          id?: string
+          user_id: string
+          workspace_id?: string | null
+          workspace_name: string
+        }
+        Update: {
+          created_at?: string
+          credential_id?: string | null
+          detail?: Json
+          event_type?: string
+          id?: string
+          user_id?: string
+          workspace_id?: string | null
+          workspace_name?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "workspace_credential_events_credential_id_fkey"
+            columns: ["credential_id"]
+            isOneToOne: false
+            referencedRelation: "workspace_credentials"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "workspace_credential_events_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "platform_applications"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      workspace_credentials: {
+        Row: {
+          created_at: string
+          expires_at: string
+          id: string
+          issued_at: string
+          password: string
+          regenerated_count: number
+          updated_at: string
+          user_id: string
+          username: string
+          workspace_id: string
+        }
+        Insert: {
+          created_at?: string
+          expires_at: string
+          id?: string
+          issued_at?: string
+          password: string
+          regenerated_count?: number
+          updated_at?: string
+          user_id: string
+          username: string
+          workspace_id: string
+        }
+        Update: {
+          created_at?: string
+          expires_at?: string
+          id?: string
+          issued_at?: string
+          password?: string
+          regenerated_count?: number
+          updated_at?: string
+          user_id?: string
+          username?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "workspace_credentials_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "platform_applications"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      workspace_favorites: {
+        Row: {
+          created_at: string
+          id: string
+          user_id: string
+          workspace_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          user_id: string
+          workspace_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          user_id?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "workspace_favorites_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "platform_applications"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
+      workspace_trial_identities: {
+        Row: {
+          created_at: string
+          generated_email: string
+          id: string
+          provisioned_at: string | null
+          provisioning_detail: string | null
+          provisioning_provider: string | null
+          provisioning_status: string
+          updated_at: string
+          user_id: string
+          workspace_id: string
+        }
+        Insert: {
+          created_at?: string
+          generated_email: string
+          id?: string
+          provisioned_at?: string | null
+          provisioning_detail?: string | null
+          provisioning_provider?: string | null
+          provisioning_status?: string
+          updated_at?: string
+          user_id: string
+          workspace_id: string
+        }
+        Update: {
+          created_at?: string
+          generated_email?: string
+          id?: string
+          provisioned_at?: string | null
+          provisioning_detail?: string | null
+          provisioning_provider?: string | null
+          provisioning_status?: string
+          updated_at?: string
+          user_id?: string
+          workspace_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "workspace_trial_identities_workspace_id_fkey"
+            columns: ["workspace_id"]
+            isOneToOne: false
+            referencedRelation: "platform_applications"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
+      can_review_access_request: {
+        Args: { _resource_id: string; _resource_type: string; _user_id: string }
+        Returns: boolean
+      }
+      consume_template_session_quota: {
+        Args: {
+          _region?: string
+          _session_id?: string
+          _template_id: string
+          _user_id?: string
+        }
+        Returns: Json
+      }
       has_asset_access: {
         Args: { _asset_id: string; _asset_type: string; _user_id: string }
         Returns: boolean
@@ -1830,8 +3026,61 @@ export type Database = {
         Returns: boolean
       }
       is_platform_admin: { Args: { _user_id: string }; Returns: boolean }
+      reactivate_template_session_pool: {
+        Args: {
+          _max_sessions?: number
+          _reason?: string
+          _target_status?: string
+          _template_id: string
+        }
+        Returns: Json
+      }
+      record_readiness_metric: {
+        Args: {
+          _count?: number
+          _metric: string
+          _provider?: string
+          _template_id?: string
+        }
+        Returns: undefined
+      }
+      record_template_seat_admin_event: {
+        Args: { _event_type: string; _reason?: string; _template_id: string }
+        Returns: undefined
+      }
+      release_template_session_quota: {
+        Args: {
+          _reason?: string
+          _session_id?: string
+          _template_id: string
+          _user_id?: string
+        }
+        Returns: Json
+      }
+      search_workspaces: {
+        Args: {
+          _category?: string
+          _limit?: number
+          _offset?: number
+          _search?: string
+        }
+        Returns: {
+          total_count: number
+          workspace: Json
+        }[]
+      }
+      show_limit: { Args: never; Returns: number }
+      show_trgm: { Args: { "": string }; Returns: string[] }
+      user_can_access_lab_template: {
+        Args: { _lab_template_id: string; _user_id: string }
+        Returns: boolean
+      }
       user_can_access_template: {
         Args: { _template_id: string; _user_id: string }
+        Returns: boolean
+      }
+      user_can_access_workspace: {
+        Args: { _user_id: string; _workspace_id: string }
         Returns: boolean
       }
     }
@@ -1888,12 +3137,12 @@ export type Tables<
   DefaultSchemaTableNameOrOptions extends
     | keyof (DefaultSchema["Tables"] & DefaultSchema["Views"])
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof (DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"] &
         DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Views"])
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1917,11 +3166,11 @@ export type TablesInsert<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1942,11 +3191,11 @@ export type TablesUpdate<
   DefaultSchemaTableNameOrOptions extends
     | keyof DefaultSchema["Tables"]
     | { schema: keyof DatabaseWithoutInternals },
-  TableName extends DefaultSchemaTableNameOrOptions extends {
+  TableName extends (DefaultSchemaTableNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaTableNameOrOptions["schema"]]["Tables"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaTableNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1967,11 +3216,11 @@ export type Enums<
   DefaultSchemaEnumNameOrOptions extends
     | keyof DefaultSchema["Enums"]
     | { schema: keyof DatabaseWithoutInternals },
-  EnumName extends DefaultSchemaEnumNameOrOptions extends {
+  EnumName extends (DefaultSchemaEnumNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[DefaultSchemaEnumNameOrOptions["schema"]]["Enums"]
-    : never = never,
+    : never) = never,
 > = DefaultSchemaEnumNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
@@ -1984,11 +3233,11 @@ export type CompositeTypes<
   PublicCompositeTypeNameOrOptions extends
     | keyof DefaultSchema["CompositeTypes"]
     | { schema: keyof DatabaseWithoutInternals },
-  CompositeTypeName extends PublicCompositeTypeNameOrOptions extends {
+  CompositeTypeName extends (PublicCompositeTypeNameOrOptions extends {
     schema: keyof DatabaseWithoutInternals
   }
     ? keyof DatabaseWithoutInternals[PublicCompositeTypeNameOrOptions["schema"]]["CompositeTypes"]
-    : never = never,
+    : never) = never,
 > = PublicCompositeTypeNameOrOptions extends {
   schema: keyof DatabaseWithoutInternals
 }
