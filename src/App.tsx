@@ -26,6 +26,8 @@ import InstructorDashboard from "./pages/InstructorDashboard";
 import StudentDashboard from "./pages/StudentDashboard";
 import SessionPlayback from "./pages/SessionPlayback";
 import Login from "./pages/Login";
+import OAuthConsent from "./pages/OAuthConsent";
+import NotionReturn from "./pages/NotionReturn";
 import Signup from "./pages/Signup";
 import DailyReports from "./pages/DailyReports";
 import AccessCatalogue from "./pages/AccessCatalogue";
@@ -36,9 +38,25 @@ import AdminCloudReports from "./pages/AdminCloudReports";
 import AiStatus from "./pages/AiStatus";
 import AdminProvisioningExport from "./pages/AdminProvisioningExport";
 import AdminAuditLog from "./pages/AdminAuditLog";
+import AdminReadinessAudit from "./pages/AdminReadinessAudit";
+import AdminReadinessTimeline from "./pages/AdminReadinessTimeline";
+import AdminReadinessMetrics from "./pages/AdminReadinessMetrics";
+import AdminAccessAudit from "./pages/AdminAccessAudit";
+import AdminLabAssignmentAudit from "./pages/AdminLabAssignmentAudit";
+import AdminCredentialValidation from "./pages/AdminCredentialValidation";
+import AdminImpersonation from "./pages/AdminImpersonation";
+import AdminWatchdogQueue from "./pages/AdminWatchdogQueue";
 import AdminSessionLifecycle from "./pages/AdminSessionLifecycle";
 import AdminProvisioningRetries from "./pages/AdminProvisioningRetries";
 import AdminProvisioningStatus from "./pages/AdminProvisioningStatus";
+import AdminProvisioningErrors from "./pages/AdminProvisioningErrors";
+import AdminPlatformAudit from "./pages/AdminPlatformAudit";
+import AccessRequests from "./pages/AccessRequests";
+import Applications from "./pages/Applications";
+import AdminApplications from "./pages/AdminApplications";
+import AdminWorkspaceLaunches from "./pages/AdminWorkspaceLaunches";
+import AdminSkillTrackLeads from "./pages/AdminSkillTrackLeads";
+import AdminAccessGrants from "./pages/AdminAccessGrants";
 import AdminManualLabGrants from "./pages/AdminManualLabGrants";
 import AdminCloudQuotas from "./pages/AdminCloudQuotas";
 import AdminNetworkHealth from "./pages/AdminNetworkHealth";
@@ -60,6 +78,8 @@ const App = () => (
               <Routes>
                 <Route path="/login" element={<Login />} />
                 <Route path="/signup" element={<Signup />} />
+                <Route path="/.lovable/oauth/consent" element={<OAuthConsent />} />
+                <Route path="/oauth/notion/return" element={<NotionReturn />} />
                 {/* Admin-only routes */}
                 <Route path="/" element={<RoleProtectedRoute allowedRoles={["admin"]}><Index /></RoleProtectedRoute>} />
                 <Route path="/vms" element={<RoleProtectedRoute allowedRoles={["admin"]}><VirtualMachines /></RoleProtectedRoute>} />
@@ -81,12 +101,28 @@ const App = () => (
                 <Route path="/admin/cloud-reports" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminCloudReports /></RoleProtectedRoute>} />
                 <Route path="/admin/provisioning-export" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><AdminProvisioningExport /></RoleProtectedRoute>} />
                 <Route path="/admin/provisioning-status" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><AdminProvisioningStatus /></RoleProtectedRoute>} />
+                <Route path="/admin/impersonation" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminImpersonation /></RoleProtectedRoute>} />
+                <Route path="/admin/credential-validation" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminCredentialValidation /></RoleProtectedRoute>} />
+                <Route path="/admin/access-audit" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminAccessAudit /></RoleProtectedRoute>} />
+                <Route path="/admin/readiness-audit" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminReadinessAudit /></RoleProtectedRoute>} />
+                <Route path="/admin/readiness-timeline" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminReadinessTimeline /></RoleProtectedRoute>} />
+                <Route path="/admin/readiness-metrics" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminReadinessMetrics /></RoleProtectedRoute>} />
+                <Route path="/admin/watchdog-queue" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminWatchdogQueue /></RoleProtectedRoute>} />
                 <Route path="/admin/audit-log" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminAuditLog /></RoleProtectedRoute>} />
+                <Route path="/admin/lab-assignment-audit" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminLabAssignmentAudit /></RoleProtectedRoute>} />
                 <Route path="/admin/session-lifecycle" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><AdminSessionLifecycle /></RoleProtectedRoute>} />
+                <Route path="/admin/access-requests" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><AccessRequests /></RoleProtectedRoute>} />
+                <Route path="/admin/platform-audit" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminPlatformAudit /></RoleProtectedRoute>} />
+                <Route path="/admin/provisioning-errors" element={<RoleProtectedRoute allowedRoles={["admin", "instructor"]}><AdminProvisioningErrors /></RoleProtectedRoute>} />
                 <Route path="/admin/provisioning-retries" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminProvisioningRetries /></RoleProtectedRoute>} />
+                <Route path="/admin/applications" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminApplications /></RoleProtectedRoute>} />
+                <Route path="/admin/workspace-launches" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminWorkspaceLaunches /></RoleProtectedRoute>} />
+                <Route path="/admin/skilltrack-leads" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminSkillTrackLeads /></RoleProtectedRoute>} />
+                <Route path="/admin/access-grants" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminAccessGrants /></RoleProtectedRoute>} />
                 <Route path="/admin/manual-grants" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminManualLabGrants /></RoleProtectedRoute>} />
                 <Route path="/admin/cloud-quotas" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminCloudQuotas /></RoleProtectedRoute>} />
                 <Route path="/admin/network-health" element={<RoleProtectedRoute allowedRoles={["admin"]}><AdminNetworkHealth /></RoleProtectedRoute>} />
+                <Route path="/applications" element={<ProtectedRoute><Applications /></ProtectedRoute>} />
                 <Route path="/cloud-access" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
                 <Route path="/cloud-access/:id" element={<ProtectedRoute><UserCloudAccess /></ProtectedRoute>} />
 

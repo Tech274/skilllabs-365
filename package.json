@@ -14,7 +14,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "verify": "bash scripts/verify.sh",
     "functions:check": "bash scripts/deno-check.sh",
-    "functions:test": "deno test --allow-all --no-check supabase/functions/"
+    "functions:test": "deno test --allow-all --no-check supabase/functions/",
+    "headers:generate": "npx --yes tsx scripts/generate-headers.ts",
+    "prebuild": "npx --yes tsx scripts/generate-headers.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
