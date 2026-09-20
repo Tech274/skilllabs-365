@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildLabWallet, endOfDayIst, formatMinutes, usedMinutesForTemplate } from "@/lib/lab-wallet";
+import {
+  buildLabWallet,
+  endOfDayIst,
+  formatMinutes,
+  isStartBlocked,
+  startBlockedMessage,
+  usedMinutesForTemplate,
+  walletEquation,
+} from "@/lib/lab-wallet";
 
 const NOW = Date.parse("2026-09-19T12:00:00Z");
 
@@ -55,5 +63,39 @@ describe("lab wallet", () => {
     expect(formatMinutes(45)).toBe("45m");
     expect(formatMinutes(120)).toBe("2h");
     expect(formatMinutes(95)).toBe("1h 35m");
+  });
+
+  it("shows allocated − used = remaining (demo 1200 − 40 = 1160)", () => {
+    const w = buildLabWallet(
+      { id: "a", duration: 1200, is_persistent: true },
+      [{ lab_template_id: "a", started_at: "2026-09-19T10:00:00Z", ended_at: "2026-09-19T10:40:00Z" }],
+      NOW,
+    );
+    expect(walletEquation(w)).toBe("1200 − 40 = 1160");
+    expect(isStartBlocked(w)).toBe(false);
+  });
+
+  it("blocks Start when minutes are exhausted before end date", () => {
+    const w = buildLabWallet(
+      {
+        id: "a",
+        duration: 1200,
+        is_persistent: true,
+        start_date: "2026-09-01T00:00:00Z",
+        end_date: "2026-12-31T00:00:00Z",
+      },
+      [
+        { lab_template_id: "a", started_at: "2026-09-19T10:00:00Z", ended_at: "2026-09-19T10:40:00Z" },
+        { lab_template_id: "a", started_at: "2026-09-01T00:00:00Z", ended_at: "2026-09-01T19:20:00Z" },
+      ],
+      NOW,
+    );
+    expect(w.usedMinutes).toBe(1200);
+    expect(w.remainingMinutes).toBe(0);
+    expect(w.exhausted).toBe(true);
+    expect(w.windowEnded).toBe(false);
+    expect(isStartBlocked(w)).toBe(true);
+    expect(startBlockedMessage(w)).toMatch(/Start is blocked/);
+    expect(startBlockedMessage(w)).toMatch(/not deleted/);
   });
 });

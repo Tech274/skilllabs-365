@@ -1,6 +1,6 @@
 import { CalendarRange, Clock, Wallet } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { formatMinutes, type LabWallet } from "@/lib/lab-wallet";
+import { formatMinutes, walletEquation, type LabWallet } from "@/lib/lab-wallet";
 
 /**
  * Learner-facing lab wallet: allocated − used = remaining.
@@ -55,10 +55,14 @@ export function LabWalletPanel({ wallet, className }: { wallet: LabWallet; class
         </p>
       )}
 
+      <p className="text-[10px] font-mono text-muted-foreground text-center">
+        {walletEquation(wallet)} min
+      </p>
+
       {(wallet.exhausted || wallet.windowEnded) && (
         <p className="flex items-center gap-1.5 text-[11px] text-destructive">
           <Clock className="h-3 w-3" />
-          {wallet.exhausted ? "Minutes used up" : "Lab window ended"} — the machine is deallocated and you are notified. Nothing is deleted.
+          {wallet.exhausted ? "Minutes used up" : "Lab window ended"} — Start is blocked. Machine is held (not deleted).
         </p>
       )}
     </div>
