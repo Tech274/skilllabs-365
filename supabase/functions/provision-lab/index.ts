@@ -567,6 +567,7 @@ Deno.serve(async (req) => {
           .insert({
             user_id: userId,
             lab_template_id: template.id,
+            provider: "aws",
             provider_account_id: aws.accountId,
             region: awsRegion,
             vm_size: instanceType,

@@ -14,6 +14,12 @@ import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning
 import { claimIdempotency, completeIdempotency, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
 import {
+  resolveAwsRuntime,
+  describeAwsInstance,
+  stopAwsInstance,
+  terminateAwsInstance,
+} from "../_shared/cloud-providers/aws-runtime.ts";
+import {
   reconcileProvisioningAgainstAzure,
   applyPromoteToRunning,
 } from "../_shared/azure-reconcile.ts";
@@ -124,7 +130,22 @@ interface WatchdogVm {
   status: string;
   expires_at: string | null;
   provider_account_id: string | null;
+  region?: string | null;
   created_at?: string | null;
+}
+
+async function providerOf(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  accountId?: string | null,
+): Promise<"azure" | "aws" | string> {
+  if (!accountId) return "azure";
+  const { data } = await supabase
+    .from("cloud_provider_accounts")
+    .select("provider")
+    .eq("id", accountId)
+    .maybeSingle();
+  return (data?.provider as string) || "azure";
 }
 
 Deno.serve(async (req) => {
@@ -189,12 +210,14 @@ Deno.serve(async (req) => {
       }
     }
 
-    // 0b. Reconcile DB status=provisioning → running when Azure PowerState/running.
-    // Prevents Lex-soak holds from staying "provisioning" forever (admin never polls).
+    // 0b. Reconcile DB status=provisioning → running when cloud instance is Running.
+    // Azure: PowerState/running. AWS: EC2 instance-state running.
+    // Prevents Lex-soak / learner holds from staying "provisioning" forever when
+    // the client never polls check-vm-status (or promote was RLS-blocked).
     if (!dryRun) {
       const { data: provisioningVms } = await supabase
         .from("virtual_machines")
-        .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, private_ip, created_at")
+        .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, private_ip, region, created_at")
         .eq("status", "provisioning")
         .not("azure_vm_id", "is", null)
         .limit(MAX_PER_RUN);
@@ -219,6 +242,24 @@ Deno.serve(async (req) => {
 
       for (const vm of provisioningVms ?? []) {
         try {
+          const provider = await providerOf(supabase, vm.provider_account_id);
+          if (provider === "aws") {
+            const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+            if (vm.region) aws.defaultRegion = String(vm.region);
+            const desc = await describeAwsInstance(aws, vm.azure_vm_id);
+            if (desc.state === "running") {
+              await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
+              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws provisioning→running`);
+            } else if (desc.state === "terminated" || desc.state === "shutting-down") {
+              await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm.id);
+              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws provisioning→failed`);
+            } else if (desc.state === "stopped" || desc.state === "stopping") {
+              await supabase.from("virtual_machines").update({ status: "stopped" }).eq("id", vm.id);
+              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws provisioning→stopped`);
+            }
+            continue;
+          }
+
           const az = await azureForEarly(vm.provider_account_id);
           const outcome = await reconcileProvisioningAgainstAzure(az, {
             azureVmId: vm.azure_vm_id,
@@ -242,7 +283,7 @@ Deno.serve(async (req) => {
     // 1. Labs past expires_at, plus labs wedged in provisioning far too long.
     const { data: expiredVms } = await supabase
       .from("virtual_machines")
-      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, created_at")
+      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, region, created_at")
       .in("status", ["provisioning", "starting", "running", "deallocated"])
       .not("expires_at", "is", null)
       .lt("expires_at", nowIso)
@@ -250,7 +291,7 @@ Deno.serve(async (req) => {
 
     const { data: stuckVms } = await supabase
       .from("virtual_machines")
-      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, created_at")
+      .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, region, created_at")
       .eq("status", "provisioning")
       .lt("created_at", stuckCutoff)
       .limit(MAX_PER_RUN);
@@ -309,7 +350,7 @@ Deno.serve(async (req) => {
       if (s.vm_id && !targets.has(s.vm_id)) {
         const { data: vm } = await supabase
           .from("virtual_machines")
-          .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, created_at")
+          .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, region, created_at")
           .eq("id", s.vm_id)
           .not("status", "in", "(terminated,failed,deallocated)")
           .maybeSingle();
@@ -383,68 +424,114 @@ Deno.serve(async (req) => {
         let promotedRunning = false;
         let privateIp: string | null = null;
 
-        // CRITICAL (Lex soak): stuck_provisioning must Azure-check FIRST.
-        // If PowerState/running → promote DB to running (+ IP); NEVER deallocate.
-        // Only fail/soft-dealloc when Azure is still creating / failed / not found.
+        // CRITICAL (Lex soak): stuck_provisioning must cloud-check FIRST.
+        // If instance is Running → promote DB to running (+ IP); NEVER deallocate/stop.
+        // Only fail/soft-release when still creating / failed / not found.
+        const cloudProvider = await providerOf(supabase, vm.provider_account_id);
         if (endedReason === "stuck_provisioning" && vm.azure_vm_id) {
           try {
-            const az = await azureFor(vm.provider_account_id);
-            const outcome = await reconcileProvisioningAgainstAzure(az, {
-              azureVmId: vm.azure_vm_id,
-              currentPrivateIp: null,
-            });
-            if (outcome.kind === "promoted") {
-              await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
-              promotedRunning = true;
-              privateIp = outcome.private_ip;
-              nextStatus = "running";
-              await timeline.success(SOURCE, "watchdog-reconcile", "Stuck provisioning was actually Azure Running — promoted to running", {
-                private_ip: privateIp,
+            if (cloudProvider === "aws") {
+              const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+              if (vm.region) aws.defaultRegion = String(vm.region);
+              const desc = await describeAwsInstance(aws, vm.azure_vm_id);
+              if (desc.state === "running") {
+                await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
+                promotedRunning = true;
+                privateIp = desc.privateIp;
+                nextStatus = "running";
+                await timeline.success(SOURCE, "watchdog-reconcile", "Stuck provisioning was actually AWS running — promoted to running", {
+                  private_ip: privateIp,
+                });
+                const response = {
+                  success: true,
+                  vm_id: vm.id,
+                  azure_deallocated: false,
+                  azure_deleted: false,
+                  status: "running",
+                  ended_reason: "reconciled_running",
+                  correlation_id: correlationId,
+                  private_ip: privateIp,
+                };
+                await completeIdempotency(supabase, { key, userId, action: "watchdog-cleanup", response });
+                actions.push(`vm ${vm.id.slice(0, 8)}: stuck→running (aws instance running; no stop)`);
+                continue;
+              }
+              await timeline.start(SOURCE, "watchdog-cleanup", `Stuck provisioning AWS state=${desc.state} — releasing`, {
+                aws_state: desc.state,
               });
-              const response = {
-                success: true,
-                vm_id: vm.id,
-                azure_deallocated: false,
-                azure_deleted: false,
-                status: "running",
-                ended_reason: "reconciled_running",
-                correlation_id: correlationId,
-                private_ip: privateIp,
-              };
-              await completeIdempotency(supabase, { key, userId, action: "watchdog-cleanup", response });
-              actions.push(`vm ${vm.id.slice(0, 8)}: stuck→running (azure PowerState/running; no dealloc)`);
-              continue;
-            }
-            // mapped failed/stopped/deallocated or still_provisioning / unavailable → fall through to soft/hard release
-            if (outcome.kind === "mapped") {
-              await timeline.start(SOURCE, "watchdog-cleanup", `Stuck provisioning Azure mapped to ${outcome.status} — releasing`, {
-                azure_mapped: outcome.status,
+            } else {
+              const az = await azureFor(vm.provider_account_id);
+              const outcome = await reconcileProvisioningAgainstAzure(az, {
+                azureVmId: vm.azure_vm_id,
+                currentPrivateIp: null,
               });
+              if (outcome.kind === "promoted") {
+                await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+                promotedRunning = true;
+                privateIp = outcome.private_ip;
+                nextStatus = "running";
+                await timeline.success(SOURCE, "watchdog-reconcile", "Stuck provisioning was actually Azure Running — promoted to running", {
+                  private_ip: privateIp,
+                });
+                const response = {
+                  success: true,
+                  vm_id: vm.id,
+                  azure_deallocated: false,
+                  azure_deleted: false,
+                  status: "running",
+                  ended_reason: "reconciled_running",
+                  correlation_id: correlationId,
+                  private_ip: privateIp,
+                };
+                await completeIdempotency(supabase, { key, userId, action: "watchdog-cleanup", response });
+                actions.push(`vm ${vm.id.slice(0, 8)}: stuck→running (azure PowerState/running; no dealloc)`);
+                continue;
+              }
+              // mapped failed/stopped/deallocated or still_provisioning / unavailable → fall through to soft/hard release
+              if (outcome.kind === "mapped") {
+                await timeline.start(SOURCE, "watchdog-cleanup", `Stuck provisioning Azure mapped to ${outcome.status} — releasing`, {
+                  azure_mapped: outcome.status,
+                });
+              }
             }
           } catch (e) {
             await timeline.failed(
               SOURCE,
-              "azure-reconcile",
-              e instanceof Error ? e.message : "Azure reconcile failed; proceeding to soft release",
+              cloudProvider === "aws" ? "aws-reconcile" : "azure-reconcile",
+              e instanceof Error ? e.message : "Cloud reconcile failed; proceeding to soft release",
             );
           }
         }
 
         if (!promotedRunning && vm.azure_vm_id) {
           try {
-            const az = await azureFor(vm.provider_account_id);
-            const vmName = extractVmName(vm.azure_vm_id);
-            if (hardDeleteAllowed) {
-              // Explicit opt-in only — never the default expiry path.
-              azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+            if (cloudProvider === "aws") {
+              const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+              if (vm.region) aws.defaultRegion = String(vm.region);
+              if (hardDeleteAllowed) {
+                await terminateAwsInstance(aws, vm.azure_vm_id);
+                azureDeleted = true;
+              } else {
+                await stopAwsInstance(aws, vm.azure_vm_id);
+                azureDeallocated = true;
+              }
             } else {
-              azureDeallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+              const az = await azureFor(vm.provider_account_id);
+              const vmName = extractVmName(vm.azure_vm_id);
+              if (hardDeleteAllowed) {
+                // Explicit opt-in only — never the default expiry path.
+                azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+              } else {
+                azureDeallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+              }
             }
           } catch (e) {
             await timeline.failed(
               SOURCE,
-              hardDeleteAllowed ? "azure-delete" : "azure-deallocate",
-              e instanceof Error ? e.message : "Azure action failed",
+              hardDeleteAllowed
+                ? (cloudProvider === "aws" ? "aws-terminate" : "azure-delete")
+                : (cloudProvider === "aws" ? "aws-stop" : "azure-deallocate"),
+              e instanceof Error ? e.message : "Cloud action failed",
             );
           }
         }
