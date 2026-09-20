@@ -28,6 +28,8 @@ export type ResumableVm = {
   private_ip: string | null;
   provider_account_id: string | null;
   expires_at: string | null;
+  /** Prefer this region for AWS StartInstances (same allocation). */
+  region?: string | null;
 };
 
 /** Newest reusable VM this learner already holds for this template, if any. */
@@ -37,7 +39,7 @@ export async function findResumableVm(
 ): Promise<ResumableVm | null> {
   const { data } = await supabase
     .from("virtual_machines")
-    .select("id, status, azure_vm_id, private_ip, provider_account_id, expires_at")
+    .select("id, status, azure_vm_id, private_ip, provider_account_id, expires_at, region")
     .eq("user_id", args.userId)
     .eq("lab_template_id", args.labTemplateId)
     .in("status", [...LIVE_VM_STATUSES, ...RESUMABLE_VM_STATUSES])
@@ -80,6 +82,7 @@ export async function startCloudVm(
 
   if (provider === "aws") {
     const rt = await resolveAwsRuntime(supabase, vm.provider_account_id);
+    if (vm.region) rt.defaultRegion = String(vm.region);
     const res = await ec2Action(rt, "StartInstances", { "InstanceId.1": vm.azure_vm_id });
     if (!res.ok) {
       console.error(`StartInstances failed (${res.status}): ${res.text.slice(0, 300)}`);
