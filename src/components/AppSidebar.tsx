@@ -1,7 +1,9 @@
 import {
-  LayoutDashboard, Server, Users, Globe, DollarSign, Activity, Shield,
-  Settings, Cloud, BookOpen, History, LogOut, GraduationCap, FileText,
-  Loader2, X, KeyRound, Sparkles, Download, RotateCcw, MonitorPlay, ClipboardList, Unlock, Gauge } from "lucide-react";
+  LayoutDashboard, Server, Users, Globe, DollarSign, Activity,
+  Cloud, BookOpen, LogOut, GraduationCap, FileText,
+  Loader2, X, KeyRound, Sparkles, MonitorPlay, ClipboardList, Unlock, Gauge, Settings,
+  ChevronRight, Layers3, AppWindow,
+} from "lucide-react";
 
 import { NavLink } from "@/components/NavLink";
 import { useLocation } from "react-router-dom";
@@ -12,34 +14,47 @@ import { Progress } from "@/components/ui/progress";
 import {
   Sidebar, SidebarContent, SidebarGroup, SidebarGroupContent,
   SidebarGroupLabel, SidebarMenu, SidebarMenuButton, SidebarMenuItem,
-  SidebarHeader, SidebarFooter, useSidebar,
+  SidebarHeader, SidebarFooter, SidebarMenuSub, SidebarMenuSubButton,
+  SidebarMenuSubItem, useSidebar,
 } from "@/components/ui/sidebar";
 import { useEffect, useState } from "react";
-import { cn } from "@/lib/utils";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 
-const adminItems = [
+const adminPrimaryItems = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
-  { title: "Virtual Machines", url: "/vms", icon: Server },
+  { title: "VMs", url: "/vms", icon: Server },
   { title: "Sessions", url: "/sessions", icon: Users },
+  { title: "Workspaces", url: "/admin/workspace-launches", icon: AppWindow },
+  { title: "Applications", url: "/admin/applications", icon: Layers3 },
+  { title: "Labs", url: "/labs", icon: BookOpen },
+  { title: "Lab Grants", url: "/admin/manual-grants", icon: Unlock },
+  { title: "Access Catalogue", url: "/admin/access-catalogue", icon: KeyRound },
+  { title: "Users", url: "/users", icon: Users },
+];
+
+const cloudAndCostItems = [
   { title: "Regions", url: "/regions", icon: Globe },
   { title: "Cost Analytics", url: "/costs", icon: DollarSign },
-  { title: "Lab Management", url: "/labs", icon: BookOpen },
-  { title: "Cloud Access Catalogue", url: "/admin/access-catalogue", icon: KeyRound },
-  { title: "Lab Grants", url: "/admin/manual-grants", icon: Unlock },
+  { title: "Cloud Quotas", url: "/admin/cloud-quotas", icon: Gauge },
   { title: "Cloud Reports", url: "/admin/cloud-reports", icon: FileText },
   { title: "Resource Providers", url: "/admin/resource-providers", icon: Cloud },
-  { title: "Cloud Quotas", url: "/admin/cloud-quotas", icon: Gauge },
+  { title: "Daily Reports", url: "/reports", icon: FileText },
+];
+
+const provisioningRoutes = [
+  "/admin/provisioning-status",
+  "/admin/provisioning-retries",
+  "/admin/provisioning-export",
+];
+
+const auditItems = [
+  { title: "Session Lifecycle", url: "/admin/session-lifecycle", icon: MonitorPlay },
+];
+
+const advancedItems = [
   { title: "Network Health", url: "/admin/network-health", icon: Activity },
   { title: "AI Status", url: "/admin/ai-status", icon: Sparkles },
-  { title: "Provisioning Export", url: "/admin/provisioning-export", icon: Download },
-  { title: "Provisioning Status", url: "/admin/provisioning-status", icon: Activity },
-  { title: "Provisioning Retries", url: "/admin/provisioning-retries", icon: RotateCcw },
-  { title: "Session Lifecycle", url: "/admin/session-lifecycle", icon: MonitorPlay },
-  { title: "Audit Log", url: "/admin/audit-log", icon: ClipboardList },
-  { title: "Audit Log", url: "/audit-log", icon: History },
-  { title: "User Management", url: "/users", icon: Users },
-  { title: "Daily Reports", url: "/reports", icon: FileText },
-
+  { title: "Handoff leads", url: "/admin/skilltrack-leads", icon: Users },
 ];
 
 const instructorItems = [
@@ -52,12 +67,6 @@ const studentItems = [
   { title: "Cloud Access", url: "/cloud-access", icon: KeyRound },
 ];
 
-
-const systemItems = [
-  { title: "Health", url: "/health", icon: Activity },
-  { title: "Security", url: "/security", icon: Shield },
-  { title: "Settings", url: "/settings", icon: Settings },
-];
 
 const SignOutButton = ({ collapsed }: { collapsed?: boolean }) => {
   const { signOut } = useAuth();
@@ -126,10 +135,25 @@ export function AppSidebar() {
   const { state } = useSidebar();
   const collapsed = state === "collapsed";
   const location = useLocation();
-  const { role, isAdmin, isSuperAdmin, isInstructor } = useAuth();
+  const { isAdmin, isSuperAdmin, isInstructor } = useAuth();
   const isActive = (path: string) => location.pathname === path;
+  const cloudAndCostActive = cloudAndCostItems.some((item) => isActive(item.url));
+  const advancedRoutes = [
+    ...provisioningRoutes,
+    "/admin/audit-log",
+    ...auditItems.map((item) => item.url),
+    ...advancedItems.map((item) => item.url),
+  ];
+  const advancedActive = advancedRoutes.some(isActive);
+  const [cloudAndCostOpen, setCloudAndCostOpen] = useState(cloudAndCostActive);
+  const [advancedOpen, setAdvancedOpen] = useState(advancedActive);
 
-  const navItems = isAdmin ? adminItems : isInstructor ? instructorItems : studentItems;
+  useEffect(() => {
+    if (cloudAndCostActive) setCloudAndCostOpen(true);
+    if (advancedActive) setAdvancedOpen(true);
+  }, [cloudAndCostActive, advancedActive]);
+
+  const navItems = isInstructor ? instructorItems : studentItems;
   const roleLabel = isSuperAdmin ? "Super Admin" : isAdmin ? "Platform Admin" : isInstructor ? "Instructor" : "Student";
 
   return (
@@ -149,12 +173,12 @@ export function AppSidebar() {
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel>{isAdmin ? "Operations" : "Navigation"}</SidebarGroupLabel>
+          <SidebarGroupLabel>{isAdmin ? "Primary" : "Navigation"}</SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navItems.map((item) => (
+              {(isAdmin ? adminPrimaryItems : navItems).map((item) => (
                 <SidebarMenuItem key={item.url}>
-                  <SidebarMenuButton asChild isActive={isActive(item.url)}>
+                  <SidebarMenuButton asChild isActive={isActive(item.url)} tooltip={item.title}>
                     <NavLink to={item.url} end>
                       <item.icon className="h-4 w-4" />
                       {!collapsed && <span>{item.title}</span>}
@@ -166,23 +190,99 @@ export function AppSidebar() {
           </SidebarGroupContent>
         </SidebarGroup>
         {isAdmin && (
-          <SidebarGroup>
-            <SidebarGroupLabel>System</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {systemItems.map((item) => (
-                  <SidebarMenuItem key={item.url}>
-                    <SidebarMenuButton asChild isActive={isActive(item.url)}>
-                      <NavLink to={item.url} end>
-                        <item.icon className="h-4 w-4" />
-                        {!collapsed && <span>{item.title}</span>}
-                      </NavLink>
-                    </SidebarMenuButton>
-                  </SidebarMenuItem>
-                ))}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
+          <>
+            <Collapsible open={cloudAndCostOpen} onOpenChange={setCloudAndCostOpen} asChild>
+              <SidebarGroup>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <CollapsibleTrigger asChild>
+                        <SidebarMenuButton tooltip="Cloud & cost" isActive={cloudAndCostActive}>
+                          <Layers3 />
+                          {!collapsed && <span>Cloud &amp; cost</span>}
+                          {!collapsed && <ChevronRight className="ml-auto transition-transform duration-200 data-[state=open]:rotate-90" />}
+                        </SidebarMenuButton>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <SidebarMenuSub>
+                          {cloudAndCostItems.map((item) => (
+                            <SidebarMenuSubItem key={item.url}>
+                              <SidebarMenuSubButton asChild isActive={isActive(item.url)}>
+                                <NavLink to={item.url} end>
+                                  <item.icon />
+                                  <span>{item.title}</span>
+                                </NavLink>
+                              </SidebarMenuSubButton>
+                            </SidebarMenuSubItem>
+                          ))}
+                        </SidebarMenuSub>
+                      </CollapsibleContent>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            </Collapsible>
+
+            <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} asChild>
+              <SidebarGroup>
+                <SidebarGroupContent>
+                  <SidebarMenu>
+                    <SidebarMenuItem>
+                      <CollapsibleTrigger asChild>
+                        <SidebarMenuButton tooltip="Advanced" isActive={advancedActive}>
+                          <Settings />
+                          {!collapsed && <span>Advanced</span>}
+                          {!collapsed && <ChevronRight className="ml-auto transition-transform duration-200 data-[state=open]:rotate-90" />}
+                        </SidebarMenuButton>
+                      </CollapsibleTrigger>
+                      <CollapsibleContent>
+                        <SidebarMenuSub>
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton asChild isActive={provisioningRoutes.some(isActive)}>
+                              <NavLink to="/admin/provisioning-status" end>
+                                <Activity />
+                                <span>Provisioning</span>
+                              </NavLink>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                          <SidebarMenuSubItem>
+                            <SidebarMenuSubButton asChild isActive={isActive("/admin/audit-log")}>
+                              <NavLink to="/admin/audit-log" end>
+                                <ClipboardList />
+                                <span>Audit &amp; logs</span>
+                              </NavLink>
+                            </SidebarMenuSubButton>
+                            <SidebarMenuSub className="mx-2">
+                              {auditItems.map((item) => (
+                                <SidebarMenuSubItem key={item.url}>
+                                  <SidebarMenuSubButton asChild size="sm" isActive={isActive(item.url)}>
+                                    <NavLink to={item.url} end>
+                                      <item.icon />
+                                      <span>{item.title}</span>
+                                    </NavLink>
+                                  </SidebarMenuSubButton>
+                                </SidebarMenuSubItem>
+                              ))}
+                            </SidebarMenuSub>
+                          </SidebarMenuSubItem>
+                          {advancedItems.map((item) => (
+                            <SidebarMenuSubItem key={item.url}>
+                              <SidebarMenuSubButton asChild isActive={isActive(item.url)}>
+                                <NavLink to={item.url} end>
+                                  <item.icon />
+                                  <span>{item.title}</span>
+                                </NavLink>
+                              </SidebarMenuSubButton>
+                            </SidebarMenuSubItem>
+                          ))}
+                        </SidebarMenuSub>
+                      </CollapsibleContent>
+                    </SidebarMenuItem>
+                  </SidebarMenu>
+                </SidebarGroupContent>
+              </SidebarGroup>
+            </Collapsible>
+          </>
         )}
       </SidebarContent>
       <SidebarFooter className="p-4 space-y-2">

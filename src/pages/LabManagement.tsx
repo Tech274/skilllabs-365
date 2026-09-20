@@ -426,6 +426,54 @@ export default function LabManagement() {
                   <Input type="number" value={form.duration} onChange={e => setForm({ ...form, duration: Number(e.target.value) })} disabled={form.is_persistent} />
                 </div>
               </div>
+              {form.is_persistent && (
+                <div className="space-y-3 rounded-lg border border-border p-3">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Start date (IST)</Label>
+                      <Input
+                        type="date"
+                        value={form.start_date}
+                        onChange={e => setForm({ ...form, start_date: e.target.value })}
+                      />
+                    </div>
+                    <div className="space-y-2">
+                      <Label>End date (IST)</Label>
+                      <Input
+                        type="date"
+                        value={form.end_date}
+                        min={form.start_date || undefined}
+                        onChange={e => setForm({ ...form, end_date: e.target.value })}
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="space-y-2">
+                      <Label>Duration helper (days)</Label>
+                      <Input
+                        type="number"
+                        min={1}
+                        placeholder="e.g. 30"
+                        value={durationDays}
+                        onChange={e => {
+                          const v = e.target.value;
+                          setDurationDays(v);
+                          const computed = endDateFromDuration(form.start_date, Number(v));
+                          if (computed) setForm(f => ({ ...f, end_date: computed }));
+                        }}
+                      />
+                    </div>
+                  </div>
+                  {windowError ? (
+                    <p className="text-xs text-destructive">{windowError}</p>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">
+                      Access runs to end of day IST on the end date, then the lab is deallocated and the learner is
+                      notified — never silently terminated. A disconnect is not a deallocation.
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label>Idle Timeout (minutes)</Label>
