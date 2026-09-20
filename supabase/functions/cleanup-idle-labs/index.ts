@@ -11,7 +11,7 @@ import {
   resolveAwsRuntime, stopAwsInstance, terminateAwsInstance, describeAwsInstance,
 } from "../_shared/cloud-providers/aws-runtime.ts";
 import { startCloudVm, RESUMABLE_VM_STATUSES } from "../_shared/cloud-providers/vm-resume.ts";
-import { buildWalletSnapshot } from "../_shared/lab-wallet.ts";
+import { buildWalletSnapshot, walletBlockMessage } from "../_shared/lab-wallet.ts";
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -232,8 +232,9 @@ Deno.serve(async (req) => {
     // Student-callable actions (scoped to the caller's own VM):
     //   cancel-provisioning — hard cancel while provisioning
     //   learner-leave       — Leave / soft-stop: end session (wallet deduct) + deallocate, never delete
+    //   start-vm            — Start-from-deallocated: resume SAME allocation (owner + wallet gate)
     // Everything else stays admin / service-role only.
-    const auth = (action === "cancel-provisioning" || action === "learner-leave")
+    const auth = (action === "cancel-provisioning" || action === "learner-leave" || action === "start-vm")
       ? await requireUser(req)
       : await requireAdmin(req);
     if (auth instanceof Response) return auth;
@@ -439,7 +440,7 @@ Deno.serve(async (req) => {
     if ((action === "stop-vm" || action === "delete-vm" || action === "start-vm") && targetVmId) {
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status, provider_account_id, region, private_ip, expires_at")
+        .select("id, azure_vm_id, status, provider_account_id, region, private_ip, expires_at, user_id, lab_template_id")
         .eq("id", targetVmId)
         .maybeSingle();
 
@@ -449,8 +450,12 @@ Deno.serve(async (req) => {
         });
       }
 
-      // Admin Start: power the SAME allocation back on (never provision a new VM).
+      // Start-from-deallocated: power the SAME allocation back on (never provision a new VM).
+      // Learner (owner) may resume when wallet allows; admin may start any VM.
       if (action === "start-vm") {
+        const forbidden = await requireOwnerOrAdmin(auth, (vm as { user_id?: string | null }).user_id);
+        if (forbidden) return forbidden;
+
         const status = String(vm.status || "").toLowerCase();
         if (!(RESUMABLE_VM_STATUSES as readonly string[]).includes(status)) {
           return new Response(JSON.stringify({
@@ -466,6 +471,88 @@ Deno.serve(async (req) => {
             status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
+
+        // Admin / service-role override skips the wallet gate. Learners must pass
+        // the same LAB_MINUTES_EXHAUSTED / LAB_WINDOW_ENDED checks as provision-lab.
+        // Eligibility: own deallocated/stopped VM when template is_persistent OR
+        // wallet remaining + window open (walletBlockMessage covers both).
+        let isPlatformAdmin = auth.isServiceRole;
+        if (!isPlatformAdmin) {
+          const { data: adminFlag } = await supabase.rpc("is_platform_admin", { _user_id: auth.userId });
+          isPlatformAdmin = adminFlag === true;
+        }
+        if (!isPlatformAdmin) {
+          const labTemplateId = (vm as { lab_template_id?: string | null }).lab_template_id;
+          const ownerUserId = (vm as { user_id?: string | null }).user_id;
+          if (!labTemplateId || !ownerUserId) {
+            return new Response(JSON.stringify({
+              error: "VM is missing lab template or owner — cannot evaluate Start wallet gate",
+              vm_id: targetVmId,
+              code: "START_WALLET_CONTEXT_MISSING",
+            }), {
+              status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          const { data: tpl } = await supabase
+            .from("lab_templates")
+            .select("id, duration, is_persistent, end_date")
+            .eq("id", labTemplateId)
+            .maybeSingle();
+          if (!tpl) {
+            return new Response(JSON.stringify({
+              error: "Lab template not found for this VM",
+              vm_id: targetVmId,
+            }), {
+              status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          const { data: usage } = await supabase
+            .from("sessions")
+            .select("started_at, ended_at")
+            .eq("user_id", ownerUserId)
+            .eq("lab_template_id", labTemplateId)
+            .limit(500);
+          const snap = buildWalletSnapshot({
+            duration: tpl.duration,
+            endDate: tpl.end_date,
+            isPersistent: tpl.is_persistent,
+            sessions: usage ?? [],
+          });
+          const blocked = walletBlockMessage(snap);
+          // Same gate as provision-lab: LAB_WINDOW_ENDED / LAB_MINUTES_EXHAUSTED.
+          // Soft-stop never purged the VM — Start is simply refused until Ops extends.
+          if (blocked) {
+            return new Response(JSON.stringify({
+              error: blocked.error,
+              code: blocked.code,
+              vm_id: targetVmId,
+              wallet: {
+                allocated_minutes: snap.allocatedMinutes,
+                used_minutes: snap.usedMinutes,
+                remaining_minutes: snap.remainingMinutes,
+                exhausted: snap.exhausted,
+                window_ended: snap.windowEnded,
+              },
+            }), {
+              status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          // Eligibility for learners: is_persistent OR wallet remaining (window open).
+          // walletBlockMessage already enforced window/exhausted; remaining>0 (or
+          // unmetered duration=0) covers the non-persistent same-VM resume case.
+          const remainingOk = snap.remainingMinutes > 0 || snap.allocatedMinutes === 0;
+          if (!Boolean(tpl.is_persistent) && !remainingOk) {
+            return new Response(JSON.stringify({
+              error:
+                `Lab minutes used up (${snap.allocatedMinutes} allocated, ${snap.usedMinutes} used, 0 remaining). Start is blocked until more minutes are granted. Your lab machine is held (not deleted).`,
+              code: "LAB_MINUTES_EXHAUSTED",
+              vm_id: targetVmId,
+            }), {
+              status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+        }
+
         const provider = await providerOf(supabase, vm.provider_account_id);
         const started = await startCloudVm(supabase, provider, {
           id: vm.id,
@@ -487,19 +574,23 @@ Deno.serve(async (req) => {
           ended_reason: null,
           ended_at: null,
         }).eq("id", targetVmId);
+        const startReason = actionReason || (isPlatformAdmin ? "admin_start" : "learner_start");
         console.log(JSON.stringify({
           event: "vm_start",
           vm_id: targetVmId,
           actor: auth.userId,
           region: vm.region ?? null,
           provider,
-          reason: actionReason || "admin_start",
+          reason: startReason,
+          admin_override: isPlatformAdmin,
         }));
         return new Response(JSON.stringify({
           success: true,
           action: "started",
           vm_id: targetVmId,
           status: "starting",
+          reminted: true,
+          reason: startReason,
         }), {
           status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });

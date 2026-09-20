@@ -26,6 +26,7 @@ import { HUB_WHATSAPP_UPSELL, readStoredHandoff } from "@/lib/skilltrack-handoff
 import { MessageCircle } from "lucide-react";
 import { LabWalletPanel } from "@/components/LabWalletPanel";
 import { buildLabWallet, isStartBlocked, startBlockedMessage } from "@/lib/lab-wallet";
+import { isResumableStatus, remintAndWaitRunning } from "@/lib/lab-remint";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -48,18 +49,33 @@ export default function StudentDashboard() {
   const [launchErrors, setLaunchErrors] = useState<Record<string, string>>({});
   const [launchErrorPayloads, setLaunchErrorPayloads] = useState<Record<string, { missing_fields?: string[]; setting?: string; suggestion?: string } | null>>({});
   const [hasLabGrant, setHasLabGrant] = useState<boolean | null>(null);
+  /** Own allocations keyed by lab_template_id — Start resumes same vm_id when deallocated. */
+  const [ownedVmsByLab, setOwnedVmsByLab] = useState<Record<string, { id: string; status: string }>>({});
   const handoff = readStoredHandoff();
 
   useEffect(() => {
     if (!user) return;
     const load = async () => {
-      const [labRes, sessionRes, grants] = await Promise.all([
+      const [labRes, sessionRes, grants, vmRes] = await Promise.all([
         supabase.from("lab_templates").select("*").eq("status", "published").order("name"),
         supabase.from("sessions").select("*").eq("user_id", user.id).order("started_at", { ascending: false }),
         listGrants({ userId: user.id }).catch(() => []),
+        supabase
+          .from("virtual_machines")
+          .select("id, status, lab_template_id, created_at")
+          .eq("user_id", user.id)
+          .in("status", ["deallocated", "stopped", "provisioning", "starting", "running", "idle"])
+          .order("created_at", { ascending: false }),
       ]);
       setLabs(labRes.data ?? []);
       setSessions(sessionRes.data ?? []);
+      const byLab: Record<string, { id: string; status: string }> = {};
+      for (const row of vmRes.data ?? []) {
+        const tid = row.lab_template_id as string | null;
+        if (!tid || byLab[tid]) continue; // newest first
+        byLab[tid] = { id: row.id as string, status: String(row.status) };
+      }
+      setOwnedVmsByLab(byLab);
       const active = (grants || []).filter((g: GrantRow) => g.active !== false);
       const cert = (handoff?.cert || "").toLowerCase();
       if (!cert) {
@@ -94,6 +110,31 @@ export default function StudentDashboard() {
     setLaunchingId(lab.id);
     setLaunchErrors((prev) => ({ ...prev, [lab.id]: "" }));
     try {
+      const existing = ownedVmsByLab[lab.id];
+      // Start-from-deallocated: resume SAME vm_id via start-vm.
+      // Do NOT call provision-lab for remint — non-persistent would spin a NEW VM (Lex refused).
+      if (existing && isResumableStatus(existing.status)) {
+        toast({ title: "Starting lab", description: "Resuming your existing machine…" });
+        provisioning.startProvisioning(lab.id, lab.name, existing.id);
+        await remintAndWaitRunning({
+          vmId: existing.id,
+          labTemplateId: lab.id,
+        });
+        setOwnedVmsByLab((prev) => ({
+          ...prev,
+          [lab.id]: { id: existing.id, status: "running" },
+        }));
+        toast({ title: "Almost ready", description: "Finishing secure desktop setup…" });
+        return;
+      }
+
+      // Live allocation already exists — hand the same vm_id into the provisioner poll.
+      if (existing && ["provisioning", "starting", "running", "idle"].includes(existing.status.toLowerCase())) {
+        provisioning.startProvisioning(lab.id, lab.name, existing.id);
+        toast({ title: "Lab starting", description: "Your lab is getting ready…" });
+        return;
+      }
+
       const { data, error } = await supabase.functions.invoke("provision-lab", {
         body: { lab_template_id: lab.id },
         headers: idempotencyHeaders(`provision:${lab.id}`),
@@ -105,6 +146,13 @@ export default function StudentDashboard() {
           throw new Error(String(data.error));
         }
         throw new Error(await readFunctionError(error, data));
+      }
+
+      if (data?.vm_id) {
+        setOwnedVmsByLab((prev) => ({
+          ...prev,
+          [lab.id]: { id: data.vm_id, status: String(data.status ?? "provisioning") },
+        }));
       }
 
       if (data.status === "running") {
@@ -302,15 +350,23 @@ export default function StudentDashboard() {
                           }
                           onClick={() => handleLaunchLab(lab)}
                         >
-                          {(launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)) ? (
-                            <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Provisioning...</>
-                          ) : blocked ? (
-                            <><AlertCircle className="h-3.5 w-3.5" /> {wallet.exhausted ? "Minutes used up" : "Window ended"}</>
-                          ) : launchErrors[lab.id] ? (
-                            <><AlertCircle className="h-3.5 w-3.5" /> Retry Launch</>
-                          ) : (
-                            <><Play className="h-3.5 w-3.5" /> Launch Lab</>
-                          )}
+                          {(() => {
+                            const owned = ownedVmsByLab[lab.id];
+                            const canResume = owned && isResumableStatus(owned.status);
+                            if (launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)) {
+                              return <><Loader2 className="h-3.5 w-3.5 animate-spin" /> {canResume ? "Starting…" : "Provisioning..."}</>;
+                            }
+                            if (blocked) {
+                              return <><AlertCircle className="h-3.5 w-3.5" /> {wallet.exhausted ? "Minutes used up" : "Window ended"}</>;
+                            }
+                            if (launchErrors[lab.id]) {
+                              return <><AlertCircle className="h-3.5 w-3.5" /> {canResume ? "Retry Start" : "Retry Launch"}</>;
+                            }
+                            if (canResume) {
+                              return <><Play className="h-3.5 w-3.5" /> Start</>;
+                            }
+                            return <><Play className="h-3.5 w-3.5" /> Launch Lab</>;
+                          })()}
                         </Button>
                       </>
                     );
