@@ -28,12 +28,15 @@ Deno.serve(async (req) => {
     const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
     if (forbidden) return forbidden;
 
-    if (vm.status !== "provisioning") {
+    // Promote both fresh provision AND Start-from-deallocated (status=starting).
+    // Admin Start / persistent remint set "starting" after cloud StartInstances;
+    // without this gate Hub stays Starting forever (same class of bug as PR #22 RLS).
+    if (vm.status !== "provisioning" && vm.status !== "starting") {
       return jsonResponse({ status: vm.status });
     }
 
     if (!vm.azure_vm_id) {
-      return jsonResponse({ status: "provisioning" });
+      return jsonResponse({ status: vm.status });
     }
 
     const admin = serviceClient();
@@ -67,10 +70,15 @@ Deno.serve(async (req) => {
         return jsonResponse({ status: "failed" });
       }
       if (desc.state === "stopped" || desc.state === "stopping") {
+        // StartInstances in flight can still report stopped briefly — do not
+        // regress Hub "starting" back to stopped (Start-from-deallocated).
+        if (vm.status === "starting") {
+          return jsonResponse({ status: "starting" });
+        }
         await admin.from("virtual_machines").update({ status: "stopped" }).eq("id", vm_id);
         return jsonResponse({ status: "stopped" });
       }
-      return jsonResponse({ status: "provisioning" });
+      return jsonResponse({ status: vm.status });
     }
 
     const azure = await resolveAzureRuntime(admin, vm.provider_account_id);
@@ -91,11 +99,18 @@ Deno.serve(async (req) => {
     }
 
     if (outcome.kind === "mapped") {
+      // Same Start-in-flight guard for Azure deallocate/stopped flicker.
+      if (
+        vm.status === "starting" &&
+        (outcome.status === "stopped" || outcome.status === "deallocated")
+      ) {
+        return jsonResponse({ status: "starting" });
+      }
       await admin.from("virtual_machines").update({ status: outcome.status }).eq("id", vm_id);
       return jsonResponse({ status: outcome.status });
     }
 
-    return jsonResponse({ status: "provisioning" });
+    return jsonResponse({ status: vm.status });
   } catch (error: unknown) {
     console.error("check-vm-status error:", error);
     return new Response(

@@ -490,7 +490,18 @@ Deno.serve(async (req) => {
         if (needsStart) {
           await trace.start(SOURCE, "remint", "Resuming your existing persistent lab VM (no new machine)");
           try {
-            started = await startCloudVm(supabase, (template.provider || "azure") as string, existingVm);
+            // Prefer the VM's provider account (same as Admin start-vm) so remint
+            // never hits Azure Start against an AWS i-* allocation.
+            let remintProvider = (template.provider || "azure") as string;
+            if (existingVm.provider_account_id) {
+              const { data: acct } = await supabase
+                .from("cloud_provider_accounts")
+                .select("provider")
+                .eq("id", existingVm.provider_account_id)
+                .maybeSingle();
+              if (acct?.provider) remintProvider = String(acct.provider);
+            }
+            started = await startCloudVm(supabase, remintProvider, existingVm);
           } catch (e) {
             console.error("persistent remint start failed", e);
           }
