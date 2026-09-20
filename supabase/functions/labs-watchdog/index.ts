@@ -210,15 +210,16 @@ Deno.serve(async (req) => {
       }
     }
 
-    // 0b. Reconcile DB status=provisioning → running when cloud instance is Running.
+    // 0b. Reconcile DB status=provisioning|starting → running when cloud instance is Running.
     // Azure: PowerState/running. AWS: EC2 instance-state running.
-    // Prevents Lex-soak / learner holds from staying "provisioning" forever when
-    // the client never polls check-vm-status (or promote was RLS-blocked).
+    // Prevents Lex-soak / learner holds / Start-from-deallocated from staying
+    // "provisioning"/"starting" forever when the client never polls check-vm-status
+    // (or promote was RLS-blocked / check-vm-status ignored starting).
     if (!dryRun) {
       const { data: provisioningVms } = await supabase
         .from("virtual_machines")
         .select("id, user_id, lab_template_id, azure_vm_id, status, expires_at, provider_account_id, private_ip, region, created_at")
-        .eq("status", "provisioning")
+        .in("status", ["provisioning", "starting"])
         .not("azure_vm_id", "is", null)
         .limit(MAX_PER_RUN);
 
@@ -249,13 +250,18 @@ Deno.serve(async (req) => {
             const desc = await describeAwsInstance(aws, vm.azure_vm_id);
             if (desc.state === "running") {
               await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
-              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws provisioning→running`);
+              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws ${vm.status}→running`);
             } else if (desc.state === "terminated" || desc.state === "shutting-down") {
               await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm.id);
-              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws provisioning→failed`);
+              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws ${vm.status}→failed`);
             } else if (desc.state === "stopped" || desc.state === "stopping") {
-              await supabase.from("virtual_machines").update({ status: "stopped" }).eq("id", vm.id);
-              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws provisioning→stopped`);
+              // Do not regress Start-from-deallocated "starting" while StartInstances is pending.
+              if (vm.status === "starting") {
+                actions.push(`vm ${vm.id.slice(0, 8)}: aws still stopped during starting — hold`);
+              } else {
+                await supabase.from("virtual_machines").update({ status: "stopped" }).eq("id", vm.id);
+                actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws ${vm.status}→stopped`);
+              }
             }
             continue;
           }
@@ -267,11 +273,19 @@ Deno.serve(async (req) => {
           });
           if (outcome.kind === "promoted") {
             await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
-            actions.push(`vm ${vm.id.slice(0, 8)}: reconciled provisioning→running`);
+            actions.push(`vm ${vm.id.slice(0, 8)}: reconciled ${vm.status}→running`);
           } else if (outcome.kind === "mapped" && (outcome.status === "failed" || outcome.status === "deallocated" || outcome.status === "stopped")) {
-            // Mirror check-vm-status: sync terminal Azure states into Hub.
-            await supabase.from("virtual_machines").update({ status: outcome.status }).eq("id", vm.id);
-            actions.push(`vm ${vm.id.slice(0, 8)}: reconciled provisioning→${outcome.status}`);
+            // Mirror check-vm-status: sync terminal Azure states into Hub,
+            // but hold Start-from-deallocated while Azure still reports stopped/deallocated.
+            if (
+              vm.status === "starting" &&
+              (outcome.status === "stopped" || outcome.status === "deallocated")
+            ) {
+              actions.push(`vm ${vm.id.slice(0, 8)}: azure ${outcome.status} during starting — hold`);
+            } else {
+              await supabase.from("virtual_machines").update({ status: outcome.status }).eq("id", vm.id);
+              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled ${vm.status}→${outcome.status}`);
+            }
           }
         } catch (e) {
           console.error(`watchdog reconcile ${vm.id}:`, e);

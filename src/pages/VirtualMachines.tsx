@@ -112,7 +112,8 @@ export default function VirtualMachines() {
   const provisioningIdsKey = useMemo(
     () =>
       vms
-        .filter((vm) => vm.status === "provisioning")
+        // Poll Start-from-deallocated ("starting") as well as fresh provision.
+        .filter((vm) => vm.status === "provisioning" || vm.status === "starting")
         .map((vm) => vm.id)
         .sort()
         .join(","),
@@ -361,7 +362,7 @@ export default function VirtualMachines() {
   }, [fetchVMs]);
 
   // Admin Allocation does not use learner use-provisioning — poll check-vm-status
-  // for rows still in provisioning so Azure Running flips Hub status to running.
+  // for rows still in provisioning/starting so cloud Running flips Hub to running.
   // Throttled: at most one wave every 15s, sequential invokes, max 8 per wave.
   useEffect(() => {
     if (!provisioningIdsKey) return;
@@ -380,7 +381,7 @@ export default function VirtualMachines() {
               body: { vm_id: vmId },
             });
             const nextStatus = data?.status as string | undefined;
-            if (!nextStatus || nextStatus === "provisioning") continue;
+            if (!nextStatus || nextStatus === "provisioning" || nextStatus === "starting") continue;
             setVms((prev) =>
               prev.map((vm) =>
                 vm.id === vmId
