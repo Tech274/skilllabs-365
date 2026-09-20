@@ -9,7 +9,12 @@
  * Exhausted wallet blocks Start; the VM is held, never silently terminated.
  */
 
-import { ec2Action, resolveAwsRuntime } from "./aws-runtime.ts";
+import {
+  describeAwsInstance,
+  ec2Action,
+  resolveAwsRuntime,
+  type AwsInstanceState,
+} from "./aws-runtime.ts";
 import { resolveAzureRuntime } from "./azure-runtime.ts";
 
 type SupabaseLike = {
@@ -30,6 +35,13 @@ export type ResumableVm = {
   expires_at: string | null;
   /** Prefer this region for AWS StartInstances (same allocation). */
   region?: string | null;
+};
+
+export type StartCloudVmResult = {
+  ok: boolean;
+  /** Short reason for logs / 502 `detail` (AWS Code/Message or Azure status). */
+  detail?: string;
+  awsState?: AwsInstanceState;
 };
 
 /** Newest reusable VM this learner already holds for this template, if any. */
@@ -69,39 +81,136 @@ async function azureToken(rt: { tenantId: string; clientId: string; clientSecret
   return (await res.json()).access_token as string;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Pull AWS Query API error Code + Message from XML for 502 detail. */
+export function parseAwsEc2ErrorXml(xml: string): string {
+  const code = xml.match(/<Code>([^<]+)<\/Code>/)?.[1];
+  const message = xml.match(/<Message>([^<]+)<\/Message>/)?.[1];
+  if (code && message) return `${code}: ${message}`;
+  if (code) return code;
+  if (message) return message;
+  const trimmed = xml.replace(/\s+/g, " ").trim();
+  return trimmed.slice(0, 240) || "unknown AWS error";
+}
+
+async function waitUntilAwsStopped(
+  rt: Awaited<ReturnType<typeof resolveAwsRuntime>>,
+  instanceId: string,
+  maxMs = 90_000,
+): Promise<{ state: AwsInstanceState; detail?: string }> {
+  const deadline = Date.now() + maxMs;
+  let last: AwsInstanceState = "stopping";
+  while (Date.now() < deadline) {
+    const desc = await describeAwsInstance(rt, instanceId);
+    last = desc.state;
+    if (desc.state === "stopped") return { state: "stopped" };
+    if (desc.state === "terminated" || desc.state === "shutting-down") {
+      return { state: desc.state, detail: `instance ${instanceId} is ${desc.state} — cannot Start` };
+    }
+    if (desc.state === "running" || desc.state === "pending") {
+      // Leave failed mid-stop / race — treat as already up.
+      return { state: desc.state };
+    }
+    await sleep(3_000);
+  }
+  return { state: last, detail: `timed out waiting for stopped (last=${last})` };
+}
+
 /**
- * Power the existing allocation back on. Returns true when the cloud accepted the
- * start; the VM row is never deleted or recreated here.
+ * Power the existing allocation back on. Returns ok when the cloud accepted the
+ * start (or the instance is already running/pending). The VM row is never
+ * deleted or recreated here.
+ *
+ * AWS path is describe-first so Start-from-deallocated still works when Leave
+ * marked Hub deallocated but StopInstances failed (cloud_stop_ok:false) and the
+ * EC2 is still running — and when the instance is mid-stopping.
  */
 export async function startCloudVm(
   supabase: SupabaseLike,
   provider: string,
   vm: ResumableVm,
-): Promise<boolean> {
-  if (!vm.azure_vm_id) return false;
+): Promise<StartCloudVmResult> {
+  if (!vm.azure_vm_id) return { ok: false, detail: "VM has no cloud instance id" };
 
   if (provider === "aws") {
-    const rt = await resolveAwsRuntime(supabase, vm.provider_account_id);
-    if (vm.region) rt.defaultRegion = String(vm.region);
-    const res = await ec2Action(rt, "StartInstances", { "InstanceId.1": vm.azure_vm_id });
-    if (!res.ok) {
-      console.error(`StartInstances failed (${res.status}): ${res.text.slice(0, 300)}`);
-      return false;
+    const instanceId = String(vm.azure_vm_id);
+    try {
+      const rt = await resolveAwsRuntime(supabase, vm.provider_account_id);
+      if (vm.region) rt.defaultRegion = String(vm.region);
+
+      const desc0 = await describeAwsInstance(rt, instanceId);
+      let state: AwsInstanceState = desc0.state;
+
+      // Idempotent: Hub may say deallocated while EC2 is still running after a
+      // failed soft-stop — Start must succeed without calling StartInstances.
+      if (state === "running" || state === "pending") {
+        console.log(JSON.stringify({
+          event: "aws_start_idempotent",
+          instance_id: instanceId,
+          region: rt.defaultRegion,
+          state,
+        }));
+        return { ok: true, awsState: state, detail: `already ${state}` };
+      }
+
+      if (state === "terminated" || state === "shutting-down") {
+        const detail = `instance ${instanceId} is ${state} — cannot Start`;
+        console.error(`StartInstances blocked: ${detail}`);
+        return { ok: false, awsState: state, detail };
+      }
+
+      if (state === "stopping") {
+        const waited = await waitUntilAwsStopped(rt, instanceId);
+        if (waited.state === "running" || waited.state === "pending") {
+          return { ok: true, awsState: waited.state, detail: `already ${waited.state} after wait` };
+        }
+        if (waited.state !== "stopped") {
+          console.error(`StartInstances wait failed: ${waited.detail}`);
+          return { ok: false, awsState: waited.state, detail: waited.detail };
+        }
+        state = "stopped";
+      }
+
+      if (state !== "stopped" && state !== "unknown") {
+        const detail = `instance ${instanceId} in unexpected state ${state}`;
+        return { ok: false, awsState: state, detail };
+      }
+
+      const res = await ec2Action(rt, "StartInstances", { "InstanceId.1": instanceId });
+      if (!res.ok) {
+        const detail = parseAwsEc2ErrorXml(res.text);
+        console.error(`StartInstances failed (${res.status}): ${detail}`);
+        return { ok: false, awsState: state, detail };
+      }
+      return { ok: true, awsState: "pending", detail: "StartInstances accepted" };
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e);
+      console.error(`AWS startCloudVm error: ${detail}`);
+      return { ok: false, detail };
     }
-    return true;
   }
 
-  const rt = await resolveAzureRuntime(supabase, vm.provider_account_id);
-  const token = await azureToken(rt);
-  const name = extractAzureVmName(vm.azure_vm_id);
-  const res = await fetch(
-    `https://management.azure.com/subscriptions/${rt.subscriptionId}/resourceGroups/${rt.resourceGroup}` +
-      `/providers/Microsoft.Compute/virtualMachines/${name}/start?api-version=2023-03-01`,
-    { method: "POST", headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok) {
-    console.error(`Azure start failed for ${name} (${res.status}): ${(await res.text()).slice(0, 300)}`);
-    return false;
+  try {
+    const rt = await resolveAzureRuntime(supabase, vm.provider_account_id);
+    const token = await azureToken(rt);
+    const name = extractAzureVmName(vm.azure_vm_id);
+    const res = await fetch(
+      `https://management.azure.com/subscriptions/${rt.subscriptionId}/resourceGroups/${rt.resourceGroup}` +
+        `/providers/Microsoft.Compute/virtualMachines/${name}/start?api-version=2023-03-01`,
+      { method: "POST", headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 300);
+      console.error(`Azure start failed for ${name} (${res.status}): ${body}`);
+      return { ok: false, detail: `Azure start ${res.status}: ${body}` };
+    }
+    return { ok: true, detail: "Azure start accepted" };
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    console.error(`Azure startCloudVm error: ${detail}`);
+    return { ok: false, detail };
   }
-  return true;
 }

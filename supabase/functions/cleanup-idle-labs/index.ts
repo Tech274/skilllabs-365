@@ -361,14 +361,24 @@ Deno.serve(async (req) => {
 
       const live = ["running", "provisioning", "starting", "idle"].includes(String(vm.status || "").toLowerCase());
       let stopped = !live;
+      let stopDetail: string | null = null;
       if (live && vm.azure_vm_id) {
         try {
           stopped = await stopCloudVm(supabase, azureFor, vm);
         } catch (e) {
-          console.error("learner-leave stop failed", e);
+          stopDetail = e instanceof Error ? e.message : String(e);
+          console.error(JSON.stringify({
+            event: "learner_leave_stop_failed",
+            vm_id: targetVmId,
+            instance_id: vm.azure_vm_id,
+            region: vm.region ?? null,
+            detail: stopDetail,
+          }));
           stopped = false;
         }
       }
+      // Soft-stop still marks Hub deallocated for wallet/Leave UX even when the
+      // cloud stop fails — start-vm describe-first heals (running → idempotent ok).
       if (live) {
         await markVmEnded(supabase, targetVmId, {
           status: "deallocated",
@@ -420,6 +430,10 @@ Deno.serve(async (req) => {
         vm_id: targetVmId,
         actor: auth.userId,
         stopped,
+        cloud_stop_ok: stopped,
+        stop_detail: stopDetail,
+        region: vm.region ?? null,
+        instance_id: vm.azure_vm_id ?? null,
         wallet,
       }));
 
@@ -431,6 +445,7 @@ Deno.serve(async (req) => {
         soft_stop: true,
         deleted: false,
         cloud_stop_ok: stopped,
+        stop_detail: stopDetail,
         wallet,
         correlation_id: correlationId,
       });
@@ -563,8 +578,24 @@ Deno.serve(async (req) => {
           expires_at: vm.expires_at ?? null,
           region: vm.region ?? null,
         });
-        if (!started) {
-          return new Response(JSON.stringify({ error: "Cloud start rejected", vm_id: targetVmId }), {
+        if (!started.ok) {
+          console.error(JSON.stringify({
+            event: "vm_start_rejected",
+            vm_id: targetVmId,
+            provider,
+            region: vm.region ?? null,
+            instance_id: vm.azure_vm_id,
+            detail: started.detail ?? null,
+            aws_state: started.awsState ?? null,
+          }));
+          return new Response(JSON.stringify({
+            error: "Cloud start rejected",
+            vm_id: targetVmId,
+            detail: started.detail ?? "unknown cloud start failure",
+            aws_state: started.awsState ?? null,
+            provider,
+            region: vm.region ?? null,
+          }), {
             status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }

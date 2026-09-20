@@ -501,7 +501,9 @@ Deno.serve(async (req) => {
                 .maybeSingle();
               if (acct?.provider) remintProvider = String(acct.provider);
             }
-            started = await startCloudVm(supabase, remintProvider, existingVm);
+            const startResult = await startCloudVm(supabase, remintProvider, existingVm);
+            started = startResult.ok;
+            if (!started) console.error("persistent remint start rejected", startResult.detail, startResult.awsState);
           } catch (e) {
             console.error("persistent remint start failed", e);
           }
