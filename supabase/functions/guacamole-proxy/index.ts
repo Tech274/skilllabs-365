@@ -449,20 +449,20 @@ Deno.serve(async (req) => {
       const gatePort = gateProtocol === "ssh" ? 22 : 3389;
       const probeEnabled = (Deno.env.get("GUAC_EDGE_PORT_PROBE") ?? "on").toLowerCase() !== "off";
       const health = probeEnabled
-        ? await probeLabPort(vmHost, gatePort, { attempts: 2, timeoutMs: 3000, gapMs: 1500 })
+        ? await probeLabPort(vm.private_ip, gatePort, { attempts: 2, timeoutMs: 3000, gapMs: 1500 })
         : null;
       if (health && !health.reachable) {
         await timeline.skipped(
           SOURCE,
           "guacamole-connect",
           "Lab port probe was inconclusive from the edge (gateway-only ingress) — continuing",
-          { host: vmHost, port: gatePort, attempts: health.attempts, error: health.error },
+          { host: vm.private_ip, port: gatePort, attempts: health.attempts, error: health.error },
         );
       }
       const healthPayload = {
         probe: !health ? "edge_skipped" : health.reachable ? "edge_ok" : "edge_skipped_or_timeout",
         reachable: health?.reachable ?? null,
-        host: vmHost,
+        host: vm.private_ip,
         port: gatePort,
         latency_ms: health?.latency_ms ?? null,
       };

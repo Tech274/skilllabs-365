@@ -131,7 +131,7 @@ function runtimeCreds(runtime: AwsRuntime): AwsCreds {
 }
 
 /** EC2 Query API helper — returns parsed XML-ish JSON via AWS's JSON? EC2 returns XML; we parse lightly. */
-async function ec2Action(
+export async function ec2Action(
   runtime: AwsRuntime,
   action: string,
   params: Record<string, string> = {},
