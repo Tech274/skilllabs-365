@@ -25,6 +25,8 @@ const GOOGLE_FONTS_FILES = ["https://fonts.gstatic.com"];
 /**
  * Guacamole gateways (embedded in an iframe on the lab session page).
  * Dual-host: AWS Guac + Azure Guac — CSP allowlist only; routing unchanged.
+ * Both origins MUST appear in connect-src AND frame-src. Live skillhub365.co.in
+ * deploy e7cbd2a4 had guac only — guac-azure was missing until this fleet-trust fix.
  */
 const GUACAMOLE = [
   "https://guac.skillhub365.co.in",

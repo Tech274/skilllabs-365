@@ -2,12 +2,14 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { MetricCard } from "@/components/MetricCard";
 import { StatusBadge } from "@/components/StatusBadge";
 import type { VMStatus } from "@/lib/types";
-import { Server, Activity, Clock, Globe, Loader2, AlertTriangle, Cpu, Trash2 } from "lucide-react";
+import { Server, Activity, Clock, Globe, Loader2, AlertTriangle, Cpu, Trash2, Monitor } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useEffect, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { readFunctionError } from "@/lib/function-error";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "@/hooks/use-auth";
+import { Tooltip as UiTooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Button } from "@/components/ui/button";
 import { toast } from "@/hooks/use-toast";
 import {
@@ -74,6 +76,7 @@ interface VMRow {
   idle_minutes: number;
   created_at?: string;
   azure_vm_id?: string | null;
+  lab_template_id?: string | null;
   userName?: string;
   labName?: string;
   instanceName?: string | null;
@@ -82,6 +85,8 @@ interface VMRow {
 
 
 const Index = () => {
+  const navigate = useNavigate();
+  const { isSuperAdmin } = useAuth();
   const [vms, setVms] = useState<VMRow[]>([]);
   const [vmLoading, setVmLoading] = useState(true);
   const [quotas, setQuotas] = useState<Record<string, QuotaItem[]>>({});
@@ -193,6 +198,7 @@ const Index = () => {
   const totalProvisioning = vmStatusCounts["provisioning"] || 0;
   const totalFailed = vmStatusCounts["failed"] || 0;
   const totalDeallocated = vmStatusCounts["deallocated"] || 0;
+  const totalStopped = vmStatusCounts["stopped"] || 0;
   const totalTerminated = vmStatusCounts["terminated"] || 0;
   const purgeableCount = totalFailed + totalTerminated;
 
@@ -205,6 +211,7 @@ const Index = () => {
     { name: 'Running', value: totalRunning, fill: 'hsl(152 60% 45%)' },
     { name: 'Idle', value: totalIdle, fill: 'hsl(38 90% 55%)' },
     { name: 'Provisioning', value: totalProvisioning, fill: 'hsl(210 80% 55%)' },
+    { name: 'Stopped', value: totalStopped, fill: 'hsl(215 16% 47%)' },
     { name: 'Failed', value: totalFailed, fill: 'hsl(0 72% 55%)' },
     { name: 'Deallocated', value: totalDeallocated, fill: 'hsl(215 12% 52%)' },
   ].filter(s => s.value > 0);
@@ -274,9 +281,9 @@ const Index = () => {
           <MetricCard title="Active VMs" value={totalRunning + totalIdle} icon={Server} variant="primary" to="/vms?status=active" />
           <MetricCard title="Provisioning" value={totalProvisioning} icon={Clock} variant="default" to="/vms?status=provisioning" />
           <MetricCard title="Idle VMs" value={totalIdle} icon={Activity} variant="warning" subtitle="Auto-stop in ≤15min" to="/vms?status=idle" />
+          <MetricCard title="Stopped" value={totalStopped} icon={Server} variant="default" to="/vms?status=stopped" />
           <MetricCard title="Failed" value={totalFailed} icon={AlertTriangle} variant={totalFailed > 0 ? "warning" : "default"} to="/vms?status=failed" />
           <MetricCard title="Deallocated" value={totalDeallocated} icon={Server} variant="default" to="/vms?status=deallocated" />
-          <MetricCard title="Regions" value="2/2" icon={Globe} variant="success" subtitle="All healthy" to="/vms" />
         </div>
 
         {/* Azure Quota Widget + VM Status Chart */}
@@ -377,7 +384,7 @@ const Index = () => {
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border text-left">
-                    {['Username', 'Instance', 'Status', 'Created', 'Cloud', 'Lab'].map((h) => (
+                    {['Username', 'Instance', 'Status', 'Created', 'Cloud', 'Lab', 'Actions'].map((h) => (
                       <th key={h} className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider">{h}</th>
                     ))}
                   </tr>
@@ -391,11 +398,37 @@ const Index = () => {
                       <td className="px-5 py-3 text-xs text-muted-foreground whitespace-nowrap">{formatDateTime(vm.created_at)}</td>
                       <td className="px-5 py-3 text-xs text-muted-foreground">{vm.cloud || "—"}</td>
                       <td className="px-5 py-3 text-muted-foreground">{vm.labName}</td>
+                      <td className="px-5 py-3">
+                        {(isSuperAdmin || ["running", "idle"].includes(vm.status)) && (
+                          <UiTooltip>
+                            <TooltipTrigger asChild>
+                              <button
+                                className="p-1.5 rounded hover:bg-primary/10 text-primary transition-colors"
+                                title={isSuperAdmin ? "Admin Connect (barge-in)" : "Connect (admin)"}
+                                onClick={() =>
+                                  navigate(
+                                    `/labs/session/${vm.lab_template_id || vm.id}?vm_id=${vm.id}${isSuperAdmin ? "&admin=1" : ""}`,
+                                  )
+                                }
+                              >
+                                <Monitor className="h-3.5 w-3.5" />
+                              </button>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {isSuperAdmin
+                                ? ["running", "idle"].includes(vm.status)
+                                  ? "Admin Connect (barge-in)"
+                                  : "Admin Connect — start machine first"
+                                : "Connect (admin)"}
+                            </TooltipContent>
+                          </UiTooltip>
+                        )}
+                      </td>
                     </tr>
                   ))}
                   {vms.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="px-5 py-12 text-center">
+                      <td colSpan={7} className="px-5 py-12 text-center">
                         <Server className="h-8 w-8 text-muted-foreground/40 mx-auto mb-2" />
                         <p className="text-sm font-medium text-foreground">No Virtual Machines</p>
                         <p className="text-xs text-muted-foreground mt-1">Launch a lab to see allocations appear here in real-time.</p>

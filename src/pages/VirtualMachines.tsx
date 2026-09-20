@@ -15,6 +15,7 @@ import {
   Server,
   Info,
   Monitor,
+  Play,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/types";
@@ -199,9 +200,35 @@ export default function VirtualMachines() {
       if (error) throw error;
       if (data?.error) throw new Error(data.error);
       toast({ title: "VM Stopped", description: `Machine ${vmId.slice(0, 8)}… is being deallocated.` });
+      setVms((prev) => prev.map((vm) => (vm.id === vmId ? { ...vm, status: "deallocated" } : vm)));
     } catch (err: unknown) {
       toast({
         title: "Failed to stop VM",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  /** Admin Start: resume the SAME Stopped/Deallocated allocation (never provision new). */
+  const handleStartVM = async (vm: VMRow) => {
+    setActionLoading(vm.id);
+    try {
+      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+        body: { action: "start-vm", vm_id: vm.id, reason: "admin_start" },
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      toast({
+        title: "VM Starting",
+        description: `Machine ${vm.instanceName || vm.id.slice(0, 8)}… is powering on (same allocation).`,
+      });
+      setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "starting" } : row)));
+    } catch (err: unknown) {
+      toast({
+        title: "Failed to start VM",
         description: err instanceof Error ? err.message : "Unknown error",
         variant: "destructive",
       });
@@ -410,6 +437,7 @@ export default function VirtualMachines() {
     "failed",
   ];
   const isActiveStatus = (s: string) => ["running", "idle", "provisioning", "starting"].includes(s);
+  const isResumableStatus = (s: string) => ["stopped", "deallocated"].includes(s);
   const hasSelection = selectedIds.size > 0;
 
   return (
@@ -446,9 +474,10 @@ export default function VirtualMachines() {
               <code className="text-[10px]">virtual_machines</code> yet.
             </p>
             <p>
-              Actions: <span className="font-medium text-foreground">Connect / Stop / Delete</span> via{" "}
-              <code className="text-[10px]">cleanup-idle-labs</code>. Start / Reset / Heartbeat are not
-              shown (no backend support).
+              Actions: <span className="font-medium text-foreground">Connect / Start / Stop / Delete</span>{" "}
+              via <code className="text-[10px]">cleanup-idle-labs</code>. Start resumes the same
+              Stopped/Deallocated allocation (never provisions a new machine). Soft Stop deallocates
+              only — it never purges.
             </p>
           </div>
         </div>
@@ -651,8 +680,26 @@ export default function VirtualMachines() {
                       </td>
                       <td className="px-5 py-3">
                         <div className="flex gap-1">
-                          {/* Super Admin barge-in: Connect is ALWAYS visible, whoever owns the
-                              VM and whatever its status. Other roles keep the live-only Connect.
+                          {isResumableStatus(vm.status) && (
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <button
+                                  className="p-1.5 rounded hover:bg-success/10 text-success transition-colors disabled:opacity-40"
+                                  title="Start (resume same VM)"
+                                  disabled={actionLoading === vm.id || !vm.azure_vm_id}
+                                  onClick={() => handleStartVM(vm)}
+                                >
+                                  {actionLoading === vm.id ? (
+                                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                  ) : (
+                                    <Play className="h-3.5 w-3.5" />
+                                  )}
+                                </button>
+                              </TooltipTrigger>
+                              <TooltipContent>Start — resume same allocation (no new VM)</TooltipContent>
+                            </Tooltip>
+                          )}
+                          {/* Admin Connect barge on Running/Idle; Super Admin always visible.
                               Learner Connect UX is untouched. */}
                           {(isSuperAdmin || ["running", "idle"].includes(vm.status)) && (
                             <Tooltip>

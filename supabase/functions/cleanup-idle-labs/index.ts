@@ -10,6 +10,7 @@ import {
 import {
   resolveAwsRuntime, stopAwsInstance, terminateAwsInstance, describeAwsInstance,
 } from "../_shared/cloud-providers/aws-runtime.ts";
+import { startCloudVm, RESUMABLE_VM_STATUSES } from "../_shared/cloud-providers/vm-resume.ts";
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -326,16 +327,72 @@ Deno.serve(async (req) => {
     }
 
     // Handle targeted stop/delete actions
-    if ((action === "stop-vm" || action === "delete-vm") && targetVmId) {
+    if ((action === "stop-vm" || action === "delete-vm" || action === "start-vm") && targetVmId) {
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status, provider_account_id")
+        .select("id, azure_vm_id, status, provider_account_id, region, private_ip, expires_at")
         .eq("id", targetVmId)
         .maybeSingle();
 
       if (!vm) {
         return new Response(JSON.stringify({ error: "VM not found" }), {
           status: 404, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      // Admin Start: power the SAME allocation back on (never provision a new VM).
+      if (action === "start-vm") {
+        const status = String(vm.status || "").toLowerCase();
+        if (!(RESUMABLE_VM_STATUSES as readonly string[]).includes(status)) {
+          return new Response(JSON.stringify({
+            error: `VM status "${vm.status}" is not startable (need stopped/deallocated)`,
+            vm_id: targetVmId,
+            status: vm.status,
+          }), {
+            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        if (!vm.azure_vm_id) {
+          return new Response(JSON.stringify({ error: "VM has no cloud instance id", vm_id: targetVmId }), {
+            status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        const provider = await providerOf(supabase, vm.provider_account_id);
+        const started = await startCloudVm(supabase, provider, {
+          id: vm.id,
+          status: vm.status,
+          azure_vm_id: vm.azure_vm_id,
+          private_ip: vm.private_ip ?? null,
+          provider_account_id: vm.provider_account_id ?? null,
+          expires_at: vm.expires_at ?? null,
+          region: vm.region ?? null,
+        });
+        if (!started) {
+          return new Response(JSON.stringify({ error: "Cloud start rejected", vm_id: targetVmId }), {
+            status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        await supabase.from("virtual_machines").update({
+          status: "starting",
+          ended_by: null,
+          ended_reason: null,
+          ended_at: null,
+        }).eq("id", targetVmId);
+        console.log(JSON.stringify({
+          event: "vm_start",
+          vm_id: targetVmId,
+          actor: auth.userId,
+          region: vm.region ?? null,
+          provider,
+          reason: actionReason || "admin_start",
+        }));
+        return new Response(JSON.stringify({
+          success: true,
+          action: "started",
+          vm_id: targetVmId,
+          status: "starting",
+        }), {
+          status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
