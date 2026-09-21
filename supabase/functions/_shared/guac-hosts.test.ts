@@ -96,3 +96,29 @@ Deno.test("toPublicIframeBase / buildPublicIframeUrl pick provider public host",
     "https://guac-azure.skillhub365.co.in/guacamole/#/client/cid?token=tok",
   );
 });
+
+import { resolveGuacLabHostname } from "./guac-hosts.ts";
+
+Deno.test("resolveGuacLabHostname AWS auto prefers public_ip", () => {
+  const addr = resolveGuacLabHostname("aws", { private_ip: "10.0.1.210", public_ip: "3.228.218.133" }, envFrom({}));
+  assertEquals(addr, { hostname: "3.228.218.133", source: "public" });
+});
+
+Deno.test("resolveGuacLabHostname Azure auto keeps private_ip", () => {
+  const addr = resolveGuacLabHostname("azure", { private_ip: "172.18.0.21", public_ip: "20.1.2.3" }, envFrom({
+    GUACAMOLE_AZURE_URL: "http://10.0.0.5:8080/guacamole",
+  }));
+  assertEquals(addr, { hostname: "172.18.0.21", source: "private" });
+});
+
+Deno.test("resolveGuacLabHostname respects GUAC_LAB_HOSTNAME=private", () => {
+  const addr = resolveGuacLabHostname("aws", { private_ip: "10.0.10.192", public_ip: "98.92.163.169" }, envFrom({
+    GUAC_LAB_HOSTNAME: "private",
+  }));
+  assertEquals(addr, { hostname: "10.0.10.192", source: "private" });
+});
+
+Deno.test("resolveGuacLabHostname AWS falls back to private when no public_ip", () => {
+  const addr = resolveGuacLabHostname("aws", { private_ip: "10.0.10.192", public_ip: null }, envFrom({}));
+  assertEquals(addr, { hostname: "10.0.10.192", source: "private" });
+});

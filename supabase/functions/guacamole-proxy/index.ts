@@ -8,6 +8,7 @@ import {
   buildPublicIframeUrl,
   normalizeGuacCloudProvider,
   resolveGuacAdminEndpoint,
+  resolveGuacLabHostname,
   type GuacCloudProvider,
 } from "../_shared/guac-hosts.ts";
 
@@ -428,7 +429,7 @@ Deno.serve(async (req) => {
         .select("*, lab_templates(name, protocol, provider, clipboard_enabled, file_transfer_enabled)")
         .eq("id", vm_id).maybeSingle();
       if (vmError || !vm) throw new Error(`VM not found: ${vmError?.message || vm_id}`);
-      if (!vm.private_ip) throw new Error("VM has no private IP assigned");
+      if (!vm.private_ip && !vm.public_ip) throw new Error("VM has no private or public IP assigned");
 
       if (vm.user_id !== user.id && !(await isAdmin())) {
         return new Response(JSON.stringify({ error: "Forbidden" }), {
@@ -468,6 +469,7 @@ Deno.serve(async (req) => {
       };
 
       const vmCloud = await resolveVmCloudProvider(supabase, vm);
+      const labAddr = resolveGuacLabHostname(vmCloud, vm);
       const dataSource = await bindGuacForProvider(vmCloud);
 
       // Idempotency: a second click must reuse the live session instead of
@@ -624,8 +626,16 @@ Deno.serve(async (req) => {
       }
 
       const connectionName = `session-${vm_id}-${Date.now()}`;
+      console.log(JSON.stringify({
+        scope: "guac-lab-hostname",
+        provider: vmCloud,
+        source: labAddr.source,
+        // hostname itself is an address, not a secret
+        hostname: labAddr.hostname,
+        region: vm.region ?? null,
+      }));
       const connectionId = await createGuacConnection(guacBaseUrl, adminToken, dataSource, {
-        name: connectionName, protocol, hostname: vm.private_ip, port,
+        name: connectionName, protocol, hostname: labAddr.hostname, port,
         username: VM_ADMIN_USERNAME, password: VM_ADMIN_PASSWORD, parameters: connParams,
       });
 
