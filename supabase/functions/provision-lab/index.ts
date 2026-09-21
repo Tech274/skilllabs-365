@@ -436,43 +436,54 @@ Deno.serve(async (req) => {
     // --- Lab wallet Start gate --------------------------------------------
     // Exhausted minutes (or ended date window) block Start/Launch with a clear
     // message. Do NOT delete the VM — soft-stop / Leave already held it.
+    // Platform admin / service-role skips the wallet gate (same as start-vm).
+    // Learners still need prepaid template duration − session usage > 0.
     {
-      const { data: usage } = await supabase
-        .from("sessions")
-        .select("started_at, ended_at")
-        .eq("user_id", userId)
-        .eq("lab_template_id", template.id)
-        .limit(500);
-      const snap = buildWalletSnapshot({
-        duration: template.duration,
-        endDate: template.end_date,
-        isPersistent: template.is_persistent,
-        sessions: usage ?? [],
-      });
-      const blocked = walletBlockMessage(snap);
-      if (blocked) {
-        await trace.failed(SOURCE, "wallet-gate", blocked.error, {
-          code: blocked.code,
-          allocated: snap.allocatedMinutes,
-          used: snap.usedMinutes,
-          remaining: snap.remainingMinutes,
+      const { data: adminFlag } = await supabase.rpc("is_platform_admin", { _user_id: userId });
+      const skipWalletGate = adminFlag === true;
+      if (!skipWalletGate) {
+        const { data: usage } = await supabase
+          .from("sessions")
+          .select("started_at, ended_at")
+          .eq("user_id", userId)
+          .eq("lab_template_id", template.id)
+          .limit(500);
+        const snap = buildWalletSnapshot({
+          duration: template.duration,
+          endDate: template.end_date,
+          isPersistent: template.is_persistent,
+          sessions: usage ?? [],
         });
-        const failure = {
-          error: blocked.error,
-          code: blocked.code,
-          wallet: {
-            allocated_minutes: snap.allocatedMinutes,
-            used_minutes: snap.usedMinutes,
-            remaining_minutes: snap.remainingMinutes,
-            exhausted: snap.exhausted,
-            window_ended: snap.windowEnded,
-          },
-          correlation_id: correlationId,
-          stage: "wallet-gate",
-        };
-        await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
-        idem = null;
-        return new Response(JSON.stringify(failure), { status: 403, headers: traceHeaders });
+        const blocked = walletBlockMessage(snap);
+        if (blocked) {
+          await trace.failed(SOURCE, "wallet-gate", blocked.error, {
+            code: blocked.code,
+            allocated: snap.allocatedMinutes,
+            used: snap.usedMinutes,
+            remaining: snap.remainingMinutes,
+          });
+          const failure = {
+            error: blocked.error,
+            code: blocked.code,
+            wallet: {
+              allocated_minutes: snap.allocatedMinutes,
+              used_minutes: snap.usedMinutes,
+              remaining_minutes: snap.remainingMinutes,
+              exhausted: snap.exhausted,
+              window_ended: snap.windowEnded,
+            },
+            correlation_id: correlationId,
+            stage: "wallet-gate",
+          };
+          await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
+          idem = null;
+          return new Response(JSON.stringify(failure), { status: 403, headers: traceHeaders });
+        }
+      } else {
+        await trace.skipped(SOURCE, "wallet-gate", "Platform admin Launch skips wallet gate (mirrors start-vm)", {
+          user_id: userId,
+          lab_template_id: template.id,
+        });
       }
     }
 
