@@ -80,15 +80,30 @@ interface SessionInfo {
   duration: number;
 }
 
+/** Placeholder until VM facts load — never a stale module-load clock (fake Expired UI). */
 const defaultSession: SessionInfo = {
   labName: "Lab Session",
   protocol: "RDP",
   vmSize: "Standard_B2s",
   region: "—",
   privateIp: "—",
-  expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-  duration: 120,
+  expiresAt: "",
+  duration: 0,
 };
+
+function deriveExpiresAt(opts: {
+  vmExpiresAt?: string | null;
+  durationMinutes?: number | null;
+  isPersistent?: boolean;
+}): string {
+  if (opts.vmExpiresAt) return opts.vmExpiresAt;
+  const mins = Number(opts.durationMinutes ?? 0);
+  if (!opts.isPersistent && mins > 0) {
+    return new Date(Date.now() + mins * 60 * 1000).toISOString();
+  }
+  // Persistent / unknown: far future so Connected never flips to Expired on a fake 2h clock.
+  return new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+}
 
 export default function LabSession() {
   const { sessionId } = useParams();
@@ -269,13 +284,15 @@ export default function LabSession() {
     (async () => {
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("status, region, private_ip, vm_size, lab_template_id, lab_templates(name, protocol, duration, is_persistent)")
+        .select("status, region, private_ip, vm_size, expires_at, lab_template_id, lab_templates(name, protocol, duration, is_persistent)")
         .eq("id", vmId)
         .maybeSingle();
       if (cancelled || !vm) return;
       const tpl = Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates;
+      const isPersistent = Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent);
+      const duration = Number((tpl as { duration?: number } | null)?.duration ?? 0);
       setLabTemplateId(vm.lab_template_id ?? null);
-      setIsPersistentLab(Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent));
+      setIsPersistentLab(isPersistent);
       // Persistence + power state must be known BEFORE Leave or Connect run.
       setVmStatus(String((vm as { status?: string }).status ?? "").toLowerCase());
       setVmFactsLoaded(true);
@@ -286,7 +303,13 @@ export default function LabSession() {
         vmSize: vm.vm_size || prev.vmSize,
         region: (vm.region && String(vm.region).trim()) || prev.region,
         privateIp: vm.private_ip || prev.privateIp,
-        duration: (tpl as { duration?: number } | null)?.duration || prev.duration,
+        duration: duration || prev.duration,
+        // P0c: derive from VM expires_at or template.duration — kill fake 2h Connected+Expired.
+        expiresAt: deriveExpiresAt({
+          vmExpiresAt: (vm as { expires_at?: string | null }).expires_at,
+          durationMinutes: duration,
+          isPersistent,
+        }),
       }));
     })();
     return () => { cancelled = true; };
@@ -347,14 +370,45 @@ export default function LabSession() {
           console.error("[remint] failed:", err);
           if (cancelled) return;
           setReminting(false);
-          setLastError(REMINT_FAIL_CODE);
+          const detail = err instanceof Error ? err.message : REMINT_FAIL_CODE;
+          setLastError(detail);
           setConnectionState("error");
-          toast({ title: "Lab is still waking up", description: REMINT_CALM_COPY });
+          // P0b: always surface detail/code/aws_state (do not hide behind calm-only copy).
+          toast({
+            title: "Failed to start lab",
+            description: detail.includes(REMINT_FAIL_CODE) && detail === REMINT_FAIL_CODE
+              ? REMINT_CALM_COPY
+              : detail,
+            variant: "destructive",
+          });
           return;
         }
         if (cancelled) return;
         setReminting(false);
         setVmStatus("running");
+        // P0c: refresh expires_at after remint reset on the server.
+        try {
+          const { data: refreshed } = await supabase
+            .from("virtual_machines")
+            .select("expires_at, lab_templates(duration, is_persistent)")
+            .eq("id", vmId)
+            .maybeSingle();
+          if (refreshed && !cancelled) {
+            const tpl = Array.isArray(refreshed.lab_templates)
+              ? refreshed.lab_templates[0]
+              : refreshed.lab_templates;
+            setSession((prev) => ({
+              ...prev,
+              expiresAt: deriveExpiresAt({
+                vmExpiresAt: refreshed.expires_at,
+                durationMinutes: (tpl as { duration?: number } | null)?.duration,
+                isPersistent: Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent),
+              }),
+            }));
+          }
+        } catch (e) {
+          console.warn("[remint] expires_at refresh failed", e);
+        }
       }
       if (!cancelled) await createGuacSession(vmId);
     })();
@@ -413,8 +467,12 @@ export default function LabSession() {
     };
   }, []);
 
-  // Countdown timer
+  // Countdown timer — wait for real expiresAt (never fake module-load 2h).
   useEffect(() => {
+    if (!session.expiresAt) {
+      setTimeRemaining("—");
+      return;
+    }
     const interval = setInterval(() => {
       const remaining = new Date(session.expiresAt).getTime() - Date.now();
       if (remaining <= 0) {
@@ -690,6 +748,7 @@ export default function LabSession() {
   };
 
   const isTimeLow = (() => {
+    if (!session.expiresAt) return false;
     const remaining = new Date(session.expiresAt).getTime() - Date.now();
     return remaining < 10 * 60 * 1000 && remaining > 0;
   })();
