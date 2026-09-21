@@ -309,7 +309,7 @@ Deno.serve(async (req) => {
       let sessQuery = supabase
         .from("sessions")
         .select("id, user_id, status, guac_connection_id, vm_id")
-        .order("created_at", { ascending: false })
+        .order("started_at", { ascending: false })
         .limit(1);
       sessQuery = session_id
         ? sessQuery.eq("id", session_id)
