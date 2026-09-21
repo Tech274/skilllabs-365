@@ -22,6 +22,7 @@ import type { VMStatus } from "@/lib/types";
 import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
+import { readFunctionError } from "@/lib/function-error";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -357,8 +358,10 @@ export default function VirtualMachines() {
       const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
         body: { action: "start-vm", vm_id: vm.id, reason: "admin_start" },
       });
-      if (error) throw error;
-      if (data?.error) throw new Error(data.error);
+      // Non-2xx hides JSON in FunctionsHttpError.context — unwrap like LabManagement/remint.
+      if (error || data?.error) {
+        throw new Error(await readFunctionError(error, data));
+      }
       toast({
         title: "VM Starting",
         description: `Machine ${vm.instanceName || vm.id.slice(0, 8)}… is powering on (same allocation).`,
