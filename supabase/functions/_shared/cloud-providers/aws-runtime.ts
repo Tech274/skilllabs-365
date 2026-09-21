@@ -557,7 +557,20 @@ systemctl restart ssh || systemctl restart sshd || true
   return btoa(sh);
 }
 
-/** Launch an EC2 lab instance. Returns instance id + private IP (may be pending). */
+/**
+ * Parse public IPv4 from EC2 DescribeInstances / RunInstances XML.
+ * Prefers instance-level ipAddress, then publicIpAddress, then association publicIp.
+ */
+export function parseAwsPublicIpFromXml(xml: string): string | null {
+  return (
+    xmlTag(xml, "ipAddress") ||
+    xmlTag(xml, "publicIpAddress") ||
+    xmlTag(xml, "publicIp") ||
+    null
+  );
+}
+
+/** Launch an EC2 lab instance. Returns instance id + IPs (public may be pending). */
 export async function createAwsVm(
   runtime: AwsRuntime,
   opts: {
@@ -566,7 +579,7 @@ export async function createAwsVm(
     amiId: string;
     osImage?: string | null;
   },
-): Promise<{ instanceId: string; privateIp: string }> {
+): Promise<{ instanceId: string; privateIp: string; publicIp: string | null }> {
   assertAwsVmProvisioningReady(runtime);
   const isWindows = (opts.osImage || "").toLowerCase().includes("windows");
   const params: Record<string, string> = {
@@ -577,7 +590,9 @@ export async function createAwsVm(
     "NetworkInterface.1.DeviceIndex": "0",
     "NetworkInterface.1.SubnetId": runtime.subnetId,
     "NetworkInterface.1.Groups.1": runtime.securityGroupId,
-    "NetworkInterface.1.AssociatePublicIpAddress": "false",
+    // Required for cross-region Guac (ap-south-1) → us-east-1 labs: guacd cannot
+    // route to RFC1918. Lab SG already allows gateway_cidr 3.6.228.159/32.
+    "NetworkInterface.1.AssociatePublicIpAddress": "true",
     "TagSpecification.1.ResourceType": "instance",
     "TagSpecification.1.Tag.1.Key": "Name",
     "TagSpecification.1.Tag.1.Value": opts.name,
@@ -594,15 +609,22 @@ export async function createAwsVm(
   const instanceId = xmlTag(res.xml, "instanceId");
   if (!instanceId) throw new Error("RunInstances response missing instanceId");
   const privateIp = xmlTag(res.xml, "privateIpAddress") || "pending";
-  return { instanceId, privateIp };
+  const publicIp = parseAwsPublicIpFromXml(res.xml);
+  return { instanceId, privateIp, publicIp };
 }
 
 export type AwsInstanceState = "pending" | "running" | "stopping" | "stopped" | "shutting-down" | "terminated" | "unknown";
 
+export type AwsDescribeResult = {
+  state: AwsInstanceState;
+  privateIp: string | null;
+  publicIp: string | null;
+};
+
 export async function describeAwsInstance(
   runtime: AwsRuntime,
   instanceId: string,
-): Promise<{ state: AwsInstanceState; privateIp: string | null }> {
+): Promise<AwsDescribeResult> {
   const res = await ec2Action(runtime, "DescribeInstances", {
     "InstanceId.1": instanceId,
   });
@@ -610,7 +632,8 @@ export async function describeAwsInstance(
   const stateMatch = res.xml.match(/<instanceState>[\s\S]*?<name>([^<]+)<\/name>/);
   const state = (stateMatch?.[1] as AwsInstanceState | undefined) || "unknown";
   const privateIp = xmlTag(res.xml, "privateIpAddress");
-  return { state, privateIp };
+  const publicIp = parseAwsPublicIpFromXml(res.xml);
+  return { state, privateIp, publicIp };
 }
 
 export async function stopAwsInstance(runtime: AwsRuntime, instanceId: string): Promise<void> {

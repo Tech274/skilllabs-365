@@ -106,9 +106,12 @@ export async function applyPromoteToRunning(
   supabase: any,
   vmId: string,
   privateIp: string | null,
+  publicIp?: string | null,
 ): Promise<boolean> {
   const patch: Record<string, unknown> = { status: "running" };
   if (privateIp) patch.private_ip = privateIp;
+  // AWS cross-region Guac needs Hub public_ip; refresh after provision/Start.
+  if (publicIp) patch.public_ip = publicIp;
   const { error } = await supabase.from("virtual_machines").update(patch).eq("id", vmId);
   if (error) {
     console.error(`azure-reconcile: promote ${vmId} failed:`, error.message);

@@ -62,8 +62,12 @@ Deno.serve(async (req) => {
       if (vm.region) aws.defaultRegion = String(vm.region);
       const desc = await describeAwsInstance(aws, vm.azure_vm_id);
       if (desc.state === "running") {
-        await applyPromoteToRunning(admin, vm_id, desc.privateIp);
-        return jsonResponse({ status: "running", private_ip: desc.privateIp });
+        await applyPromoteToRunning(admin, vm_id, desc.privateIp, desc.publicIp);
+        return jsonResponse({
+          status: "running",
+          private_ip: desc.privateIp,
+          public_ip: desc.publicIp,
+        });
       }
       if (desc.state === "terminated" || desc.state === "shutting-down") {
         await admin.from("virtual_machines").update({ status: "failed" }).eq("id", vm_id);

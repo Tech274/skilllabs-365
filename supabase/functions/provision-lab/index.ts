@@ -643,7 +643,7 @@ Deno.serve(async (req) => {
         const amiId = await resolveLabAmiId(aws, template.os_image);
         await trace.success(SOURCE, "ami-resolve", `Using AMI ${amiId}`);
 
-        let vmResult: { instanceId: string; privateIp: string };
+        let vmResult: { instanceId: string; privateIp: string; publicIp: string | null };
         await trace.start(SOURCE, "vm-create", `Creating EC2 instance ${vmName} (${instanceType})`);
         try {
           vmResult = await createAwsVm(aws, {
@@ -658,7 +658,10 @@ Deno.serve(async (req) => {
           throw awsError;
         }
         await trace.success(SOURCE, "vm-create", "EC2 instance launched", {
-          instance_id: vmResult.instanceId, private_ip: vmResult.privateIp, subnet_id: aws.subnetId,
+          instance_id: vmResult.instanceId,
+          private_ip: vmResult.privateIp,
+          public_ip: vmResult.publicIp,
+          subnet_id: aws.subnetId,
         });
 
         if (networkDefaults.connectivityCheckEnabled) {
@@ -677,9 +680,12 @@ Deno.serve(async (req) => {
         }
 
         // Store EC2 instance id in azure_vm_id (legacy column = cloud instance ref).
+        // Persist public_ip when RunInstances already returned one; check-vm-status
+        // promote refreshes from DescribeInstances once Running (cross-region Guac).
         await supabase.from("virtual_machines").update({
           azure_vm_id: vmResult.instanceId,
           private_ip: vmResult.privateIp,
+          ...(vmResult.publicIp ? { public_ip: vmResult.publicIp } : {}),
           status: "provisioning",
         }).eq("id", vmRecord.id);
 
@@ -689,6 +695,7 @@ Deno.serve(async (req) => {
           instance_id: vmResult.instanceId,
           provider: "aws",
           private_ip: vmResult.privateIp,
+          public_ip: vmResult.publicIp,
           status: "provisioning",
           vm_name: vmName,
           subnet_id: aws.subnetId,

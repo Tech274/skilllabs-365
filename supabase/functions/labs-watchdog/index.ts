@@ -249,7 +249,7 @@ Deno.serve(async (req) => {
             if (vm.region) aws.defaultRegion = String(vm.region);
             const desc = await describeAwsInstance(aws, vm.azure_vm_id);
             if (desc.state === "running") {
-              await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
+              await applyPromoteToRunning(supabase, vm.id, desc.privateIp, desc.publicIp);
               actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws ${vm.status}→running`);
             } else if (desc.state === "terminated" || desc.state === "shutting-down") {
               await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm.id);
@@ -449,7 +449,7 @@ Deno.serve(async (req) => {
               if (vm.region) aws.defaultRegion = String(vm.region);
               const desc = await describeAwsInstance(aws, vm.azure_vm_id);
               if (desc.state === "running") {
-                await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
+                await applyPromoteToRunning(supabase, vm.id, desc.privateIp, desc.publicIp);
                 promotedRunning = true;
                 privateIp = desc.privateIp;
                 nextStatus = "running";
