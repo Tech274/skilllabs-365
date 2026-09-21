@@ -149,3 +149,49 @@ export function buildPublicIframeUrl(
   const base = toPublicIframeBase(apiBaseUrl, publicBaseRaw);
   return `${base}/#/client/${encodeURIComponent(clientId)}?token=${token}`;
 }
+
+export type GuacLabAddress = {
+  /** Hostname Guacamole guacd should dial (IP or DNS). */
+  hostname: string;
+  /** "public" | "private" — which Hub field was chosen. */
+  source: "public" | "private";
+};
+
+/**
+ * Pick the lab address Guacamole should dial.
+ *
+ * AWS Guac (guac.skillhub365.co.in → 3.6.228.159, ap-south-1) cannot route to
+ * us-east-1 RFC1918 private IPs. Lab SGs already allow gateway_cidr
+ * (3.6.228.159/32), so for AWS we prefer public_ip when present.
+ *
+ * Override with GUAC_LAB_HOSTNAME=private|public (default: auto).
+ */
+export function resolveGuacLabHostname(
+  provider: GuacCloudProvider | string,
+  vm: { private_ip?: string | null; public_ip?: string | null },
+  env: GuacEnv = Deno.env,
+): GuacLabAddress {
+  const p = normalizeGuacCloudProvider(provider);
+  const privateIp = String(vm.private_ip ?? "").trim();
+  const publicIp = String(vm.public_ip ?? "").trim();
+  const mode = (env.get("GUAC_LAB_HOSTNAME") ?? "auto").trim().toLowerCase();
+
+  if (mode === "private") {
+    if (!privateIp) throw new Error("VM has no private IP assigned");
+    return { hostname: privateIp, source: "private" };
+  }
+  if (mode === "public") {
+    if (!publicIp) throw new Error("VM has no public IP assigned (GUAC_LAB_HOSTNAME=public)");
+    return { hostname: publicIp, source: "public" };
+  }
+
+  // auto: AWS → public_ip when available (cross-region Guac); else private.
+  if (p === "aws" && publicIp) {
+    return { hostname: publicIp, source: "public" };
+  }
+  if (!privateIp) {
+    if (publicIp) return { hostname: publicIp, source: "public" };
+    throw new Error("VM has no private or public IP assigned");
+  }
+  return { hostname: privateIp, source: "private" };
+}

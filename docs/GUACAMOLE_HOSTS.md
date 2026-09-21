@@ -24,3 +24,25 @@ SkillLabs Hub routes lab Connect iframes to a **provider-specific** public Guaca
 | `GUACAMOLE_AZURE_PUBLIC_URL` | Optional Azure iframe origin override. Default locked hostname applies only once `GUACAMOLE_AZURE_URL` is set (token host must match admin API). |
 
 Shared code: `supabase/functions/_shared/guac-hosts.ts` (edge) and `src/lib/guac-public-hosts.ts` (browser).
+
+## AWS cross-region note (P0 Connect)
+
+Verified topology (2026-09-21 IST):
+
+| Piece | Location |
+| --- | --- |
+| Guac AWS (`guac.skillhub365.co.in`) | EC2 `3.6.228.159` **ap-south-1** |
+| SkillTrack AWS labs | **us-east-1** VPC `vpc-07adde441ca10fb1c`, private `10.0.x` |
+| Lab SG `gateway_cidr` | `3.6.228.159/32` (Guac public IP) |
+
+`guacamole-proxy` therefore dials **AWS lab `public_ip`** by default (`GUAC_LAB_HOSTNAME=auto`) so guacd can reach labs over the internet. Override with `GUAC_LAB_HOSTNAME=private` only when Guac shares a routed path to lab RFC1918 (same VPC / TGW).
+
+From the Guac host (Ops verify, do **not** terminate Guac):
+
+```bash
+# Should succeed after public_ip dial + SG allow
+nc -vz <lab-public-ip> 22    # Ubuntu / SSH
+nc -vz <lab-public-ip> 3389  # Windows / RDP
+# Private path expected to fail while Guac stays ap-south-1:
+nc -vz <lab-private-ip> 22
+```
