@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { mapToAwsInstanceType, awsInstanceTypeVcpus, parseAwsPublicIpFromXml } from "./aws-runtime.ts";
+import { mapToAwsInstanceType, awsInstanceTypeVcpus, parseAwsPublicIpFromXml, isAwsInvalidInstanceNotFound } from "./aws-runtime.ts";
 
 Deno.test("mapToAwsInstanceType maps Azure SKUs and passes through EC2 types", () => {
   assertEquals(mapToAwsInstanceType("Standard_B2s"), "t3.small");
@@ -26,4 +26,13 @@ Deno.test("parseAwsPublicIpFromXml prefers ipAddress then publicIpAddress", () =
 
   const privateOnly = `<item><privateIpAddress>10.0.6.33</privateIpAddress></item>`;
   assertEquals(parseAwsPublicIpFromXml(privateOnly), null);
+});
+
+
+Deno.test("isAwsInvalidInstanceNotFound detects ghost EC2 ids", () => {
+  assertEquals(
+    isAwsInvalidInstanceNotFound("InvalidInstanceID.NotFound: The instance ID 'i-0dd83d48a728880c5' does not exist"),
+    true,
+  );
+  assertEquals(isAwsInvalidInstanceNotFound("IncorrectInstanceState: not startable"), false);
 });

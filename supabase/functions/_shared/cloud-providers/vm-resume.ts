@@ -12,6 +12,7 @@
 import {
   describeAwsInstance,
   ec2Action,
+  isAwsInvalidInstanceNotFound,
   resolveAwsRuntime,
   type AwsInstanceState,
 } from "./aws-runtime.ts";
@@ -42,6 +43,11 @@ export type StartCloudVmResult = {
   /** Short reason for logs / 502 `detail` (AWS Code/Message or Azure status). */
   detail?: string;
   awsState?: AwsInstanceState;
+  /**
+   * Hub row points at an EC2 id AWS no longer knows (InvalidInstanceID.NotFound).
+   * Callers must mark the Hub VM failed/terminated — never StartInstances.
+   */
+  ghost?: boolean;
 };
 
 /** Newest reusable VM this learner already holds for this template, if any. */
@@ -144,6 +150,14 @@ export async function startCloudVm(
       const desc0 = await describeAwsInstance(rt, instanceId);
       let state: AwsInstanceState = desc0.state;
 
+      // Ghost Hub row: DescribeInstances InvalidInstanceID.NotFound — never Start.
+      if (state === "not-found") {
+        const detail =
+          `InvalidInstanceID.NotFound: instance ${instanceId} does not exist — Hub row is a ghost`;
+        console.error(`StartInstances blocked (ghost): ${detail}`);
+        return { ok: false, awsState: "not-found", detail, ghost: true };
+      }
+
       // Idempotent: Hub may say deallocated while EC2 is still running after a
       // failed soft-stop — Start must succeed without calling StartInstances.
       if (state === "running" || state === "pending") {
@@ -183,12 +197,18 @@ export async function startCloudVm(
       if (!res.ok) {
         const detail = parseAwsEc2ErrorXml(res.text);
         console.error(`StartInstances failed (${res.status}): ${detail}`);
+        if (isAwsInvalidInstanceNotFound(detail) || isAwsInvalidInstanceNotFound(res.text)) {
+          return { ok: false, awsState: "not-found", detail, ghost: true };
+        }
         return { ok: false, awsState: state, detail };
       }
       return { ok: true, awsState: "pending", detail: "StartInstances accepted" };
     } catch (e) {
       const detail = e instanceof Error ? e.message : String(e);
       console.error(`AWS startCloudVm error: ${detail}`);
+      if (isAwsInvalidInstanceNotFound(detail)) {
+        return { ok: false, awsState: "not-found", detail, ghost: true };
+      }
       return { ok: false, detail };
     }
   }

@@ -375,7 +375,12 @@ export default function VirtualMachines() {
       });
       // Non-2xx hides JSON in FunctionsHttpError.context — unwrap like LabManagement/remint.
       if (error || data?.error) {
-        throw new Error(await readFunctionError(error, data));
+        // P0a: ghost reconcile may have marked Hub failed — reflect in UI.
+        const msg = await readFunctionError(error, data);
+        if (/GHOST_INSTANCE|ghost|not-found|InvalidInstanceID/i.test(msg)) {
+          setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "failed" } : row)));
+        }
+        throw new Error(msg);
       }
       toast({
         title: "VM Starting",
@@ -383,6 +388,7 @@ export default function VirtualMachines() {
       });
       setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "starting" } : row)));
     } catch (err: unknown) {
+      // P0b: always show detail/code/aws_state from unwrapped edge body.
       toast({
         title: "Failed to start VM",
         description: err instanceof Error ? err.message : "Unknown error",

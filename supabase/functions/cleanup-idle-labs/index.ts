@@ -651,9 +651,42 @@ Deno.serve(async (req) => {
             instance_id: vm.azure_vm_id,
             detail: started.detail ?? null,
             aws_state: started.awsState ?? null,
+            ghost: started.ghost === true,
           }));
+          // P0a: Ghost Hub reconcile — DescribeInstances NotFound → mark failed,
+          // never leave Admin Start retrying StartInstances on a missing EC2.
+          // Does NOT call TerminateInstances (Guacs / live fleet untouched).
+          if (started.ghost || started.awsState === "not-found") {
+            const endedAt = new Date().toISOString();
+            await supabase.from("virtual_machines").update({
+              status: "failed",
+              ended_at: endedAt,
+              ended_by: auth.userId,
+              ended_reason: "ghost_instance_not_found",
+            }).eq("id", targetVmId);
+            console.log(JSON.stringify({
+              event: "vm_ghost_reconciled",
+              vm_id: targetVmId,
+              instance_id: vm.azure_vm_id,
+              actor: auth.userId,
+              hub_status: "failed",
+            }));
+            return new Response(JSON.stringify({
+              error: "Cloud instance no longer exists (ghost Hub row reconciled to failed)",
+              code: "GHOST_INSTANCE",
+              vm_id: targetVmId,
+              detail: started.detail ?? "InvalidInstanceID.NotFound",
+              aws_state: started.awsState ?? "not-found",
+              provider,
+              region: vm.region ?? null,
+              reconciled_status: "failed",
+            }), {
+              status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
           return new Response(JSON.stringify({
             error: "Cloud start rejected",
+            code: "CLOUD_START_REJECTED",
             vm_id: targetVmId,
             detail: started.detail ?? "unknown cloud start failure",
             aws_state: started.awsState ?? null,
@@ -672,10 +705,48 @@ Deno.serve(async (req) => {
             const awsRt = await resolveAwsRuntime(supabase, vm.provider_account_id);
             if (vm.region) awsRt.defaultRegion = String(vm.region);
             const desc = await describeAwsInstance(awsRt, vm.azure_vm_id);
+            // If describe races into NotFound after Start accepted, reconcile ghost —
+            // never leave Hub as "starting" on a missing EC2.
+            if (desc.state === "not-found") {
+              const endedAt = new Date().toISOString();
+              await supabase.from("virtual_machines").update({
+                status: "failed",
+                ended_at: endedAt,
+                ended_by: auth.userId,
+                ended_reason: "ghost_instance_not_found",
+              }).eq("id", targetVmId);
+              return new Response(JSON.stringify({
+                error: "Cloud instance no longer exists (ghost Hub row reconciled to failed)",
+                code: "GHOST_INSTANCE",
+                vm_id: targetVmId,
+                detail: `InvalidInstanceID.NotFound after Start: ${vm.azure_vm_id}`,
+                aws_state: "not-found",
+                provider,
+                region: vm.region ?? null,
+                reconciled_status: "failed",
+              }), {
+                status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            }
             if (desc.privateIp) ipPatch.private_ip = desc.privateIp;
             if (desc.publicIp) ipPatch.public_ip = desc.publicIp;
           } catch (e) {
             console.error("start-vm AWS IP refresh failed:", e);
+          }
+        }
+        // P0c: reset expires_at on remint from template.duration (non-persistent).
+        const expiresPatch: Record<string, unknown> = {};
+        const remintTplId = (vm as { lab_template_id?: string | null }).lab_template_id;
+        if (remintTplId) {
+          const { data: remintTpl } = await supabase
+            .from("lab_templates")
+            .select("duration, is_persistent")
+            .eq("id", remintTplId)
+            .maybeSingle();
+          if (remintTpl && !remintTpl.is_persistent && Number(remintTpl.duration) > 0) {
+            expiresPatch.expires_at = new Date(
+              Date.now() + Number(remintTpl.duration) * 60 * 1000,
+            ).toISOString();
           }
         }
         await supabase.from("virtual_machines").update({
@@ -684,6 +755,7 @@ Deno.serve(async (req) => {
           ended_reason: null,
           ended_at: null,
           ...ipPatch,
+          ...expiresPatch,
         }).eq("id", targetVmId);
         const startReason = actionReason || (isPlatformAdmin ? "admin_start" : "learner_start");
         console.log(JSON.stringify({
@@ -1214,14 +1286,22 @@ Deno.serve(async (req) => {
                 results.push(
                   `Stuck provisioning VM ${vm.id.substring(0, 8)}: AWS running → promoted to running (no stop)`,
                 );
-              } else if (desc.state === "terminated" || desc.state === "shutting-down") {
+              } else if (
+                desc.state === "terminated" ||
+                desc.state === "shutting-down" ||
+                desc.state === "not-found"
+              ) {
                 await markVmEnded(supabase, vm.id, {
                   status: "failed",
                   ended_by: SOURCE,
-                  ended_reason: "stuck_provisioning",
+                  ended_reason: desc.state === "not-found"
+                    ? "ghost_instance_not_found"
+                    : "stuck_provisioning",
                   ended_at: now.toISOString(),
                 });
-                results.push(`Stuck provisioning VM ${vm.id.substring(0, 8)}: AWS terminated → marked failed`);
+                results.push(
+                  `Stuck provisioning VM ${vm.id.substring(0, 8)}: AWS ${desc.state} → marked failed`,
+                );
                 continue;
               }
             } else {
