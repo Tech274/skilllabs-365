@@ -37,6 +37,8 @@ Verified topology (2026-09-21 IST):
 
 `guacamole-proxy` therefore dials **AWS lab `public_ip`** by default (`GUAC_LAB_HOSTNAME=auto`) so guacd can reach labs over the internet. Override with `GUAC_LAB_HOSTNAME=private` only when Guac shares a routed path to lab RFC1918 (same VPC / TGW).
 
+Hub persistence: `provision-lab` / `check-vm-status` (promote) / `start-vm` write `virtual_machines.public_ip` from EC2 `DescribeInstances` (RunInstances uses `AssociatePublicIpAddress=true`). If Hub `public_ip` is still null at Connect, `guacamole-proxy` DescribeInstances again before minting — it does **not** silently dial private for AWS auto mode.
+
 From the Guac host (Ops verify, do **not** terminate Guac):
 
 ```bash

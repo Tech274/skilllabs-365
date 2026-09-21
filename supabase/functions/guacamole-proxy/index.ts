@@ -3,13 +3,18 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
-import { resolveAwsRuntime } from "../_shared/cloud-providers/aws-runtime.ts";
+import {
+  describeAwsInstance,
+  resolveAwsRuntime,
+} from "../_shared/cloud-providers/aws-runtime.ts";
+import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
 import {
   buildPublicIframeUrl,
   normalizeGuacCloudProvider,
   resolveGuacAdminEndpoint,
   resolveGuacLabHostname,
   type GuacCloudProvider,
+  type GuacLabAddress,
 } from "../_shared/guac-hosts.ts";
 
 const SOURCE = "guacamole-proxy";
@@ -19,6 +24,60 @@ const SOURCE = "guacamole-proxy";
 function labTemplateProtocol(vm: any): "ssh" | "rdp" {
   const tpl = Array.isArray(vm?.lab_templates) ? vm.lab_templates[0] : vm?.lab_templates;
   return String(tpl?.protocol ?? "").toUpperCase() === "SSH" ? "ssh" : "rdp";
+}
+
+/**
+ * Pick Guac dial hostname. For AWS, Hub public_ip may be null (never persisted,
+ * or ephemeral IP changed after Start). DescribeInstances before minting —
+ * never silently dial private when Guac is cross-region (ap-south-1 → us-east-1).
+ */
+// deno-lint-ignore no-explicit-any
+async function resolveLabAddrForConnect(vmCloud: GuacCloudProvider, vm: any): Promise<GuacLabAddress> {
+  const addr = resolveGuacLabHostname(vmCloud, vm);
+  if (vmCloud !== "aws" || addr.source === "public") return addr;
+
+  const mode = (Deno.env.get("GUAC_LAB_HOSTNAME") ?? "auto").trim().toLowerCase();
+  if (mode === "private") return addr;
+
+  const instanceId = String(vm.azure_vm_id ?? "").trim();
+  if (!instanceId) {
+    throw new Error(
+      "AWS lab has no public_ip on Hub and no instance id — cannot DescribeInstances for Guac dial",
+    );
+  }
+
+  const admin = serviceClient();
+  const aws = await resolveAwsRuntime(admin, vm.provider_account_id ?? null);
+  if (vm.region) aws.defaultRegion = String(vm.region);
+  const desc = await describeAwsInstance(aws, instanceId);
+  if (desc.publicIp) {
+    const patch: Record<string, unknown> = { public_ip: desc.publicIp };
+    if (desc.privateIp) patch.private_ip = desc.privateIp;
+    const { error } = await admin.from("virtual_machines").update(patch).eq("id", vm.id);
+    if (error) {
+      console.error(JSON.stringify({
+        scope: "guac-lab-hostname",
+        event: "persist_public_ip_failed",
+        vm_id: vm.id,
+        error: error.message,
+      }));
+    }
+    console.log(JSON.stringify({
+      scope: "guac-lab-hostname",
+      event: "aws_public_ip_from_describe",
+      vm_id: vm.id,
+      instance_id: instanceId,
+      public_ip: desc.publicIp,
+      private_ip: desc.privateIp,
+    }));
+    return { hostname: desc.publicIp, source: "public" };
+  }
+
+  throw new Error(
+    `AWS lab ${instanceId} has no public IP (Hub public_ip null; DescribeInstances empty). ` +
+      `Guac (cross-region) cannot reach private ${addr.hostname}. ` +
+      `Re-provision (AssociatePublicIpAddress) or associate an Elastic IP.`,
+  );
 }
 
 /**
@@ -469,7 +528,7 @@ Deno.serve(async (req) => {
       };
 
       const vmCloud = await resolveVmCloudProvider(supabase, vm);
-      const labAddr = resolveGuacLabHostname(vmCloud, vm);
+      const labAddr = await resolveLabAddrForConnect(vmCloud, vm);
       const dataSource = await bindGuacForProvider(vmCloud);
 
       // Idempotency: a second click must reuse the live session instead of

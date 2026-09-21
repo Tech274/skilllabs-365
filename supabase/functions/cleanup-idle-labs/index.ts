@@ -663,11 +663,27 @@ Deno.serve(async (req) => {
             status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
+        // Refresh AWS public_ip after Start (ephemeral public IP changes on
+        // Stop→Start). Describe may still be pending; check-vm-status promote
+        // re-writes when Running.
+        const ipPatch: Record<string, unknown> = {};
+        if (provider === "aws" && vm.azure_vm_id) {
+          try {
+            const awsRt = await resolveAwsRuntime(supabase, vm.provider_account_id);
+            if (vm.region) awsRt.defaultRegion = String(vm.region);
+            const desc = await describeAwsInstance(awsRt, vm.azure_vm_id);
+            if (desc.privateIp) ipPatch.private_ip = desc.privateIp;
+            if (desc.publicIp) ipPatch.public_ip = desc.publicIp;
+          } catch (e) {
+            console.error("start-vm AWS IP refresh failed:", e);
+          }
+        }
         await supabase.from("virtual_machines").update({
           status: "starting",
           ended_by: null,
           ended_reason: null,
           ended_at: null,
+          ...ipPatch,
         }).eq("id", targetVmId);
         const startReason = actionReason || (isPlatformAdmin ? "admin_start" : "learner_start");
         console.log(JSON.stringify({
@@ -1193,7 +1209,7 @@ Deno.serve(async (req) => {
               if (vm.region) aws.defaultRegion = String(vm.region);
               const desc = await describeAwsInstance(aws, vm.azure_vm_id);
               if (desc.state === "running") {
-                await applyPromoteToRunning(supabase, vm.id, desc.privateIp);
+                await applyPromoteToRunning(supabase, vm.id, desc.privateIp, desc.publicIp);
                 promoted = true;
                 results.push(
                   `Stuck provisioning VM ${vm.id.substring(0, 8)}: AWS running → promoted to running (no stop)`,
