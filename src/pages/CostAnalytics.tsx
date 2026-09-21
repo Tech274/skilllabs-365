@@ -179,15 +179,15 @@ export default function CostAnalytics() {
           ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-              <MetricCard title="Month-to-Date" value={`$${totalMonthly.toLocaleString()}`} icon={DollarSign} variant="primary" />
-              <MetricCard title="Projected Monthly" value={`$${projectedMonthly.toLocaleString()}`} icon={TrendingUp} variant={projectedMonthly > (budgetCap?.amount || Infinity) ? "warning" : "default"} subtitle="Based on daily average" />
-              <MetricCard title="Active VMs" value={activeVmCount} icon={Calculator} variant="default" />
-              <MetricCard title="VM Types" value={costBreakdown.length} icon={Coins} variant="default" subtitle="Distinct sizes in use" />
+              <MetricCard title="Month-to-Date" value={`$${totalMonthly.toLocaleString()}`} icon={DollarSign} variant="primary" to="/costs#cost-breakdown" />
+              <MetricCard title="Projected Monthly" value={`$${projectedMonthly.toLocaleString()}`} icon={TrendingUp} variant={projectedMonthly > (budgetCap?.amount || Infinity) ? "warning" : "default"} subtitle="Based on daily average" to="/costs#budget-cap" />
+              <MetricCard title="Active VMs" value={activeVmCount} icon={Calculator} variant="default" to="/vms?status=active" />
+              <MetricCard title="VM Types" value={costBreakdown.length} icon={Coins} variant="default" subtitle="Distinct sizes in use" to="/vms" />
             </div>
 
             {/* Budget Cap Status */}
             {budgetCap?.enabled && budgetCap.amount > 0 && (
-              <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
+              <motion.div id="budget-cap" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}
                 className={`rounded-xl border p-5 ${budgetUsedPct! >= 90 ? "border-destructive/30 bg-destructive/5" : budgetUsedPct! >= 70 ? "border-warning/30 bg-warning/5" : "border-border bg-card"}`}>
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2">
@@ -236,7 +236,7 @@ export default function CostAnalytics() {
             </motion.div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card p-5">
+              <motion.div id="cost-breakdown" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card p-5">
                 <h3 className="text-sm font-medium text-foreground mb-4">Cost by VM Size</h3>
                 <ResponsiveContainer width="100%" height={280}>
                   <BarChart data={costBreakdown}>

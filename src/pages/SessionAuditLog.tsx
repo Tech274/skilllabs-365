@@ -141,7 +141,7 @@ export default function SessionAuditLog() {
       e.user.toLowerCase().includes(search.toLowerCase()) ||
       e.labName.toLowerCase().includes(search.toLowerCase()) ||
       e.email.toLowerCase().includes(search.toLowerCase());
-    const matchesStatus = statusFilter === "all" || e.status === statusFilter;
+    const matchesStatus = statusFilter === "all" || (statusFilter === "issues" ? e.status === "error" || e.status === "terminated" : e.status === statusFilter);
     const matchesQuality = qualityFilter === "all" || e.connectionQuality === qualityFilter;
     return matchesSearch && matchesStatus && matchesQuality;
   });
@@ -167,17 +167,22 @@ export default function SessionAuditLog() {
         {/* Summary Cards */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[
-            { label: "Total Sessions", value: isLoading ? "—" : totalSessions, sub: "all time" },
-            { label: "Avg Duration", value: isLoading ? "—" : formatDuration(avgDuration), sub: "per session" },
-            { label: "Good Quality", value: isLoading ? "—" : totalSessions > 0 ? `${Math.round((goodQualityCount / totalSessions) * 100)}%` : "0%", sub: `${goodQualityCount}/${totalSessions} sessions` },
-            { label: "Issues", value: isLoading ? "—" : issueCount, sub: "errors & terminations" },
+            { label: "Total Sessions", value: isLoading ? "—" : totalSessions, sub: "all time", onClick: () => { setStatusFilter("all"); setQualityFilter("all"); } },
+            { label: "Avg Duration", value: isLoading ? "—" : formatDuration(avgDuration), sub: "per session", onClick: () => { setStatusFilter("all"); setQualityFilter("all"); document.getElementById("audit-table")?.scrollIntoView({ behavior: "smooth" }); } },
+            { label: "Good Quality", value: isLoading ? "—" : totalSessions > 0 ? `${Math.round((goodQualityCount / totalSessions) * 100)}%` : "0%", sub: `${goodQualityCount}/${totalSessions} sessions`, onClick: () => { setQualityFilter("good"); setStatusFilter("all"); } },
+            { label: "Issues", value: isLoading ? "—" : issueCount, sub: "errors & terminations", onClick: () => { setStatusFilter("issues"); setQualityFilter("all"); } },
           ].map((card, i) => (
             <motion.div
               key={card.label}
               initial={{ opacity: 0, y: 12 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: i * 0.05 }}
-              className="rounded-xl border border-border bg-card p-4"
+              role="button"
+              tabIndex={0}
+              onClick={card.onClick}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); card.onClick(); } }}
+              className="rounded-xl border border-border bg-card p-4 cursor-pointer transition-colors hover:border-primary/30 hover:bg-muted/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              aria-label={`Filter by ${card.label}`}
             >
               <p className="text-xs text-muted-foreground uppercase tracking-wider">{card.label}</p>
               <p className="text-2xl font-semibold font-mono text-foreground mt-1">{card.value}</p>
@@ -202,6 +207,7 @@ export default function SessionAuditLog() {
               <SelectItem value="active">Active</SelectItem>
               <SelectItem value="terminated">Terminated</SelectItem>
               <SelectItem value="error">Error</SelectItem>
+              <SelectItem value="issues">Issues (error + terminated)</SelectItem>
             </SelectContent>
           </Select>
           <Select value={qualityFilter} onValueChange={setQualityFilter}>
@@ -229,7 +235,7 @@ export default function SessionAuditLog() {
         )}
 
         {/* Audit Table */}
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="rounded-xl border border-border bg-card overflow-hidden">
+        <motion.div id="audit-table" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.15 }} className="rounded-xl border border-border bg-card overflow-hidden">
           <Table>
             <TableHeader>
               <TableRow className="hover:bg-transparent">

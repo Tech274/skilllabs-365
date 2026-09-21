@@ -2,7 +2,7 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { Monitor, Terminal, Users, Clock, Play, Loader2, BarChart3, TrendingUp, AlertCircle } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { readFunctionError } from "@/lib/function-error";
 import { useAuth } from "@/hooks/use-auth";
@@ -203,26 +203,40 @@ export default function InstructorDashboard() {
           </div>
         </div>
 
-        {/* KPI Cards */}
+        {/* KPI Cards — clickable drill-downs (SCRUM-35) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: "Assigned Labs", value: labs.length, icon: Monitor },
-            { label: "Active Sessions", value: activeSessions, icon: Users },
-            { label: "Completed", value: completedSessions, icon: TrendingUp },
-            { label: "Students", value: students.length, icon: BarChart3 },
+            { label: "Assigned Labs", value: labs.length, icon: Monitor, to: "#assigned-labs" },
+            { label: "Active Sessions", value: activeSessions, icon: Users, to: "/sessions?status=active" },
+            { label: "Completed", value: completedSessions, icon: TrendingUp, to: "/sessions?status=completed" },
+            { label: "Students", value: students.length, icon: BarChart3, to: "#student-progress" },
           ].map((kpi, i) => (
             <motion.div key={kpi.label} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}>
-              <Card>
-                <CardContent className="p-4 flex items-center gap-3">
-                  <div className="rounded-lg bg-primary/10 p-2">
-                    <kpi.icon className="h-4 w-4 text-primary" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-foreground">{kpi.value}</p>
-                    <p className="text-xs text-muted-foreground">{kpi.label}</p>
-                  </div>
-                </CardContent>
-              </Card>
+              <Link
+                to={kpi.to}
+                className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label={`${kpi.label}: ${kpi.value}`}
+                onClick={(e) => {
+                  if (!kpi.to.startsWith("#")) return;
+                  const el = document.getElementById(kpi.to.slice(1));
+                  if (el) {
+                    e.preventDefault();
+                    el.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }
+                }}
+              >
+                <Card className="cursor-pointer transition-colors hover:border-primary/30 hover:bg-muted/20">
+                  <CardContent className="p-4 flex items-center gap-3">
+                    <div className="rounded-lg bg-primary/10 p-2">
+                      <kpi.icon className="h-4 w-4 text-primary" />
+                    </div>
+                    <div>
+                      <p className="text-2xl font-bold text-foreground">{kpi.value}</p>
+                      <p className="text-xs text-muted-foreground">{kpi.label}</p>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
             </motion.div>
           ))}
         </div>
@@ -335,7 +349,7 @@ export default function InstructorDashboard() {
         </div>
 
         {/* Assigned Labs */}
-        <div>
+        <div id="assigned-labs">
           <h2 className="text-lg font-semibold text-foreground mb-3">Your Labs</h2>
           {labs.length === 0 ? (
             <Card>
@@ -398,7 +412,7 @@ export default function InstructorDashboard() {
         </div>
 
         {/* Student Progress Table */}
-        <div>
+        <div id="student-progress">
           <h2 className="text-lg font-semibold text-foreground mb-3">Student Progress</h2>
           {students.length === 0 ? (
             <Card>

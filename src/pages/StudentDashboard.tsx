@@ -2,7 +2,7 @@ import { DashboardLayout } from "@/components/DashboardLayout";
 import { motion } from "framer-motion";
 import { useEffect, useState } from "react";
 import { Monitor, Terminal, Play, Loader2, Clock, History, CheckCircle2, AlertCircle } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { ProvisioningErrorPanel } from "@/components/ProvisioningErrorPanel";
 import { readFunctionError } from "@/lib/function-error";
@@ -239,26 +239,40 @@ export default function StudentDashboard() {
           </Card>
         )}
 
-        {/* KPI Cards */}
+        {/* KPI Cards — clickable drill-downs (SCRUM-35) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {[
-            { label: "Available Labs", value: labs.length, icon: Monitor },
-            { label: "Active Sessions", value: activeSessions, icon: Play },
-            { label: "Completed", value: completedSessions, icon: CheckCircle2 },
-            { label: "Total Time", value: `${Math.round(totalTime)}m`, icon: Clock },
+            { label: "Available Labs", value: labs.length, icon: Monitor, to: "#available-labs" },
+            { label: "Active Sessions", value: activeSessions, icon: Play, to: "#session-history" },
+            { label: "Completed", value: completedSessions, icon: CheckCircle2, to: "#session-history" },
+            { label: "Total Time", value: `${Math.round(totalTime)}m`, icon: Clock, to: "#session-history" },
           ].map((kpi, i) => (
             <motion.div key={kpi.label} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.05 }}>
-              <Card>
-                <CardContent className="p-4 flex items-center gap-3">
-                  <div className="rounded-lg bg-primary/10 p-2">
-                    <kpi.icon className="h-4 w-4 text-primary" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-foreground">{kpi.value}</p>
-                    <p className="text-xs text-muted-foreground">{kpi.label}</p>
-                  </div>
-                </CardContent>
-              </Card>
+              <Link
+                to={kpi.to}
+                className="block rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                aria-label={`${kpi.label}: ${kpi.value}`}
+                onClick={(e) => {
+                  const id = kpi.to.replace("#", "");
+                  const el = document.getElementById(id);
+                  if (el) {
+                    e.preventDefault();
+                    el.scrollIntoView({ behavior: "smooth", block: "start" });
+                  }
+                }}
+              >
+                <Card className="cursor-pointer transition-colors hover:border-primary/30 hover:bg-muted/20">
+                  <CardContent className="p-4 flex items-center gap-3">
+                    <div className="rounded-lg bg-primary/10 p-2">
+                      <kpi.icon className="h-4 w-4 text-primary" />
+                    </div>
+                    <div>
+                      <p className="text-2xl font-bold text-foreground">{kpi.value}</p>
+                      <p className="text-xs text-muted-foreground">{kpi.label}</p>
+                    </div>
+                  </CardContent>
+                </Card>
+              </Link>
             </motion.div>
           ))}
         </div>
@@ -277,7 +291,7 @@ export default function StudentDashboard() {
         />
 
         {/* Available Labs */}
-        <div>
+        <div id="available-labs">
           <h2 className="text-lg font-semibold text-foreground mb-3">Available Labs</h2>
           {labs.length === 0 ? (
             <Card>
@@ -378,7 +392,7 @@ export default function StudentDashboard() {
         </div>
 
         {/* Session History */}
-        <div>
+        <div id="session-history">
           <h2 className="text-lg font-semibold text-foreground mb-3 flex items-center gap-2">
             <History className="h-4 w-4" /> Session History
           </h2>
