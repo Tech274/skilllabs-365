@@ -97,6 +97,16 @@ interface ProviderAccount {
   default_region: string | null;
 }
 
+/** Prefer is_default so Create Lab shows AWS t3.* immediately (not Azure B2s). */
+function pickDefaultProviderAccount(accounts: ProviderAccount[]) {
+  return (
+    accounts.find((a) => a.is_default) ??
+    accounts.find((a) => a.provider === "aws") ??
+    accounts[0] ??
+    null
+  );
+}
+
 interface InstructorProfile {
   user_id: string;
   display_name: string;
@@ -162,7 +172,32 @@ export default function LabManagement() {
 
   useEffect(() => { fetchLabs(); fetchProviderAccounts(); }, []);
 
-  const openCreate = () => { setEditingLab(null); setForm(emptyForm); setDurationDays(""); setDialogOpen(true); };
+  // P0d: if Create opened before accounts arrived, auto-select is_default once listed.
+  useEffect(() => {
+    if (!dialogOpen || editingLab) return;
+    if (form.provider_account_id) return;
+    const def = pickDefaultProviderAccount(providerAccounts);
+    if (!def) return;
+    setForm((f) => ({
+      ...f,
+      provider_account_id: def.id,
+      vm_size: defaultSizeForProvider(def.provider),
+      region: def.default_region || f.region,
+    }));
+  }, [providerAccounts, dialogOpen, editingLab, form.provider_account_id]);
+
+  const openCreate = () => {
+    setEditingLab(null);
+    const def = pickDefaultProviderAccount(providerAccounts);
+    setForm({
+      ...emptyForm,
+      provider_account_id: def?.id ?? "",
+      vm_size: defaultSizeForProvider(def?.provider),
+      region: def?.default_region || emptyForm.region,
+    });
+    setDurationDays("");
+    setDialogOpen(true);
+  };
 
   const openEdit = (lab: LabTemplate) => {
     setEditingLab(lab);
