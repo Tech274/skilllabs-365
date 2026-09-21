@@ -6,7 +6,9 @@ import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts
 import {
   reconcileProvisioningAgainstAzure,
   applyPromoteToRunning,
+  fetchInstanceViewStatuses,
 } from "../_shared/azure-reconcile.ts";
+import { azureStatusToVmStatus } from "../_shared/vm-state.ts";
 import {
   resolveAwsRuntime, stopAwsInstance, terminateAwsInstance, describeAwsInstance,
 } from "../_shared/cloud-providers/aws-runtime.ts";
@@ -148,6 +150,34 @@ async function stopCloudVm(
   }
   const az = await azureFor(vm.provider_account_id);
   return await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, extractVmName(vm.azure_vm_id));
+}
+
+/**
+ * After a failed StopInstances/deallocate, describe the cloud VM.
+ * If it is already soft-stopped (AWS stopped / Azure stopped|deallocated),
+ * callers may mark Hub deallocated with cloud_stop_ok via reconcile.
+ */
+async function isCloudAlreadySoftStopped(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  azureFor: (accountId?: string | null) => Promise<AzureCtx>,
+  vm: { azure_vm_id: string; provider_account_id?: string | null; region?: string | null },
+): Promise<{ softStopped: boolean; detail: string }> {
+  const provider = await providerOf(supabase, vm.provider_account_id);
+  if (provider === "aws") {
+    const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
+    if (vm.region) aws.defaultRegion = String(vm.region);
+    const desc = await describeAwsInstance(aws, vm.azure_vm_id);
+    // Only terminal soft-stop states — "stopping" is still transitional.
+    const softStopped = desc.state === "stopped";
+    return { softStopped, detail: `aws state=${desc.state}` };
+  }
+  const az = await azureFor(vm.provider_account_id);
+  const statuses = await fetchInstanceViewStatuses(az, extractVmName(vm.azure_vm_id));
+  if (!statuses) return { softStopped: false, detail: "azure instanceView unavailable" };
+  const mapped = azureStatusToVmStatus(statuses);
+  const softStopped = mapped === "deallocated" || mapped === "stopped";
+  return { softStopped, detail: `azure mapped=${mapped ?? "null"}` };
 }
 
 /** Delete / terminate a lab VM on its home cloud. */
@@ -359,12 +389,15 @@ Deno.serve(async (req) => {
         .eq("vm_id", targetVmId)
         .eq("status", "active");
 
-      const live = ["running", "provisioning", "starting", "idle"].includes(String(vm.status || "").toLowerCase());
+      const priorStatus = String(vm.status || "running");
+      const live = ["running", "provisioning", "starting", "idle"].includes(priorStatus.toLowerCase());
       let stopped = !live;
       let stopDetail: string | null = null;
+      let reconciled = false;
       if (live && vm.azure_vm_id) {
         try {
           stopped = await stopCloudVm(supabase, azureFor, vm);
+          if (!stopped) stopDetail = "cloud soft-stop returned false";
         } catch (e) {
           stopDetail = e instanceof Error ? e.message : String(e);
           console.error(JSON.stringify({
@@ -376,10 +409,38 @@ Deno.serve(async (req) => {
           }));
           stopped = false;
         }
+        // Optional reconcile: Stop may have failed while cloud is already soft-stopped.
+        if (!stopped) {
+          try {
+            const recon = await isCloudAlreadySoftStopped(supabase, azureFor, vm);
+            if (recon.softStopped) {
+              stopped = true;
+              reconciled = true;
+              stopDetail = stopDetail
+                ? `${stopDetail}; reconciled: ${recon.detail}`
+                : `reconciled: ${recon.detail}`;
+            } else if (!stopDetail) {
+              stopDetail = recon.detail;
+            } else {
+              stopDetail = `${stopDetail}; ${recon.detail}`;
+            }
+          } catch (e) {
+            const reconDetail = e instanceof Error ? e.message : String(e);
+            console.error(JSON.stringify({
+              event: "learner_leave_reconcile_failed",
+              vm_id: targetVmId,
+              instance_id: vm.azure_vm_id,
+              detail: reconDetail,
+            }));
+            stopDetail = stopDetail ? `${stopDetail}; reconcile failed: ${reconDetail}` : `reconcile failed: ${reconDetail}`;
+          }
+        }
       }
-      // Soft-stop still marks Hub deallocated for wallet/Leave UX even when the
-      // cloud stop fails — start-vm describe-first heals (running → idempotent ok).
-      if (live) {
+
+      // Honesty gate: Hub deallocated ONLY when cloud soft-stop (or reconcile) succeeded.
+      // Session/wallet close still proceed for Leave UX; power state stays truthful.
+      const hubStatus = live ? (stopped ? "deallocated" : priorStatus) : priorStatus;
+      if (live && stopped) {
         await markVmEnded(supabase, targetVmId, {
           status: "deallocated",
           ended_by: auth.userId,
@@ -431,7 +492,10 @@ Deno.serve(async (req) => {
         actor: auth.userId,
         stopped,
         cloud_stop_ok: stopped,
+        reconciled,
         stop_detail: stopDetail,
+        hub_status: hubStatus,
+        prior_status: priorStatus,
         region: vm.region ?? null,
         instance_id: vm.azure_vm_id ?? null,
         wallet,
@@ -441,7 +505,7 @@ Deno.serve(async (req) => {
         success: true,
         action: "learner-leave",
         vm_id: targetVmId,
-        status: "deallocated",
+        status: hubStatus,
         soft_stop: true,
         deleted: false,
         cloud_stop_ok: stopped,
@@ -909,32 +973,53 @@ Deno.serve(async (req) => {
           .eq("status", "active");
 
         let azureOk = true;
+        let stopDetail: string | null = null;
         if (vm.azure_vm_id) {
           try {
             azureOk = await stopCloudVm(supabase, azureFor, vm);
+            if (!azureOk) stopDetail = "cloud soft-stop returned false";
           } catch (e) {
             azureOk = false;
+            stopDetail = e instanceof Error ? e.message : String(e);
             console.error("expired soft-path deallocate failed", e);
+          }
+          if (!azureOk) {
+            try {
+              const recon = await isCloudAlreadySoftStopped(supabase, azureFor, vm);
+              if (recon.softStopped) {
+                azureOk = true;
+                stopDetail = stopDetail ? `${stopDetail}; reconciled: ${recon.detail}` : `reconciled: ${recon.detail}`;
+              }
+            } catch (e) {
+              console.error("expired soft-path reconcile failed", e);
+            }
           }
         }
 
-        // Always move DB to deallocated so expiry never leaves a "running" lab that
-        // another sweeper might hard-delete; Azure failure is logged but not silent-terminate.
-        await markVmEnded(supabase, vm.id, {
-          status: "deallocated",
-          ended_by: SOURCE,
-          ended_reason: "lab_window_expired",
-          ended_at: now.toISOString(),
-        });
-
+        // Honesty gate: mark Hub deallocated only when cloud soft-stop (or reconcile) succeeded.
         const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
-        await notifyLearnerAndAdmins(supabase, {
-          userId: vm.user_id,
-          type: "lab_expired",
-          title: "Lab window expired — VM deallocated",
-          message: `Lab VM ${label} reached expires_at and was soft-stopped (deallocated). Resources are held, not deleted. Contact an admin to resume or purge.`,
-        });
-        results.push(`Expired VM ${label}: deallocated (soft)${azureOk ? "" : " [azure deallocate failed]"}`);
+        if (azureOk) {
+          await markVmEnded(supabase, vm.id, {
+            status: "deallocated",
+            ended_by: SOURCE,
+            ended_reason: "lab_window_expired",
+            ended_at: now.toISOString(),
+          });
+          await notifyLearnerAndAdmins(supabase, {
+            userId: vm.user_id,
+            type: "lab_expired",
+            title: "Lab window expired — VM deallocated",
+            message: `Lab VM ${label} reached expires_at and was soft-stopped (deallocated). Resources are held, not deleted. Contact an admin to resume or purge.`,
+          });
+          results.push(`Expired VM ${label}: deallocated (soft)`);
+        } else {
+          console.error(JSON.stringify({
+            event: "expired_soft_stop_failed",
+            vm_id: vm.id,
+            detail: stopDetail,
+          }));
+          results.push(`Expired VM ${label}: cloud stop failed — Hub status left as ${vm.status}${stopDetail ? ` [${stopDetail.slice(0, 120)}]` : ""}`);
+        }
       }
     }
 
@@ -1001,34 +1086,58 @@ Deno.serve(async (req) => {
           .eq("status", "active");
 
         let azureOk = true;
+        let stopDetail: string | null = null;
         if (vm.azure_vm_id) {
           try {
             azureOk = await stopCloudVm(supabase, azureFor, vm);
+            if (!azureOk) stopDetail = "cloud soft-stop returned false";
           } catch (e) {
             azureOk = false;
+            stopDetail = e instanceof Error ? e.message : String(e);
             console.error("wallet soft-expiry deallocate failed", e);
+          }
+          if (!azureOk) {
+            try {
+              const recon = await isCloudAlreadySoftStopped(supabase, azureFor, vm);
+              if (recon.softStopped) {
+                azureOk = true;
+                stopDetail = stopDetail ? `${stopDetail}; reconciled: ${recon.detail}` : `reconciled: ${recon.detail}`;
+              }
+            } catch (e) {
+              console.error("wallet soft-expiry reconcile failed", e);
+            }
           }
         }
 
-        await markVmEnded(supabase, vm.id, {
-          status: "deallocated",
-          ended_by: SOURCE,
-          ended_reason: windowEnded ? "lab_window_expired" : "lab_minutes_exhausted",
-          ended_at: now.toISOString(),
-        });
-
         const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
-        await notifyLearnerAndAdmins(supabase, {
-          userId: vm.user_id,
-          type: windowEnded ? "lab_expired" : "lab_minutes_exhausted",
-          title: windowEnded ? "Lab window ended — VM deallocated" : "Lab minutes used up — VM deallocated",
-          message: windowEnded
-            ? `Lab ${tpl.name} reached its end date (EOD IST). VM ${label} was deallocated. Resources are held, not deleted.`
-            : `Lab ${tpl.name} used all ${allocated} allocated minutes. VM ${label} was deallocated. Resources are held, not deleted.`,
-        });
-        results.push(
-          `Wallet soft-expiry ${label}: ${windowEnded ? "window ended" : "minutes exhausted"} → deallocated${azureOk ? "" : " [azure deallocate failed]"}`,
-        );
+        if (azureOk) {
+          await markVmEnded(supabase, vm.id, {
+            status: "deallocated",
+            ended_by: SOURCE,
+            ended_reason: windowEnded ? "lab_window_expired" : "lab_minutes_exhausted",
+            ended_at: now.toISOString(),
+          });
+          await notifyLearnerAndAdmins(supabase, {
+            userId: vm.user_id,
+            type: windowEnded ? "lab_expired" : "lab_minutes_exhausted",
+            title: windowEnded ? "Lab window ended — VM deallocated" : "Lab minutes used up — VM deallocated",
+            message: windowEnded
+              ? `Lab ${tpl.name} reached its end date (EOD IST). VM ${label} was deallocated. Resources are held, not deleted.`
+              : `Lab ${tpl.name} used all ${allocated} allocated minutes. VM ${label} was deallocated. Resources are held, not deleted.`,
+          });
+          results.push(
+            `Wallet soft-expiry ${label}: ${windowEnded ? "window ended" : "minutes exhausted"} → deallocated`,
+          );
+        } else {
+          console.error(JSON.stringify({
+            event: "wallet_soft_stop_failed",
+            vm_id: vm.id,
+            detail: stopDetail,
+          }));
+          results.push(
+            `Wallet soft-expiry ${label}: cloud stop failed — Hub status left as ${vm.status}${stopDetail ? ` [${stopDetail.slice(0, 120)}]` : ""}`,
+          );
+        }
       }
     } catch (e) {
       console.error("Wallet soft-expiry sweep failed:", e);
