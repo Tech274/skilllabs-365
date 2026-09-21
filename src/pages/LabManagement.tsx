@@ -21,9 +21,11 @@ import type { Tables, TablesInsert } from "@/integrations/supabase/types";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 import {
   endDateFromDuration,
+  formatIstDate,
   istDateToEndIso,
   istDateToStartIso,
   toIstDateInput,
+  validatePrepaidMinutes,
   validateTemplateWindow,
 } from "@/lib/lab-template-window";
 
@@ -207,8 +209,8 @@ export default function LabManagement() {
       idle_timeout: lab.idle_timeout, is_persistent: lab.is_persistent, clipboard_enabled: lab.clipboard_enabled,
       file_transfer_enabled: lab.file_transfer_enabled, region: lab.region, status: lab.status,
       provider_account_id: lab.provider_account_id ?? '',
-      start_date: toIstDateInput((lab as LabTemplate & { start_date?: string | null }).start_date),
-      end_date: toIstDateInput((lab as LabTemplate & { end_date?: string | null }).end_date),
+      start_date: toIstDateInput(lab.start_date),
+      end_date: toIstDateInput(lab.end_date),
     });
     setDurationDays("");
     setDialogOpen(true);
@@ -216,6 +218,11 @@ export default function LabManagement() {
 
   const handleSave = async () => {
     if (!form.name.trim()) return;
+    const minutesError = validatePrepaidMinutes(form.duration);
+    if (minutesError) {
+      toast({ title: "Total minutes required", description: minutesError, variant: "destructive" });
+      return;
+    }
     if (windowError) {
       toast({ title: "Lab window invalid", description: windowError, variant: "destructive" });
       return;
@@ -242,7 +249,7 @@ export default function LabManagement() {
       ...formFields,
       vm_size: coercedSize,
       provider: selectedProvider as "aws" | "azure",
-      // Persistent labs carry an IST window; non-persistent keep total minutes only.
+      // Persistent: prepaid duration + IST access window. Non-persistent: prepaid duration only.
       start_date: form.is_persistent ? istDateToStartIso(start_date) : null,
       end_date: form.is_persistent ? istDateToEndIso(end_date) : null,
     };
@@ -385,7 +392,7 @@ export default function LabManagement() {
                 <p className="text-xs text-muted-foreground line-clamp-2">{lab.description}</p>
                 <div className="grid grid-cols-2 gap-2 text-center">
                   <div className="rounded-lg bg-muted/50 p-2">
-                    <p className="text-sm font-mono font-semibold text-foreground">{lab.is_persistent ? "∞" : `${lab.duration}m`}</p>
+                    <p className="text-sm font-mono font-semibold text-foreground">{`${lab.duration}m`}</p>
                     <p className="text-[9px] text-muted-foreground uppercase">Total minutes</p>
                   </div>
                   <div className="rounded-lg bg-muted/50 p-2">
@@ -393,6 +400,11 @@ export default function LabManagement() {
                     <p className="text-[9px] text-muted-foreground uppercase">Idle Timeout</p>
                   </div>
                 </div>
+                {lab.is_persistent && (lab.start_date || lab.end_date) && (
+                  <p className="text-[10px] text-muted-foreground text-center">
+                    Access window: {formatIstDate(lab.start_date)} → {formatIstDate(lab.end_date)}
+                  </p>
+                )}
                 <div className="flex flex-wrap gap-1.5">
                   <Badge variant="outline" className="text-[10px] font-mono">{lab.vm_size}</Badge>
                   <Badge variant="outline" className="text-[10px]">{lab.protocol}</Badge>
@@ -513,7 +525,12 @@ export default function LabManagement() {
                 </div>
                 <div className="space-y-2">
                   <Label>Total minutes</Label>
-                  <Input type="number" value={form.duration} onChange={e => setForm({ ...form, duration: Number(e.target.value) })} disabled={form.is_persistent} />
+                  <Input type="number" min={1} value={form.duration} onChange={e => setForm({ ...form, duration: Number(e.target.value) })} />
+                  {form.is_persistent && (
+                    <p className="text-[10px] text-muted-foreground">
+                      Prepaid session pool (e.g. 200). Learners use any session lengths until minutes exhaust inside the date window — not unlimited.
+                    </p>
+                  )}
                 </div>
               </div>
               {form.is_persistent && (
@@ -539,7 +556,7 @@ export default function LabManagement() {
                   </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div className="space-y-2">
-                      <Label>Duration helper (days)</Label>
+                      <Label>Set end date from calendar days</Label>
                       <Input
                         type="number"
                         min={1}
@@ -558,8 +575,9 @@ export default function LabManagement() {
                     <p className="text-xs text-destructive">{windowError}</p>
                   ) : (
                     <p className="text-xs text-muted-foreground">
-                      Access runs to end of day IST on the end date, then the lab is deallocated and the learner is
-                      notified — never silently terminated. A disconnect is not a deallocation.
+                      Start→end is the access window only (IST), not a 24/7 always-on VM. Sessions of any length
+                      run until prepaid Total minutes exhaust inside the window. End of end date (EOD IST)
+                      deallocates and notifies — never silently terminated. Leave/soft-stop holds the same VM.
                     </p>
                   )}
                 </div>
@@ -609,7 +627,7 @@ export default function LabManagement() {
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-              <Button onClick={handleSave} disabled={!form.name.trim()}>{editingLab ? 'Save Changes' : 'Create Lab'}</Button>
+              <Button onClick={handleSave} disabled={!form.name.trim() || !Number.isFinite(form.duration) || form.duration <= 0 || Boolean(windowError)}>{editingLab ? 'Save Changes' : 'Create Lab'}</Button>
             </DialogFooter>
           </DialogContent>
         </Dialog>

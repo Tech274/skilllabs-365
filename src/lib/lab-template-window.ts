@@ -1,10 +1,14 @@
 /**
  * Persistent lab template windows (Asia/Kolkata).
  *
- * Persistent templates run between a Start date and an End date (end > start).
- * End date means end-of-day IST — the soft-expiry job deallocates + notifies at
- * that point; it never silently terminates, and a disconnect is not a deallocate.
- * Non-persistent templates keep Total minutes only and carry no window.
+ * Persistent templates combine:
+ *   - prepaid Total minutes (lab_templates.duration) — session wallet pool
+ *   - Start date → End date access WINDOW only (not a 24/7 always-on VM)
+ *
+ * Learners may start many sessions of any length until minutes exhaust INSIDE
+ * the window. End date means end-of-day IST — soft-expiry deallocates + notifies;
+ * it never silently terminates, and a disconnect is not a deallocate.
+ * Non-persistent templates keep Total minutes only and carry no date window.
  */
 
 export const IST_TZ = "Asia/Kolkata";
@@ -65,6 +69,14 @@ export type TemplateWindowInput = {
   startDate: string;
   endDate: string;
 };
+
+/** Prepaid Total minutes must be > 0 for every lab (persistent included). */
+export function validatePrepaidMinutes(duration: number): string | null {
+  if (!Number.isFinite(duration) || duration <= 0) {
+    return "Total minutes must be greater than 0 (prepaid session pool).";
+  }
+  return null;
+}
 
 /** Validate the template form window. Returns a learner-free admin error string. */
 export function validateTemplateWindow(input: TemplateWindowInput): string | null {

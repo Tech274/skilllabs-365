@@ -5,6 +5,7 @@ import {
   istDateToStartIso,
   toIstDateInput,
   validateGrantWindow,
+  validatePrepaidMinutes,
   validateTemplateWindow,
 } from "@/lib/lab-template-window";
 
@@ -20,6 +21,16 @@ describe("IST window conversion", () => {
 
   it("derives an inclusive end date from duration days", () => {
     expect(endDateFromDuration("2026-10-01", 30)).toBe("2026-10-30");
+  });
+});
+
+
+describe("validatePrepaidMinutes", () => {
+  it("requires duration > 0 for prepaid pool (persistent included)", () => {
+    expect(validatePrepaidMinutes(0)).toMatch(/greater than 0/i);
+    expect(validatePrepaidMinutes(-5)).toMatch(/greater than 0/i);
+    expect(validatePrepaidMinutes(Number.NaN)).toMatch(/greater than 0/i);
+    expect(validatePrepaidMinutes(200)).toBeNull();
   });
 });
 
