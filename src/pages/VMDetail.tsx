@@ -41,14 +41,16 @@ export default function VMDetail() {
   const fetchVM = useCallback(async () => {
     if (!vmId) return;
     setLoadError(null);
+    // No virtual_machines → profiles FK; resolve owner via profiles batch
+    // (same source as Sessions actor / User Administration).
     const { data, error } = await supabase
       .from("virtual_machines")
-      .select("*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name)")
+      .select("*, lab_templates(name)")
       .eq("id", vmId)
       .single();
 
     if (error) {
-      // PGRST116 = no rows; anything else is often RLS/join failure, not a missing VM
+      // PGRST116 = no rows; anything else is often RLS failure, not a missing VM
       const isNotFound = error.code === "PGRST116";
       setVm(null);
       setLoadError(
@@ -58,9 +60,19 @@ export default function VMDetail() {
               "Could not load this VM (permission or related-record lookup failed).",
       );
     } else if (data) {
+      let userName = "—";
+      const ownerId = (data as any).user_id as string | null;
+      if (ownerId) {
+        const { data: profile } = await supabase
+          .from("profiles")
+          .select("display_name, email")
+          .eq("user_id", ownerId)
+          .maybeSingle();
+        userName = profile?.display_name || profile?.email || "—";
+      }
       setVm({
         ...data,
-        userName: (data as any).profiles?.display_name || "—",
+        userName,
         labName: (data as any).lab_templates?.name || "—",
       });
       setLoadError(null);

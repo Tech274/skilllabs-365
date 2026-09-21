@@ -96,16 +96,36 @@ const Index = () => {
   const quotaAlertShown = useRef(false);
 
   const fetchVMs = useCallback(async () => {
+    // No virtual_machines → profiles FK; resolve display names via profiles batch
+    // (same source as Sessions actor / User Administration).
     const { data, error } = await supabase
       .from("virtual_machines")
-      .select("*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name)")
+      .select("*, lab_templates(name)")
       .order("created_at", { ascending: false })
       .limit(8);
 
     if (error) {
-      const { data: fallback } = await supabase.from("virtual_machines").select("*").order("created_at", { ascending: false }).limit(8);
-      if (fallback) setVms(fallback.map((vm: any) => ({ ...vm, userName: "—", labName: "—" })));
-    } else if (data) {
+      console.error("Failed to load overview VMs:", error.message);
+      setVms([]);
+      setVmLoading(false);
+      return;
+    }
+
+    if (data) {
+      const userIds = Array.from(
+        new Set(data.map((vm: any) => vm.user_id).filter(Boolean)),
+      ) as string[];
+      const profileMap = new Map<string, { display_name: string; email: string | null }>();
+      if (userIds.length > 0) {
+        const { data: profiles } = await supabase
+          .from("profiles")
+          .select("user_id, display_name, email")
+          .in("user_id", userIds);
+        for (const p of profiles ?? []) {
+          profileMap.set(p.user_id, { display_name: p.display_name, email: p.email });
+        }
+      }
+
       setVms(data.map((vm: any) => {
         const azureId = vm.azure_vm_id as string | null;
         let cloud = "—";
@@ -114,9 +134,10 @@ const Index = () => {
           else if (azureId.startsWith("i-") || azureId.startsWith("arn:")) cloud = "AWS";
           else cloud = "Cloud";
         }
+        const profile = vm.user_id ? profileMap.get(vm.user_id) : undefined;
         return {
           ...vm,
-          userName: vm.profiles?.display_name || "—",
+          userName: profile?.display_name || profile?.email || "—",
           labName: vm.lab_templates?.name || "—",
           instanceName: extractInstanceName(azureId) || vm.lab_templates?.name || null,
           cloud,

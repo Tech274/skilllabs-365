@@ -25,20 +25,42 @@ export default function Sessions() {
   const [loading, setLoading] = useState(true);
 
   const fetchSessions = useCallback(async () => {
+    // Resolve actor via profiles batch (same source as User Administration).
+    // Avoid embedding profiles!sessions_user_id_fkey — FK may be absent from schema types.
     const { data, error } = await supabase
       .from("sessions")
-      .select("*, profiles!sessions_user_id_fkey(display_name), lab_templates(name)")
+      .select("*, lab_templates(name)")
       .order("started_at", { ascending: false });
 
     if (error) {
-      const { data: fallback } = await supabase.from("sessions").select("*").order("started_at", { ascending: false });
-      if (fallback) setSessions(fallback.map((s: any) => ({ ...s, userName: "—", labName: "—" })));
-    } else if (data) {
-      setSessions(data.map((s: any) => ({
-        ...s,
-        userName: s.profiles?.display_name || "—",
-        labName: s.lab_templates?.name || "—",
-      })));
+      console.error("Failed to load sessions:", error.message);
+      setSessions([]);
+      setLoading(false);
+      return;
+    }
+
+    if (data) {
+      const userIds = Array.from(
+        new Set(data.map((s: any) => s.user_id).filter(Boolean)),
+      ) as string[];
+      const profileMap = new Map<string, { display_name: string; email: string | null }>();
+      if (userIds.length > 0) {
+        const { data: profiles } = await supabase
+          .from("profiles")
+          .select("user_id, display_name, email")
+          .in("user_id", userIds);
+        for (const p of profiles ?? []) {
+          profileMap.set(p.user_id, { display_name: p.display_name, email: p.email });
+        }
+      }
+      setSessions(data.map((s: any) => {
+        const profile = s.user_id ? profileMap.get(s.user_id) : undefined;
+        return {
+          ...s,
+          userName: profile?.display_name || profile?.email || "—",
+          labName: s.lab_templates?.name || "—",
+        };
+      }));
     }
     setLoading(false);
   }, []);
