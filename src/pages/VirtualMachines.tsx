@@ -36,6 +36,15 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { useAuth } from "@/hooks/use-auth";
+import {
+  buildLabWallet,
+  formatMinutes,
+  walletEquation,
+  type LabWallet,
+  type WalletSession,
+  type WalletTemplate,
+} from "@/lib/lab-wallet";
+import { cn } from "@/lib/utils";
 
 interface VMRow {
   id: string;
@@ -57,6 +66,14 @@ interface VMRow {
   labUsername?: string | null;
   instanceName?: string | null;
   labName?: string | null;
+  /** Template duration / window snapshot for wallet + expiry display. */
+  templateDuration?: number | null;
+  templateIsPersistent?: boolean | null;
+  templateStartDate?: string | null;
+  templateEndDate?: string | null;
+  /** Wallet remaining minutes when computable (user + template sessions). */
+  availableMinutes?: number | null;
+  wallet?: LabWallet | null;
 }
 
 /** Extract VM / instance name from azure_vm_id (full ARM path or bare name). */
@@ -82,6 +99,52 @@ function formatDateTime(iso: string | null | undefined): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+type TemplateJoin = {
+  name?: string;
+  duration?: number | null;
+  is_persistent?: boolean | null;
+  start_date?: string | null;
+  end_date?: string | null;
+};
+
+/** Expiry: VM expires_at first; else persistent template end_date window. */
+function resolveExpiryLabel(vm: VMRow): { primary: string; secondary: string | null } {
+  if (vm.expires_at) {
+    return {
+      primary: formatDateTime(vm.expires_at),
+      secondary: vm.wallet?.endLabel ? `Window ${vm.wallet.endLabel} IST` : null,
+    };
+  }
+  if (vm.wallet?.endLabel) {
+    return {
+      primary: `${vm.wallet.endLabel} IST`,
+      secondary: vm.wallet.windowEnded ? "Window ended" : "Template end",
+    };
+  }
+  if (vm.templateEndDate) {
+    const w = buildLabWallet(
+      {
+        id: vm.lab_template_id || "tmp",
+        duration: vm.templateDuration,
+        is_persistent: true,
+        end_date: vm.templateEndDate,
+        start_date: vm.templateStartDate,
+      },
+      [],
+    );
+    return {
+      primary: w.endLabel ? `${w.endLabel} IST` : formatDateTime(vm.templateEndDate),
+      secondary: w.windowEnded ? "Window ended" : "Template end",
+    };
+  }
+  return { primary: "—", secondary: null };
+}
+
+function statusLabel(s: string): string {
+  if (!s) return "Unknown";
+  return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
 export default function VirtualMachines() {
@@ -125,7 +188,7 @@ export default function VirtualMachines() {
     const { data: vmData, error } = await supabase
       .from("virtual_machines")
       .select(
-        "*, lab_templates(name), profiles!virtual_machines_user_id_fkey(display_name, email)",
+        "*, lab_templates(name, duration, is_persistent, start_date, end_date), profiles!virtual_machines_user_id_fkey(display_name, email)",
       )
       .order("created_at", { ascending: false });
 
@@ -150,7 +213,7 @@ export default function VirtualMachines() {
     } else if (vmData) {
       rows = vmData.map((vm: Record<string, unknown>) => {
         const profiles = vm.profiles as { display_name?: string; email?: string | null } | null;
-        const labs = vm.lab_templates as { name?: string } | null;
+        const labs = vm.lab_templates as TemplateJoin | null;
         const azureVmId = (vm.azure_vm_id as string | null) ?? null;
         return {
           ...(vm as unknown as VMRow),
@@ -159,19 +222,50 @@ export default function VirtualMachines() {
           labUsername: null,
           instanceName: extractInstanceName(azureVmId),
           labName: labs?.name || null,
+          templateDuration: labs?.duration ?? null,
+          templateIsPersistent: labs?.is_persistent ?? null,
+          templateStartDate: labs?.start_date ?? null,
+          templateEndDate: labs?.end_date ?? null,
+          availableMinutes: null,
+          wallet: null,
         };
       });
     }
 
-    // Lab username: latest sessions.guac_username per vm_id (no dedicated lab_username on VMs).
+    // Lab username + wallet sessions: guac_username by vm_id; usage by user for Available Mins.
     if (rows.length > 0) {
       const vmIds = rows.map((r) => r.id);
-      const { data: sessionRows } = await supabase
+      const userIds = Array.from(
+        new Set(rows.map((r) => r.user_id).filter((id): id is string => Boolean(id))),
+      );
+
+      const guacQuery = supabase
         .from("sessions")
         .select("vm_id, guac_username, started_at")
         .in("vm_id", vmIds)
         .not("guac_username", "is", null)
         .order("started_at", { ascending: false });
+
+      type UsageRow = {
+        user_id: string | null;
+        lab_template_id: string | null;
+        started_at: string | null;
+        ended_at: string | null;
+      };
+
+      const usageQuery =
+        userIds.length > 0
+          ? supabase
+              .from("sessions")
+              .select("user_id, lab_template_id, started_at, ended_at")
+              .in("user_id", userIds)
+          : null;
+
+      const [{ data: sessionRows }, usageResult] = await Promise.all([
+        guacQuery,
+        usageQuery ?? Promise.resolve({ data: [] as UsageRow[] }),
+      ]);
+      const usageRows: UsageRow[] = (usageResult.data ?? []) as UsageRow[];
 
       if (sessionRows && sessionRows.length > 0) {
         const latestByVm = new Map<string, string>();
@@ -186,6 +280,49 @@ export default function VirtualMachines() {
           labUsername: latestByVm.get(r.id) ?? null,
         }));
       }
+
+      // Frontend wallet remaining (PR #24 pattern): allocated template duration − used sessions.
+      const usageByUser = new Map<string, WalletSession[]>();
+      for (const s of usageRows) {
+        const uid = s.user_id;
+        if (!uid) continue;
+        const list = usageByUser.get(uid) ?? [];
+        list.push({
+          lab_template_id: s.lab_template_id,
+          started_at: s.started_at,
+          ended_at: s.ended_at,
+        });
+        usageByUser.set(uid, list);
+      }
+
+      rows = rows.map((r) => {
+        if (!r.user_id || !r.lab_template_id) {
+          return { ...r, availableMinutes: null, wallet: null };
+        }
+        const duration = r.templateDuration;
+        if (
+          (duration == null || Number(duration) <= 0) &&
+          !r.templateEndDate &&
+          !r.templateIsPersistent
+        ) {
+          return { ...r, availableMinutes: null, wallet: null };
+        }
+        const template: WalletTemplate = {
+          id: r.lab_template_id,
+          duration: duration ?? 0,
+          is_persistent: r.templateIsPersistent,
+          start_date: r.templateStartDate,
+          end_date: r.templateEndDate,
+        };
+        const sessions = usageByUser.get(r.user_id) ?? [];
+        const wallet = buildLabWallet(template, sessions);
+        return {
+          ...r,
+          wallet,
+          availableMinutes:
+            template.duration && template.duration > 0 ? wallet.remainingMinutes : null,
+        };
+      });
     }
 
     setVms(rows);
@@ -426,19 +563,22 @@ export default function VirtualMachines() {
     return matchSearch && matchStatus;
   });
 
+  // Full Hub status set — filter + badge fidelity (MakeMyLabs Manage VM parity).
   const allStatuses: VMStatus[] = [
     "running",
     "idle",
+    "stopped",
+    "deallocated",
+    "failed",
     "provisioning",
     "starting",
     "expired",
-    "stopped",
-    "deallocated",
     "terminated",
-    "failed",
   ];
-  const isActiveStatus = (s: string) => ["running", "idle", "provisioning", "starting"].includes(s);
+  /** Soft-stop / deallocate: Running + Idle only (not provisioning/starting). */
+  const isStoppableStatus = (s: string) => ["running", "idle"].includes(s);
   const isResumableStatus = (s: string) => ["stopped", "deallocated"].includes(s);
+  const isConnectableStatus = (s: string) => ["running", "idle"].includes(s);
   const hasSelection = selectedIds.size > 0;
 
   return (
@@ -464,21 +604,21 @@ export default function VirtualMachines() {
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
           <div className="space-y-0.5">
             <p>
-              <span className="font-medium text-foreground">Allocation view</span> — assignee, lab
-              username, instance name, status, start, and end from Hub data (not Orchestrator fleet
-              theater).
+              <span className="font-medium text-foreground">Allocation view</span> — MakeMyLabs-style
+              Manage VM thin slice: Status, Available Mins (wallet remaining), Expiry (
+              <code className="text-[10px]">expires_at</code> / template end window), plus assignee /
+              lab user / instance identity.
             </p>
             <p>
-              <span className="font-medium text-foreground">Lab username</span> comes from the latest{" "}
-              <code className="text-[10px]">sessions.guac_username</code> for the VM when present;
-              otherwise “—”. No dedicated <code className="text-[10px]">lab_username</code> column on{" "}
-              <code className="text-[10px]">virtual_machines</code> yet.
+              <span className="font-medium text-foreground">Available Mins</span> is computed on the
+              frontend from template duration − session usage (same wallet math as Student Dashboard /
+              PR #24). No edge change required.
             </p>
             <p>
-              Actions: <span className="font-medium text-foreground">Connect / Start / Stop / Delete</span>{" "}
+              Actions: <span className="font-medium text-foreground">Start / Stop / Connect / Delete</span>{" "}
               via <code className="text-[10px]">cleanup-idle-labs</code>. Start resumes the same
-              Stopped/Deallocated allocation (never provisions a new machine). Soft Stop deallocates
-              only — it never purges.
+              Stopped/Deallocated allocation. Soft Stop only on Running/Idle (deallocate, never purge).
+              Connect barge on Running/Idle.
             </p>
           </div>
         </div>
@@ -501,8 +641,8 @@ export default function VirtualMachines() {
               <SelectItem value="all">All Status</SelectItem>
               <SelectItem value="active">Active (running + idle)</SelectItem>
               {allStatuses.map((s) => (
-                <SelectItem key={s} value={s} className="capitalize">
-                  {s.charAt(0).toUpperCase() + s.slice(1)}
+                <SelectItem key={s} value={s}>
+                  {statusLabel(s)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -607,16 +747,22 @@ export default function VirtualMachines() {
                         aria-label="Select all"
                       />
                     </th>
-                    {["Assignee", "Lab username", "Instance / VM name", "Status", "Start", "End", "Actions"].map(
-                      (h) => (
-                        <th
-                          key={h}
-                          className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider"
-                        >
-                          {h}
-                        </th>
-                      ),
-                    )}
+                    {[
+                      "Assignee",
+                      "Lab username",
+                      "Instance / VM name",
+                      "Status",
+                      "Available Mins",
+                      "Expiry",
+                      "Actions",
+                    ].map((h) => (
+                      <th
+                        key={h}
+                        className="px-5 py-3 text-xs font-medium text-muted-foreground uppercase tracking-wider"
+                      >
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
                 <tbody>
@@ -673,11 +819,57 @@ export default function VirtualMachines() {
                       <td className="px-5 py-3">
                         <StatusBadge status={vm.status as VMStatus} />
                       </td>
-                      <td className="px-5 py-3 font-mono text-xs text-muted-foreground whitespace-nowrap">
-                        {formatDateTime(vm.created_at)}
+                      <td className="px-5 py-3 whitespace-nowrap">
+                        {vm.availableMinutes == null ? (
+                          <span className="text-muted-foreground">—</span>
+                        ) : (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div
+                                className={cn(
+                                  "font-mono text-xs font-semibold",
+                                  vm.wallet?.exhausted || vm.wallet?.windowEnded
+                                    ? "text-destructive"
+                                    : vm.wallet &&
+                                        vm.wallet.allocatedMinutes > 0 &&
+                                        vm.wallet.remainingMinutes <=
+                                          Math.max(vm.wallet.allocatedMinutes * 0.1, 5)
+                                      ? "text-warning"
+                                      : "text-foreground",
+                                )}
+                              >
+                                {formatMinutes(vm.availableMinutes)}
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {vm.wallet
+                                ? `${walletEquation(vm.wallet)} min remaining`
+                                : "Wallet remaining"}
+                            </TooltipContent>
+                          </Tooltip>
+                        )}
                       </td>
                       <td className="px-5 py-3 font-mono text-xs text-muted-foreground whitespace-nowrap">
-                        {formatDateTime(vm.expires_at)}
+                        {(() => {
+                          const exp = resolveExpiryLabel(vm);
+                          return (
+                            <div>
+                              <div
+                                className={cn(
+                                  "text-foreground",
+                                  vm.wallet?.windowEnded && "text-destructive",
+                                )}
+                              >
+                                {exp.primary}
+                              </div>
+                              {exp.secondary && (
+                                <div className="mt-0.5 text-[10px] text-muted-foreground">
+                                  {exp.secondary}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="px-5 py-3">
                         <div className="flex gap-1">
@@ -702,7 +894,7 @@ export default function VirtualMachines() {
                           )}
                           {/* Admin Connect barge on Running/Idle; Super Admin always visible.
                               Learner Connect UX is untouched. */}
-                          {(isSuperAdmin || ["running", "idle"].includes(vm.status)) && (
+                          {(isSuperAdmin || isConnectableStatus(vm.status)) && (
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <button
@@ -720,7 +912,7 @@ export default function VirtualMachines() {
                               </TooltipTrigger>
                               <TooltipContent>
                                 {isSuperAdmin
-                                  ? ["running", "idle"].includes(vm.status)
+                                  ? isConnectableStatus(vm.status)
                                     ? "Admin Connect (barge-in) — joins this learner's desktop"
                                     : "Admin Connect (barge-in) — machine is not live; start it first"
                                   : "Connect (admin)"}
@@ -731,8 +923,8 @@ export default function VirtualMachines() {
                             <TooltipTrigger asChild>
                               <button
                                 className="p-1.5 rounded hover:bg-warning/10 text-warning transition-colors disabled:opacity-40"
-                                title="Stop"
-                                disabled={!isActiveStatus(vm.status) || actionLoading === vm.id}
+                                title="Stop / soft-stop"
+                                disabled={!isStoppableStatus(vm.status) || actionLoading === vm.id}
                                 onClick={() => handleStopVM(vm.id)}
                               >
                                 {actionLoading === vm.id ? (
@@ -742,7 +934,7 @@ export default function VirtualMachines() {
                                 )}
                               </button>
                             </TooltipTrigger>
-                            <TooltipContent>Stop / deallocate</TooltipContent>
+                            <TooltipContent>Soft Stop — deallocate only (Running/Idle)</TooltipContent>
                           </Tooltip>
                           <AlertDialog
                             open={deleteConfirmVmId === vm.id}
