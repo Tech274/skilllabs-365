@@ -32,4 +32,8 @@ Deno.test("cleanup-idle-labs exposes owner-scoped learner actions", async () => 
   // Soft-stop Leave must never hard-delete.
   assert(cleanup.includes('ended_reason: "learner_leave"'));
   assertEquals(cleanup.includes('action === "manual-stop"'), false);
+  // Leave honesty: Hub deallocated only when cloud_stop_ok (or reconcile) succeeds.
+  assert(cleanup.includes("cloud_stop_ok: stopped"));
+  assert(cleanup.includes("isCloudAlreadySoftStopped"));
+  assert(cleanup.includes("Honesty gate: Hub deallocated ONLY when cloud soft-stop"));
 });
