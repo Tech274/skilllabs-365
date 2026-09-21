@@ -589,7 +589,7 @@ export async function createAwsVm(
     MaxCount: "1",
     "NetworkInterface.1.DeviceIndex": "0",
     "NetworkInterface.1.SubnetId": runtime.subnetId,
-    "NetworkInterface.1.Groups.1": runtime.securityGroupId,
+    "NetworkInterface.1.SecurityGroupId.1": runtime.securityGroupId,
     // Required for cross-region Guac (ap-south-1) → us-east-1 labs: guacd cannot
     // route to RFC1918. Lab SG already allows gateway_cidr 3.6.228.159/32.
     "NetworkInterface.1.AssociatePublicIpAddress": "true",
