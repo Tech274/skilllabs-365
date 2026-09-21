@@ -1,6 +1,8 @@
 /**
  * Lab wallet (edge): allocated − used = remaining.
- * Minutes come from real session usage only. Soft-stop / Leave never deletes the VM.
+ * Minutes come from real session usage only (template.duration prepaid pool —
+ * including persistent labs). Soft-stop / Leave never deletes the VM.
+ * Persistent also gates on end_date EOD IST (windowEnded).
  */
 
 export type WalletSessionRow = {

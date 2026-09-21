@@ -5,7 +5,8 @@
  * never by merely being assigned a grant. A grant unlocks the lab; the wallet
  * tracks the minutes.
  *
- * Persistent labs additionally carry a start/end date window (Asia/Kolkata).
+ * Persistent labs use the same prepaid duration pool PLUS a start/end date
+ * access window (Asia/Kolkata) — not unlimited minutes and not a 24/7 always-on VM.
  * Soft-expiry fires at end_date EOD IST, or when remaining minutes hit zero —
  * always deallocate + notify, never a silent terminate.
  */
