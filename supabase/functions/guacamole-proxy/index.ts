@@ -581,7 +581,9 @@ Deno.serve(async (req) => {
             session_id: liveSession.id,
             iframe_url: buildPublicIframeUrl(guacBaseUrl, guacPublicBase, reusedClientId, scoped.token),
             protocol: (labTemplateProtocol(vm) === "ssh" ? "SSH" : "RDP"),
-            vm_ip: vm.private_ip,
+            // Lex/Connect assert vm_ip === Hub public for AWS — must be the dial address
+            vm_ip: labAddr.hostname,
+            dial_source: labAddr.source,
             region: vm.region ?? null,
             cloud_provider: cloudProvider,
             reused_existing: true,
@@ -687,10 +689,14 @@ Deno.serve(async (req) => {
       const connectionName = `session-${vm_id}-${Date.now()}`;
       console.log(JSON.stringify({
         scope: "guac-lab-hostname",
+        event: "dial_addr_chosen",
+        remint_marker: "pr37-vm_ip-reports-labAddr",
         provider: vmCloud,
         source: labAddr.source,
-        // hostname itself is an address, not a secret
+        // hostname itself is an address, not a secret — must match response.vm_ip
         hostname: labAddr.hostname,
+        hub_public_ip: vm.public_ip ?? null,
+        hub_private_ip: vm.private_ip ?? null,
         region: vm.region ?? null,
       }));
       const connectionId = await createGuacConnection(guacBaseUrl, adminToken, dataSource, {
@@ -747,7 +753,9 @@ Deno.serve(async (req) => {
         session_id: session.id,
         iframe_url: iframeUrl,
         protocol: protocol.toUpperCase(),
-        vm_ip: vm.private_ip,
+        // Actual Guac dial hostname (AWS: Hub public_ip when set) — never lie with private_ip
+        vm_ip: labAddr.hostname,
+        dial_source: labAddr.source,
         region: vm.region ?? null,
         cloud_provider: cloudProvider,
         correlation_id: correlationId,

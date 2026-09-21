@@ -185,9 +185,14 @@ export function resolveGuacLabHostname(
     return { hostname: publicIp, source: "public" };
   }
 
-  // auto: AWS → public_ip when available (cross-region Guac); else private.
-  if (p === "aws" && publicIp) {
-    return { hostname: publicIp, source: "public" };
+  // auto: AWS ALWAYS prefers Hub public_ip when non-empty (cross-region Guac
+  // cannot route RFC1918). Never dial private when public is present unless
+  // GUAC_LAB_HOSTNAME=private was set above.
+  if (p === "aws") {
+    if (publicIp) {
+      return { hostname: publicIp, source: "public" };
+    }
+    // public missing → fall through to private / error below
   }
   if (!privateIp) {
     if (publicIp) return { hostname: publicIp, source: "public" };

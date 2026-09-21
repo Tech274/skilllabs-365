@@ -122,3 +122,24 @@ Deno.test("resolveGuacLabHostname AWS falls back to private when no public_ip", 
   const addr = resolveGuacLabHostname("aws", { private_ip: "10.0.10.192", public_ip: null }, envFrom({}));
   assertEquals(addr, { hostname: "10.0.10.192", source: "private" });
 });
+
+Deno.test("resolveGuacLabHostname AWS NEVER dials private when public_ip present (auto)", () => {
+  const cases = [
+    { private_ip: "10.0.12.94", public_ip: "44.200.44.21" },
+    { private_ip: "10.0.7.188", public_ip: "34.234.164.39" },
+    { private_ip: "172.31.0.5", public_ip: "1.2.3.4" },
+  ];
+  for (const vm of cases) {
+    const addr = resolveGuacLabHostname("aws", vm, envFrom({}));
+    assertEquals(addr.source, "public");
+    assertEquals(addr.hostname, vm.public_ip);
+    if (addr.hostname === vm.private_ip) {
+      throw new Error(`BUG: AWS dialed private ${vm.private_ip} while public ${vm.public_ip} present`);
+    }
+  }
+});
+
+Deno.test("resolveGuacLabHostname AWS whitespace-only public_ip falls back to private", () => {
+  const addr = resolveGuacLabHostname("aws", { private_ip: "10.0.12.94", public_ip: "   " }, envFrom({}));
+  assertEquals(addr, { hostname: "10.0.12.94", source: "private" });
+});
