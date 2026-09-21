@@ -186,40 +186,32 @@ export default function VirtualMachines() {
 
   const fetchVMs = useCallback(async () => {
     setLoading(true);
+    // No virtual_machines → profiles FK in schema (types.ts Relationships).
+    // Join profiles separately like Sessions actor / User Admin / SessionAuditLog.
     const { data: vmData, error } = await supabase
       .from("virtual_machines")
       .select(
-        "*, lab_templates(name, duration, is_persistent, start_date, end_date), profiles!virtual_machines_user_id_fkey(display_name, email)",
+        "*, lab_templates(name, duration, is_persistent, start_date, end_date)",
       )
       .order("created_at", { ascending: false });
 
     let rows: VMRow[] = [];
 
     if (error) {
-      const { data: fallbackData } = await supabase
-        .from("virtual_machines")
-        .select("*")
-        .order("created_at", { ascending: false });
+      console.error("Failed to load virtual_machines:", error.message);
+      setVms([]);
+      setLoading(false);
+      return;
+    }
 
-      if (fallbackData) {
-        rows = fallbackData.map((vm: VMRow) => ({
-          ...vm,
-          assigneeName: "—",
-          assigneeEmail: null,
-          labUsername: null,
-          instanceName: extractInstanceName(vm.azure_vm_id),
-          labName: null,
-        }));
-      }
-    } else if (vmData) {
+    if (vmData) {
       rows = vmData.map((vm: Record<string, unknown>) => {
-        const profiles = vm.profiles as { display_name?: string; email?: string | null } | null;
         const labs = vm.lab_templates as TemplateJoin | null;
         const azureVmId = (vm.azure_vm_id as string | null) ?? null;
         return {
           ...(vm as unknown as VMRow),
-          assigneeName: profiles?.display_name || "—",
-          assigneeEmail: profiles?.email ?? null,
+          assigneeName: "—",
+          assigneeEmail: null,
           labUsername: null,
           instanceName: extractInstanceName(azureVmId),
           labName: labs?.name || null,
@@ -233,12 +225,25 @@ export default function VirtualMachines() {
       });
     }
 
-    // Lab username + wallet sessions: guac_username by vm_id; usage by user for Available Mins.
+    // Profiles (real username) + guac lab username + wallet sessions.
     if (rows.length > 0) {
       const vmIds = rows.map((r) => r.id);
       const userIds = Array.from(
         new Set(rows.map((r) => r.user_id).filter((id): id is string => Boolean(id))),
       );
+
+      type ProfileRow = { user_id: string; display_name: string; email: string | null };
+      type UsageRow = {
+        user_id: string | null;
+        lab_template_id: string | null;
+        started_at: string | null;
+        ended_at: string | null;
+      };
+
+      const profilesQuery =
+        userIds.length > 0
+          ? supabase.from("profiles").select("user_id, display_name, email").in("user_id", userIds)
+          : Promise.resolve({ data: [] as ProfileRow[] });
 
       const guacQuery = supabase
         .from("sessions")
@@ -246,13 +251,6 @@ export default function VirtualMachines() {
         .in("vm_id", vmIds)
         .not("guac_username", "is", null)
         .order("started_at", { ascending: false });
-
-      type UsageRow = {
-        user_id: string | null;
-        lab_template_id: string | null;
-        started_at: string | null;
-        ended_at: string | null;
-      };
 
       const usageQuery =
         userIds.length > 0
@@ -262,10 +260,27 @@ export default function VirtualMachines() {
               .in("user_id", userIds)
           : null;
 
-      const [{ data: sessionRows }, usageResult] = await Promise.all([
+      const [profilesResult, { data: sessionRows }, usageResult] = await Promise.all([
+        profilesQuery,
         guacQuery,
         usageQuery ?? Promise.resolve({ data: [] as UsageRow[] }),
       ]);
+
+      const profileMap = new Map(
+        ((profilesResult.data ?? []) as ProfileRow[]).map((p) => [p.user_id, p]),
+      );
+      rows = rows.map((r) => {
+        if (!r.user_id) return r;
+        const profile = profileMap.get(r.user_id);
+        if (!profile) return r;
+        return {
+          ...r,
+          // Same source as Sessions actor + User Administration
+          assigneeName: profile.display_name || profile.email || "—",
+          assigneeEmail: profile.email ?? null,
+        };
+      });
+
       const usageRows: UsageRow[] = (usageResult.data ?? []) as UsageRow[];
 
       if (sessionRows && sessionRows.length > 0) {
