@@ -54,6 +54,34 @@ const emptyForm: LabForm = {
   start_date: '', end_date: '',
 };
 
+const AZURE_VM_SIZES = [
+  { value: "Standard_B2s", label: "B2s (2 vCPU, 4 GB)" },
+  { value: "Standard_B2ms", label: "B2ms (2 vCPU, 8 GB)" },
+  { value: "Standard_B4ms", label: "B4ms (4 vCPU, 16 GB)" },
+  { value: "Standard_D2s_v3", label: "D2s v3 (2 vCPU, 8 GB)" },
+] as const;
+
+/** EC2 types shown when Resource Provider is AWS (SkillTrack AWS default). */
+const AWS_VM_SIZES = [
+  { value: "t3.small", label: "t3.small (2 vCPU, 2 GB)" },
+  { value: "t3.medium", label: "t3.medium (2 vCPU, 4 GB)" },
+  { value: "t3.large", label: "t3.large (2 vCPU, 8 GB)" },
+  { value: "t3.xlarge", label: "t3.xlarge (4 vCPU, 16 GB)" },
+] as const;
+
+const DEFAULT_VM_SIZE: Record<"aws" | "azure", string> = {
+  aws: "t3.medium",
+  azure: "Standard_B2s",
+};
+
+function sizesForProvider(provider: string | undefined | null) {
+  return provider === "aws" ? AWS_VM_SIZES : AZURE_VM_SIZES;
+}
+
+function defaultSizeForProvider(provider: string | undefined | null) {
+  return provider === "aws" ? DEFAULT_VM_SIZE.aws : DEFAULT_VM_SIZE.azure;
+}
+
 const statusStyle: Record<string, string> = {
   published: 'bg-success/10 text-success',
   draft: 'bg-warning/10 text-warning',
@@ -104,6 +132,14 @@ export default function LabManagement() {
 
   // Every template must point at a Resource Provider account — provisioning is blocked otherwise.
   const [providerAccounts, setProviderAccounts] = useState<ProviderAccount[]>([]);
+
+  const formProvider = providerAccounts.find((a) => a.id === form.provider_account_id)?.provider;
+  const vmSizeOptions = sizesForProvider(formProvider);
+  // Keep Select value valid when switching AWS ↔ Azure (SkillTrack AWS must not show B2s).
+  const vmSizeValue = vmSizeOptions.some((o) => o.value === form.vm_size)
+    ? form.vm_size
+    : defaultSizeForProvider(formProvider);
+
 
   const fetchProviderAccounts = async () => {
     const { data } = await supabase.functions.invoke<{ accounts: ProviderAccount[] }>("cloud-provider-accounts", {
@@ -163,8 +199,13 @@ export default function LabManagement() {
       return;
     }
     const { start_date, end_date, ...formFields } = form;
+    const sizeOptions = sizesForProvider(selectedProvider);
+    const coercedSize = sizeOptions.some((o) => o.value === form.vm_size)
+      ? form.vm_size
+      : defaultSizeForProvider(selectedProvider);
     const payload = {
       ...formFields,
+      vm_size: coercedSize,
       provider: selectedProvider as "aws" | "azure",
       // Persistent labs carry an IST window; non-persistent keep total minutes only.
       start_date: form.is_persistent ? istDateToStartIso(start_date) : null,
@@ -370,7 +411,19 @@ export default function LabManagement() {
               </div>
               <div className="space-y-2">
                 <Label>Resource Provider</Label>
-                <Select value={form.provider_account_id} onValueChange={v => setForm({ ...form, provider_account_id: v })}>
+                <Select
+                  value={form.provider_account_id}
+                  onValueChange={(v) => {
+                    const nextProvider = providerAccounts.find((a) => a.id === v)?.provider;
+                    const nextSizes = sizesForProvider(nextProvider);
+                    const keep = nextSizes.some((o) => o.value === form.vm_size);
+                    setForm({
+                      ...form,
+                      provider_account_id: v,
+                      vm_size: keep ? form.vm_size : defaultSizeForProvider(nextProvider),
+                    });
+                  }}
+                >
                   <SelectTrigger><SelectValue placeholder="Select a resource provider account" /></SelectTrigger>
                   <SelectContent>
                     {providerAccounts.map(a => (
@@ -398,14 +451,16 @@ export default function LabManagement() {
                   </Select>
                 </div>
                 <div className="space-y-2">
-                  <Label>VM Size</Label>
-                  <Select value={form.vm_size} onValueChange={v => setForm({ ...form, vm_size: v })}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
+                  <Label>VM Size{formProvider === "aws" ? " (EC2)" : formProvider === "azure" ? " (Azure)" : ""}</Label>
+                  <Select
+                    value={vmSizeValue}
+                    onValueChange={(v) => setForm({ ...form, vm_size: v })}
+                  >
+                    <SelectTrigger><SelectValue placeholder={formProvider === "aws" ? "Select EC2 type" : "Select Azure size"} /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="Standard_B2s">B2s (2 vCPU, 4 GB)</SelectItem>
-                      <SelectItem value="Standard_B2ms">B2ms (2 vCPU, 8 GB)</SelectItem>
-                      <SelectItem value="Standard_B4ms">B4ms (4 vCPU, 16 GB)</SelectItem>
-                      <SelectItem value="Standard_D2s_v3">D2s v3 (2 vCPU, 8 GB)</SelectItem>
+                      {vmSizeOptions.map((o) => (
+                        <SelectItem key={o.value} value={o.value}>{o.label}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
                 </div>
