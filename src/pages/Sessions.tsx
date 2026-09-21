@@ -4,7 +4,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { Users, Clock, TrendingUp, Timer, Loader2 } from "lucide-react";
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { motion } from "framer-motion";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 
 interface SessionRow {
@@ -21,8 +22,18 @@ interface SessionRow {
 }
 
 export default function Sessions() {
+  const [searchParams] = useSearchParams();
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<string>("active");
+
+  // Honor KPI deep-links: /sessions?status=active|completed|all
+  useEffect(() => {
+    const raw = searchParams.get("status");
+    if (!raw) return;
+    const normalized = raw.trim().toLowerCase();
+    if (normalized) setStatusFilter(normalized);
+  }, [searchParams]);
 
   const fetchSessions = useCallback(async () => {
     const { data, error } = await supabase
@@ -53,9 +64,15 @@ export default function Sessions() {
   }, [fetchSessions]);
 
   const activeSessions = sessions.filter(s => s.status === 'active');
+  const completedSessions = sessions.filter(s => s.status === 'completed');
   const avgIdleMinutes = activeSessions.length > 0
     ? (activeSessions.reduce((sum, s) => sum + s.idle_minutes, 0) / activeSessions.length).toFixed(1)
     : "0";
+
+  const filteredSessions = useMemo(() => {
+    if (statusFilter === "all") return sessions;
+    return sessions.filter((s) => s.status === statusFilter);
+  }, [sessions, statusFilter]);
 
   // Build 24h histogram from real session data
   const sessionHistory = Array.from({ length: 24 }, (_, i) => {
@@ -95,10 +112,10 @@ export default function Sessions() {
         </div>
 
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <MetricCard title="Active Sessions" value={activeSessions.length} icon={Users} variant="success" />
-          <MetricCard title="Total Sessions" value={sessions.length} icon={TrendingUp} variant="primary" />
-          <MetricCard title="Avg Idle" value={`${avgIdleMinutes}m`} icon={Timer} variant="warning" subtitle="before auto-stop" />
-          <MetricCard title="Completed" value={sessions.filter(s => s.status === 'completed').length} icon={Clock} variant="default" />
+          <MetricCard title="Active Sessions" value={activeSessions.length} icon={Users} variant="success" to="/sessions?status=active" />
+          <MetricCard title="Total Sessions" value={sessions.length} icon={TrendingUp} variant="primary" to="/sessions?status=all" />
+          <MetricCard title="Avg Idle" value={`${avgIdleMinutes}m`} icon={Timer} variant="warning" subtitle="before auto-stop" to="/vms?status=idle" />
+          <MetricCard title="Completed" value={completedSessions.length} icon={Clock} variant="default" to="/sessions?status=completed" />
         </div>
 
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card p-5">
@@ -120,9 +137,14 @@ export default function Sessions() {
           </ResponsiveContainer>
         </motion.div>
 
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }} className="rounded-xl border border-border bg-card">
-          <div className="p-5 border-b border-border">
-            <h3 className="text-sm font-medium text-foreground">Active Sessions</h3>
+        <motion.div id="session-list" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }} className="rounded-xl border border-border bg-card">
+          <div className="p-5 border-b border-border flex items-center justify-between gap-3">
+            <h3 className="text-sm font-medium text-foreground">
+              {statusFilter === "all"
+                ? "All Sessions"
+                : `${statusFilter.charAt(0).toUpperCase()}${statusFilter.slice(1)} Sessions`}
+            </h3>
+            <p className="text-xs text-muted-foreground">{filteredSessions.length} shown</p>
           </div>
           {loading ? (
             <div className="p-8 flex items-center justify-center text-muted-foreground">
@@ -139,15 +161,15 @@ export default function Sessions() {
                   </tr>
                 </thead>
                 <tbody>
-                  {activeSessions.length === 0 ? (
-                    <tr><td colSpan={6} className="px-5 py-8 text-center text-muted-foreground text-sm">No active sessions.</td></tr>
+                  {filteredSessions.length === 0 ? (
+                    <tr><td colSpan={6} className="px-5 py-8 text-center text-muted-foreground text-sm">No sessions match this filter.</td></tr>
                   ) : (
-                    activeSessions.map(s => (
+                    filteredSessions.map(s => (
                       <tr key={s.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                         <td className="px-5 py-3 text-foreground">{s.userName}</td>
                         <td className="px-5 py-3 text-muted-foreground">{s.labName}</td>
                         <td className="px-5 py-3 text-muted-foreground">{s.region}</td>
-                        <td className="px-5 py-3 text-success text-xs font-medium">{s.status}</td>
+                        <td className={`px-5 py-3 text-xs font-medium ${s.status === "active" ? "text-success" : "text-muted-foreground"}`}>{s.status}</td>
                         <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{s.idle_minutes}m</td>
                         <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{new Date(s.started_at).toLocaleTimeString()}</td>
                       </tr>

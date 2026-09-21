@@ -1,6 +1,7 @@
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { Globe, Server, Wifi, Clock, Loader2 } from "lucide-react";
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useEffect, useState, useCallback } from "react";
 import { supabase } from "@/integrations/supabase/client";
@@ -95,16 +96,21 @@ export default function Regions() {
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                   {[
-                    { icon: Server, label: 'Active VMs', value: r.activeVMs },
-                    { icon: Server, label: 'Total VMs', value: r.totalVMs },
-                    { icon: Wifi, label: 'Sessions', value: r.activeSessions },
-                    { icon: Clock, label: 'Status', value: r.activeVMs > 0 ? 'Active' : 'Idle' },
+                    { icon: Server, label: 'Active VMs', value: r.activeVMs, to: '/vms?status=active' },
+                    { icon: Server, label: 'Total VMs', value: r.totalVMs, to: '/vms' },
+                    { icon: Wifi, label: 'Sessions', value: r.activeSessions, to: '/sessions?status=active' },
+                    { icon: Clock, label: 'Status', value: r.activeVMs > 0 ? 'Active' : 'Idle', to: r.activeVMs > 0 ? '/vms?status=active' : '/vms?status=idle' },
                   ].map(m => (
-                    <div key={m.label} className="rounded-lg bg-muted/50 p-3">
+                    <Link
+                      key={m.label}
+                      to={m.to}
+                      className="rounded-lg bg-muted/50 p-3 block transition-colors hover:bg-muted hover:ring-1 hover:ring-primary/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-label={`${m.label}: ${m.value}`}
+                    >
                       <m.icon className="h-4 w-4 text-muted-foreground mb-1" />
                       <p className="text-lg font-mono font-semibold text-foreground">{m.value}</p>
                       <p className="text-[10px] text-muted-foreground uppercase tracking-wider">{m.label}</p>
-                    </div>
+                    </Link>
                   ))}
                 </div>
               </motion.div>

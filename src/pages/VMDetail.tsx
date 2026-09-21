@@ -152,10 +152,10 @@ export default function VMDetail() {
         </div>
 
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <MetricCard title="VM Size" value={vm.vm_size} icon={Cpu} variant="default" />
-          <MetricCard title="Private IP" value={vm.private_ip || "—"} icon={Monitor} variant="primary" />
-          <MetricCard title="Idle Time" value={vm.idle_minutes > 0 ? `${vm.idle_minutes}m` : '0m'} icon={Clock} variant={vm.idle_minutes > 10 ? 'warning' : 'default'} subtitle="20m auto-stop" />
-          <MetricCard title="Disk" value="Ephemeral" icon={HardDrive} variant="default" subtitle="30 GB" />
+          <MetricCard title="VM Size" value={vm.vm_size} icon={Cpu} variant="default" to="/costs" />
+          <MetricCard title="Private IP" value={vm.private_ip || "—"} icon={Monitor} variant="primary" to="/admin/network-health" />
+          <MetricCard title="Idle Time" value={vm.idle_minutes > 0 ? `${vm.idle_minutes}m` : '0m'} icon={Clock} variant={vm.idle_minutes > 10 ? 'warning' : 'default'} subtitle="20m auto-stop" to="/vms?status=idle" />
+          <MetricCard title="Disk" value="Ephemeral" icon={HardDrive} variant="default" subtitle="30 GB" to="/vms" />
         </div>
 
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="rounded-xl border border-border bg-card overflow-hidden">
