@@ -13,8 +13,18 @@ const statusConfig: Record<VMStatus, { label: string; dotClass: string; bgClass:
   failed: { label: 'Failed', dotClass: 'bg-destructive animate-pulse', bgClass: 'bg-destructive/10 text-destructive' },
 };
 
-export function StatusBadge({ status }: { status: VMStatus }) {
-  const config = statusConfig[status];
+const fallback = {
+  label: 'Unknown',
+  dotClass: 'bg-muted-foreground',
+  bgClass: 'bg-muted text-muted-foreground',
+};
+
+/** Renders any Hub VM status faithfully; unknown values fall back without crashing. */
+export function StatusBadge({ status }: { status: VMStatus | string }) {
+  const config = statusConfig[status as VMStatus] ?? {
+    ...fallback,
+    label: status ? status.charAt(0).toUpperCase() + status.slice(1) : fallback.label,
+  };
   return (
     <span className={cn("inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium", config.bgClass)}>
       <span className={cn("h-1.5 w-1.5 rounded-full", config.dotClass)} />
