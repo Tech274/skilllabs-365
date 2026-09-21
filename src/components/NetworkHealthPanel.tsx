@@ -122,10 +122,10 @@ export function NetworkHealthPanel() {
       animate={{ opacity: 1 }}
       className="rounded-xl border border-border bg-card p-5"
     >
-      <div className="flex items-center justify-between gap-3 mb-4">
+      <div className="flex items-center justify-between gap-3 mb-1">
         <div className="flex items-center gap-2">
           <Activity className="h-4 w-4 text-primary" />
-          <h3 className="text-sm font-medium text-foreground">Network Health</h3>
+          <h3 className="text-sm font-medium text-foreground">Gateway host OK (not Connect)</h3>
           <HealthBadge status={overall} />
           {loading && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
         </div>
@@ -140,6 +140,10 @@ export function NetworkHealthPanel() {
           </Button>
         </div>
       </div>
+      <p className="text-[11px] text-muted-foreground mb-4">
+        Host & TLS checks — landing-page HTTPS reachability only. Does not verify lab
+        desktop tunnels or that Connect / session path will work.
+      </p>
 
       {error && (
         <div className="mb-3 flex items-start gap-2 rounded-lg border border-warning/30 bg-warning/10 px-3 py-2">
@@ -179,6 +183,9 @@ export function NetworkHealthPanel() {
                 )}
               >
                 {isStale && c.status !== "red" ? `Stale reading — ${c.reason}` : c.reason}
+              </p>
+              <p className="text-[10px] text-muted-foreground">
+                Green ≠ remote desktop ready — host/TLS only, not Connect.
               </p>
             </div>
           );

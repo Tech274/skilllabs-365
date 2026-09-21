@@ -273,7 +273,7 @@ const Index = () => {
           )}
         </AnimatePresence>
 
-        {/* Network Health — live probes of the Guacamole gateways and the Hub */}
+        {/* Gateway host OK (not Connect) — Host & TLS landing-page probes only */}
         <NetworkHealthPanel />
 
         {/* Metrics */}
