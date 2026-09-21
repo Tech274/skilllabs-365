@@ -13,7 +13,7 @@
  */
 
 import { supabase } from "@/integrations/supabase/client";
-import { readFunctionError } from "@/lib/function-error";
+import { readFunctionError, readFunctionErrorPayload } from "@/lib/function-error";
 
 /** Machine states where the allocation exists but compute is not live yet. */
 export const REMINT_STATUSES = ["deallocated", "stopped", "starting"] as const;
@@ -62,14 +62,17 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
       body: { action: "start-vm", vm_id: opts.vmId, reason: "learner_start" },
     });
     if (error || data?.error) {
+      const payload = await readFunctionErrorPayload(error, data);
       const msg = await readFunctionError(error, data);
-      console.error("[remint] start-vm failed:", msg, data?.code);
+      const code = String(payload?.code ?? data?.code ?? "");
+      console.error("[remint] start-vm failed:", msg, code, payload?.detail, payload?.aws_state);
       // Surface wallet blocks so the dashboard can show calm copy.
-      const code = String(data?.code ?? "");
       if (code === "LAB_MINUTES_EXHAUSTED" || code === "LAB_WINDOW_ENDED") {
-        throw new Error(String(data?.error ?? msg));
+        throw new Error(String(payload?.error ?? data?.error ?? msg));
       }
-      throw new Error(REMINT_FAIL_CODE);
+      // P0b: never swallow into bare REMINT_START_FAILED — toast must show
+      // detail / code / aws_state from the edge function body.
+      throw new Error(msg || REMINT_FAIL_CODE);
     }
     // Guard: start-vm must return the SAME vm_id (never a new allocation).
     if (data?.vm_id && String(data.vm_id) !== String(opts.vmId)) {
@@ -86,8 +89,12 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
     });
     const status = String(statusData?.status ?? "").toLowerCase();
     if (status === "running" || status === "idle") return;
-    if (status === "failed" || status === "terminated") throw new Error(REMINT_FAIL_CODE);
+    if (status === "failed" || status === "terminated") {
+      throw new Error(
+        `${REMINT_FAIL_CODE}: check-vm-status reported ${status} (code may be GHOST_INSTANCE)`,
+      );
+    }
     await new Promise((r) => setTimeout(r, pollMs));
   }
-  throw new Error(REMINT_FAIL_CODE);
+  throw new Error(`${REMINT_FAIL_CODE}: timed out waiting for running after ${timeoutMs}ms`);
 }

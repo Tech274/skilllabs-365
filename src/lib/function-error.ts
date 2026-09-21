@@ -24,20 +24,49 @@ export interface EdgeFunctionErrorBody {
   retry_after_seconds?: number;
   /** Structured backoff recommendation for client schedulers. */
   backoff?: { initial_seconds?: number; max_seconds?: number; multiplier?: number; max_total_seconds?: number };
+  reconciled_status?: string;
 }
 
-/** Unwrap the JSON body of a failed edge-function call (null when unavailable). */
-export async function readFunctionErrorPayload(
-  error: unknown,
-  data?: unknown,
-): Promise<EdgeFunctionErrorBody | null> {
-  const body = (data && typeof data === "object" ? (data as EdgeFunctionErrorBody) : null) ?? null;
-  if (body?.error) return body;
+function isUsefulPayload(body: EdgeFunctionErrorBody | null | undefined): body is EdgeFunctionErrorBody {
+  if (!body || typeof body !== "object") return false;
+  return Boolean(
+    body.error ||
+      body.detail ||
+      body.code ||
+      body.aws_state ||
+      body.azure_error ||
+      body.suggestion ||
+      body.setting,
+  );
+}
 
-  const ctx = (error as { context?: Response } | null)?.context;
-  if (ctx && typeof ctx.json === "function") {
+async function readContextBody(error: unknown): Promise<EdgeFunctionErrorBody | null> {
+  const err = error as {
+    context?: Response | EdgeFunctionErrorBody | null;
+    message?: string;
+  } | null;
+  const ctx = err?.context;
+  if (!ctx) return null;
+
+  // Some supabase-js paths already attach a parsed object (not a Response).
+  if (typeof ctx === "object" && !("json" in ctx) && isUsefulPayload(ctx as EdgeFunctionErrorBody)) {
+    return ctx as EdgeFunctionErrorBody;
+  }
+
+  const resp = ctx as Response;
+  if (typeof resp?.json === "function") {
     try {
-      return (await ctx.clone().json()) as EdgeFunctionErrorBody;
+      const parsed = (await resp.clone().json()) as EdgeFunctionErrorBody;
+      if (isUsefulPayload(parsed)) return parsed;
+    } catch {
+      /* fall through to text */
+    }
+    try {
+      const text = await resp.clone().text();
+      if (text) {
+        const parsed = JSON.parse(text) as EdgeFunctionErrorBody;
+        if (isUsefulPayload(parsed)) return parsed;
+      }
     } catch {
       /* non-JSON body */
     }
@@ -45,18 +74,39 @@ export async function readFunctionErrorPayload(
   return null;
 }
 
+/** Unwrap the JSON body of a failed edge-function call (null when unavailable). */
+export async function readFunctionErrorPayload(
+  error: unknown,
+  data?: unknown,
+): Promise<EdgeFunctionErrorBody | null> {
+  const fromData =
+    data && typeof data === "object" ? (data as EdgeFunctionErrorBody) : null;
+  const fromCtx = await readContextBody(error);
+
+  // Prefer merging so a partial `data` still picks up detail/code from context.
+  if (fromData || fromCtx) {
+    const merged: EdgeFunctionErrorBody = { ...(fromCtx ?? {}), ...(fromData ?? {}) };
+    if (isUsefulPayload(merged)) return merged;
+  }
+  return null;
+}
+
 export function formatFunctionError(payload: EdgeFunctionErrorBody | null, error: unknown): string {
-  if (payload?.error) {
-    const parts = [payload.error];
+  if (isUsefulPayload(payload)) {
+    const parts: string[] = [];
+    if (payload.error) parts.push(payload.error);
     if (payload.code) parts.push(`(${payload.code})`);
     if (payload.detail) parts.push(payload.detail);
     if (payload.aws_state) parts.push(`[aws_state=${payload.aws_state}]`);
     if (payload.provider) parts.push(`[provider=${payload.provider}]`);
     if (payload.setting) parts.push(`Setting to check: ${payload.setting}.`);
     if (payload.suggestion) parts.push(payload.suggestion);
-    return parts.join(" ");
+    if (payload.azure_error && payload.azure_error !== payload.error) {
+      parts.push(payload.azure_error);
+    }
+    if (parts.length > 0) return parts.join(" ");
   }
-  if (error instanceof Error) return error.message;
+  if (error instanceof Error && error.message) return error.message;
   return "Request failed. Please try again.";
 }
 
