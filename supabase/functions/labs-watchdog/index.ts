@@ -251,9 +251,19 @@ Deno.serve(async (req) => {
             if (desc.state === "running") {
               await applyPromoteToRunning(supabase, vm.id, desc.privateIp, desc.publicIp);
               actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws ${vm.status}→running`);
-            } else if (desc.state === "terminated" || desc.state === "shutting-down") {
-              await supabase.from("virtual_machines").update({ status: "failed" }).eq("id", vm.id);
-              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws ${vm.status}→failed`);
+            } else if (
+              desc.state === "terminated" ||
+              desc.state === "shutting-down" ||
+              desc.state === "not-found"
+            ) {
+              await supabase.from("virtual_machines").update({
+                status: "failed",
+                ended_reason: desc.state === "not-found"
+                  ? "ghost_instance_not_found"
+                  : "watchdog_aws_terminated",
+                ended_at: new Date().toISOString(),
+              }).eq("id", vm.id);
+              actions.push(`vm ${vm.id.slice(0, 8)}: reconciled aws ${vm.status}→failed (${desc.state})`);
             } else if (desc.state === "stopped" || desc.state === "stopping") {
               // Do not regress Start-from-deallocated "starting" while StartInstances is pending.
               if (vm.status === "starting") {

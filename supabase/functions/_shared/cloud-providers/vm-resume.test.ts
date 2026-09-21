@@ -16,3 +16,15 @@ Deno.test("parseAwsEc2ErrorXml extracts Code and Message", () => {
 Deno.test("parseAwsEc2ErrorXml falls back when tags missing", () => {
   assertEquals(parseAwsEc2ErrorXml("  boom  "), "boom");
 });
+
+Deno.test("parseAwsEc2ErrorXml extracts InvalidInstanceID.NotFound", () => {
+  const xml = `<?xml version="1.0"?>
+<Response><Errors><Error>
+  <Code>InvalidInstanceID.NotFound</Code>
+  <Message>The instance ID 'i-0dd83d48a728880c5' does not exist</Message>
+</Error></Errors></Response>`;
+  assertEquals(
+    parseAwsEc2ErrorXml(xml),
+    "InvalidInstanceID.NotFound: The instance ID 'i-0dd83d48a728880c5' does not exist",
+  );
+});

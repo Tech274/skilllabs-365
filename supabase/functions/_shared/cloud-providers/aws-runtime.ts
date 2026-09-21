@@ -613,13 +613,27 @@ export async function createAwsVm(
   return { instanceId, privateIp, publicIp };
 }
 
-export type AwsInstanceState = "pending" | "running" | "stopping" | "stopped" | "shutting-down" | "terminated" | "unknown";
+export type AwsInstanceState =
+  | "pending"
+  | "running"
+  | "stopping"
+  | "stopped"
+  | "shutting-down"
+  | "terminated"
+  | "not-found"
+  | "unknown";
 
 export type AwsDescribeResult = {
   state: AwsInstanceState;
   privateIp: string | null;
   publicIp: string | null;
 };
+
+/** True when EC2 says the instance id does not exist (ghost Hub row). */
+export function isAwsInvalidInstanceNotFound(text: string): boolean {
+  return /InvalidInstanceID\.NotFound/i.test(text) ||
+    /The instance ID ['"]?i-[a-f0-9]+['"]? does not exist/i.test(text);
+}
 
 export async function describeAwsInstance(
   runtime: AwsRuntime,
@@ -628,7 +642,13 @@ export async function describeAwsInstance(
   const res = await ec2Action(runtime, "DescribeInstances", {
     "InstanceId.1": instanceId,
   });
-  if (!res.ok) throw new Error(`DescribeInstances failed (${res.status}): ${res.text.slice(0, 300)}`);
+  if (!res.ok) {
+    // Ghost Hub row: Admin Start must never call StartInstances on a missing EC2.
+    if (isAwsInvalidInstanceNotFound(res.text)) {
+      return { state: "not-found", privateIp: null, publicIp: null };
+    }
+    throw new Error(`DescribeInstances failed (${res.status}): ${res.text.slice(0, 300)}`);
+  }
   const stateMatch = res.xml.match(/<instanceState>[\s\S]*?<name>([^<]+)<\/name>/);
   const state = (stateMatch?.[1] as AwsInstanceState | undefined) || "unknown";
   const privateIp = xmlTag(res.xml, "privateIpAddress");

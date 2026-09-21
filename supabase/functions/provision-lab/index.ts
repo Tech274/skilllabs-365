@@ -498,6 +498,9 @@ Deno.serve(async (req) => {
         trace.attach({ vmId: existingVm.id });
         const needsStart = (RESUMABLE_VM_STATUSES as readonly string[]).includes(existingVm.status);
         let started = false;
+        let remintDetail: string | null = null;
+        let remintAwsState: string | null = null;
+        let remintGhost = false;
         if (needsStart) {
           await trace.start(SOURCE, "remint", "Resuming your existing persistent lab VM (no new machine)");
           try {
@@ -514,9 +517,24 @@ Deno.serve(async (req) => {
             }
             const startResult = await startCloudVm(supabase, remintProvider, existingVm);
             started = startResult.ok;
-            if (!started) console.error("persistent remint start rejected", startResult.detail, startResult.awsState);
+            remintDetail = startResult.detail ?? null;
+            remintAwsState = startResult.awsState ?? null;
+            remintGhost = startResult.ghost === true || startResult.awsState === "not-found";
+            if (!started) {
+              console.error("persistent remint start rejected", remintDetail, remintAwsState, remintGhost);
+              // Ghost Hub: mark failed so Admin Start never retries StartInstances.
+              if (remintGhost) {
+                await supabase.from("virtual_machines").update({
+                  status: "failed",
+                  ended_at: new Date().toISOString(),
+                  ended_by: userId,
+                  ended_reason: "ghost_instance_not_found",
+                }).eq("id", existingVm.id);
+              }
+            }
           } catch (e) {
             console.error("persistent remint start failed", e);
+            remintDetail = e instanceof Error ? e.message : String(e);
           }
           if (started) {
             await supabase
@@ -527,10 +545,13 @@ Deno.serve(async (req) => {
           if (!started) {
             await trace.failed(SOURCE, "remint", "Could not power the existing lab VM back on");
             const failure = {
-              error:
-                "Your persistent lab machine could not be powered back on. It has NOT been deleted — please retry in a minute or contact support.",
-              code: "REMINT_START_FAILED",
+              error: remintGhost
+                ? "Cloud instance no longer exists (ghost Hub row reconciled to failed). It was NOT terminated by this Start."
+                : "Your persistent lab machine could not be powered back on. It has NOT been deleted — please retry in a minute or contact support.",
+              code: remintGhost ? "GHOST_INSTANCE" : "REMINT_START_FAILED",
               vm_id: existingVm.id,
+              detail: remintDetail,
+              aws_state: remintAwsState,
               correlation_id: correlationId,
               stage: "remint",
             };
