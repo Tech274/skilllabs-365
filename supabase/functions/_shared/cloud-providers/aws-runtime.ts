@@ -579,16 +579,66 @@ systemctl restart ssh || systemctl restart sshd || true
 `;
 }
 
+/** UTF-8 base64 safe to drop inside a PowerShell single-quoted string. */
+function utf8Base64(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
 /**
- * Windows/RDP is a different class of sign-in. AWS Windows Server accepts
- * password logon for a local admin (NLA); there is no sshd_config.d-style
- * vendor drop-in that disables RDP password auth. Do not mirror the Ubuntu
- * sshd override here.
+ * EC2Launch v2 user-data for Windows Server lab VMs.
+ *
+ * A bare `#ps1` body is not a user-data script: Win2022 EC2Launch v2 only runs
+ * `<powershell>` / `<script>` (or YAML). The old `net user` lines never ran, so
+ * the AMI kept only Administrator (random password). Guacamole dials the same
+ * `vm_admin_username` Hub stores (labuser) plus `vm_admin_password`, and NLA
+ * returns ERRCONNECT_LOGON_FAILURE.
+ *
+ * Username and password are embedded as base64 so `$` and quotes are not
+ * expanded. If the local password policy rejects the Hub password, complexity
+ * is relaxed once and the set is retried. RDP is turned on and NLA is left
+ * required (UserAuthentication=1), which is the mode Guacamole dials.
+ *
+ * Runs once, at first boot. An instance already launched does not re-run this.
  */
 export function windowsLabUserDataScript(username: string, password: string): string {
-  return `#ps1
-net user ${username} "${password}" /add
-net localgroup administrators ${username} /add
+  const userB64 = utf8Base64(username);
+  const passB64 = utf8Base64(password);
+  return `<powershell>
+$ErrorActionPreference = 'Stop'
+$u = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${userB64}'))
+$p = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${passB64}'))
+function Set-LabLocalPassword([string]$Name, [string]$Plain) {
+  $secure = ConvertTo-SecureString -String $Plain -AsPlainText -Force
+  $existing = Get-LocalUser -Name $Name -ErrorAction SilentlyContinue
+  if ($null -ne $existing) {
+    Set-LocalUser -Name $Name -Password $secure
+    Enable-LocalUser -Name $Name
+  } else {
+    New-LocalUser -Name $Name -Password $secure -FullName $Name -PasswordNeverExpires -AccountNeverExpires | Out-Null
+  }
+  foreach ($group in @('Administrators','Remote Desktop Users')) {
+    try { Add-LocalGroupMember -Group $group -Member $Name -ErrorAction Stop } catch { }
+  }
+}
+try {
+  Set-LabLocalPassword -Name $u -Plain $p
+} catch {
+  $cfg = Join-Path $env:TEMP 'skilllabs-secpol.cfg'
+  secedit /export /cfg $cfg | Out-Null
+  $text = Get-Content -Raw -Path $cfg
+  $text = [regex]::Replace($text, 'PasswordComplexity\\s*=\\s*\\d+', 'PasswordComplexity = 0')
+  $text = [regex]::Replace($text, 'MinimumPasswordLength\\s*=\\s*\\d+', 'MinimumPasswordLength = 1')
+  [System.IO.File]::WriteAllText($cfg, $text, [System.Text.Encoding]::Unicode)
+  secedit /configure /db (Join-Path $env:TEMP 'skilllabs-secpol.sdb') /cfg $cfg /areas SECURITYPOLICY | Out-Null
+  Set-LabLocalPassword -Name $u -Plain $p
+}
+New-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server' -Name 'fDenyTSConnections' -Value 0 -PropertyType DWord -Force | Out-Null
+New-ItemProperty -Path 'HKLM:\\System\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp' -Name 'UserAuthentication' -Value 1 -PropertyType DWord -Force | Out-Null
+Enable-NetFirewallRule -DisplayGroup 'Remote Desktop' -ErrorAction SilentlyContinue
+</powershell>
 `;
 }
 

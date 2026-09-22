@@ -16,6 +16,7 @@ import {
   type GuacCloudProvider,
   type GuacLabAddress,
 } from "../_shared/guac-hosts.ts";
+import { applyRdpGuacSecurityDefaults } from "../_shared/guac-rdp-params.ts";
 
 const SOURCE = "guacamole-proxy";
 
@@ -201,10 +202,9 @@ async function createGuacConnection(guacBaseUrl: string, token: string, dataSour
     ...(conn.parameters || {}),
   };
   // RDP-only defaults — never apply security/ignore-cert to SSH connections.
-  if (protocol === "rdp") {
-    if (parameters["ignore-cert"] === undefined) parameters["ignore-cert"] = "true";
-    if (parameters["security"] === undefined) parameters["security"] = "any";
-  }
+  // Win2022 NLA: security=nla + ignore-cert. Username/password are the Hub
+  // vm_admin_* values passed in by the caller (same pair first-boot user-data sets).
+  if (protocol === "rdp") applyRdpGuacSecurityDefaults(parameters);
   const payload: Record<string, unknown> = {
     parentIdentifier: "ROOT",
     name: conn.name,
