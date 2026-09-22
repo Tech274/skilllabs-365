@@ -46,6 +46,14 @@ import {
   clearGuacReady,
   isLabPortUnreachable,
 } from "@/lib/guac-connect";
+import {
+  GUAC_IFRAME_ALLOW,
+  GUAC_KEEP_FOCUS_ATTR,
+  bindGuacamoleFocus,
+  defaultTypingAssist,
+  focusGuacamoleFrame,
+  showTypingGate,
+} from "@/lib/guac-keyboard";
 
 type ConnectionState = "connecting" | "connected" | "disconnected" | "error";
 /** Cap learner retries so Guac error pages never spin reconnect forever. */
@@ -130,12 +138,13 @@ export default function LabSession() {
   const [session, setSession] = useState<SessionInfo>(defaultSession);
   const [guacIframeUrl, setGuacIframeUrl] = useState("");
   /**
-   * Windows/RDP keyboard helper: ON by default so learners can type the moment
-   * the desktop appears. Linux/SSH never gets it forced on. Learner can turn it off.
+   * Typing assist is on for SSH and RDP. Guacamole's cross-origin iframe does
+   * not keep keyboard focus for either protocol unless the parent refocuses it.
    */
   const [keyboardHelper, setKeyboardHelper] = useState(true);
   const keyboardHelperTouchedRef = useRef(false);
-  const isWindowsRdp = session.protocol === "RDP";
+  /** True after a click or keydown has focused the iframe during a user gesture. */
+  const [typingArmed, setTypingArmed] = useState(false);
 
 
   const [dbSessionId, setDbSessionId] = useState<string | null>(null);
@@ -315,36 +324,29 @@ export default function LabSession() {
     return () => { cancelled = true; };
   }, [vmId]);
 
-  // Default the keyboard helper ON for Windows/RDP, OFF for Linux/SSH — unless learner chose.
+  // Same default for Ubuntu SSH and Windows RDP unless the learner chose.
   useEffect(() => {
     if (keyboardHelperTouchedRef.current) return;
-    setKeyboardHelper(isWindowsRdp);
-  }, [isWindowsRdp]);
+    setKeyboardHelper(defaultTypingAssist(session.protocol));
+  }, [session.protocol]);
 
-  // Hand keyboard focus straight to the remote desktop while the helper is on.
+  // A new tokenized session is a new browsing context and needs a fresh gesture.
   useEffect(() => {
-    if (!keyboardHelper || !isWindowsRdp) return;
-    if (connectionState !== "connected" || !guacamoleUrl) return;
+    setTypingArmed(false);
+  }, [guacamoleUrl]);
 
-    const grab = () => {
-      const frame = iframeRef.current;
-      if (!frame) return;
-      try {
-        frame.focus();
-        frame.contentWindow?.focus();
-      } catch {
-        // cross-origin focus attempts can throw — safe to ignore
-      }
-    };
-
-    grab();
-    const timers = [250, 1000, 2500, 5000].map((ms) => setTimeout(grab, ms));
-    window.addEventListener("focus", grab);
-    return () => {
-      timers.forEach(clearTimeout);
-      window.removeEventListener("focus", grab);
-    };
-  }, [keyboardHelper, isWindowsRdp, connectionState, guacamoleUrl]);
+  // Click, keydown, and returning to the tab hand focus to the iframe.
+  // No timers and no contentWindow.focus() — those miss the user gesture and
+  // blur Guacamole's InputSink for both SSH and RDP.
+  useEffect(() => {
+    if (!keyboardHelper || connectionState !== "connected" || !desktopConfirmed || !guacamoleUrl) return;
+    return bindGuacamoleFocus({
+      document,
+      window,
+      getIframe: () => iframeRef.current,
+      onArm: () => setTypingArmed(true),
+    });
+  }, [keyboardHelper, connectionState, desktopConfirmed, guacamoleUrl]);
 
   // Init: remint first when the allocation is powered off, then require tokenized Guac.
   // Never open Guacamole (or claim Connected) while deallocated/stopped/starting.
@@ -859,34 +861,37 @@ export default function LabSession() {
 
             {/* Right: Actions */}
             <div className="flex items-center gap-1">
-              {isWindowsRdp && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <div className="mr-1 flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1">
-                      <Keyboard className={cn("h-3.5 w-3.5", keyboardHelper ? "text-primary" : "text-muted-foreground")} />
-                      <Switch
-                        id="lab-keyboard-helper"
-                        checked={keyboardHelper}
-                        onCheckedChange={(v) => {
-                          keyboardHelperTouchedRef.current = true;
-                          setKeyboardHelper(v);
-                        }}
-                        className="scale-75 origin-left"
-                      />
-                      <Label htmlFor="lab-keyboard-helper" className="text-[10px] text-muted-foreground cursor-pointer">
-                        Typing
-                      </Label>
-                    </div>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {keyboardHelper
-                      ? "Typing goes straight to your Windows desktop (on by default)"
-                      : "Turn on to type straight into your Windows desktop"}
-                  </TooltipContent>
-                </Tooltip>
-              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="mr-1 flex items-center gap-1.5 rounded-md border border-border/60 px-2 py-1">
+                    <Keyboard className={cn("h-3.5 w-3.5", keyboardHelper ? "text-primary" : "text-muted-foreground")} />
+                    <Switch
+                      id="lab-keyboard-helper"
+                      checked={keyboardHelper}
+                      onCheckedChange={(v) => {
+                        keyboardHelperTouchedRef.current = true;
+                        setKeyboardHelper(v);
+                        if (v) setTypingArmed(false);
+                      }}
+                      className="scale-75 origin-left"
+                    />
+                    <Label htmlFor="lab-keyboard-helper" className="text-[10px] text-muted-foreground cursor-pointer">
+                      Typing
+                    </Label>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>
+                  {keyboardHelper
+                    ? "Typing goes into this lab for Ubuntu SSH and Windows RDP"
+                    : "Turn on to type into this lab (SSH and RDP)"}
+                </TooltipContent>
+              </Tooltip>
               {labTemplateId && (
-                <Sheet>
+                <Sheet
+                  onOpenChange={(open) => {
+                    if (!open && keyboardHelper) focusGuacamoleFrame(iframeRef.current);
+                  }}
+                >
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <SheetTrigger asChild>
@@ -897,7 +902,7 @@ export default function LabSession() {
                     </TooltipTrigger>
                     <TooltipContent>Keys &amp; folders</TooltipContent>
                   </Tooltip>
-                  <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-md">
+                  <SheetContent side="right" className="w-full overflow-y-auto sm:max-w-md" {...{ [GUAC_KEEP_FOCUS_ATTR]: "" }}>
                     <SheetHeader>
                       <SheetTitle>Keys &amp; folders</SheetTitle>
                     </SheetHeader>
@@ -1066,7 +1071,7 @@ export default function LabSession() {
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="h-full w-full"
+            className="relative h-full w-full"
           >
             {guacamoleUrl ? (
               <>
@@ -1137,7 +1142,7 @@ export default function LabSession() {
                   aria-hidden={connectionState !== "connected" || !desktopConfirmed || awaitingDesktop}
                   tabIndex={connectionState === "connected" && desktopConfirmed && !awaitingDesktop ? 0 : -1}
                   style={{ objectFit: "contain" }}
-                  allow="clipboard-read; clipboard-write"
+                  allow={GUAC_IFRAME_ALLOW}
                   title="Lab Session"
                   onLoad={handleIframeLoad}
                   onError={() => {
@@ -1147,6 +1152,36 @@ export default function LabSession() {
                     setLastError("secure_desktop_frame_error");
                   }}
                 />
+                {showTypingGate({
+                  typingAssist: keyboardHelper,
+                  connected: connectionState === "connected",
+                  desktopConfirmed,
+                  awaitingDesktop,
+                  armed: typingArmed,
+                  hasSessionUrl: Boolean(guacamoleUrl),
+                }) && (
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Click once to type into this lab"
+                    className="absolute inset-0 z-20 flex items-end justify-center bg-transparent pb-8 outline-none"
+                    onPointerDown={(e) => {
+                      // Focus during the gesture, then keep this hint from taking focus.
+                      setTypingArmed(true);
+                      focusGuacamoleFrame(iframeRef.current);
+                      e.preventDefault();
+                    }}
+                    onKeyDown={(e) => {
+                      setTypingArmed(true);
+                      focusGuacamoleFrame(iframeRef.current);
+                      e.preventDefault();
+                    }}
+                  >
+                    <span className="pointer-events-none rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs text-foreground shadow-sm">
+                      Click once, then type into this lab
+                    </span>
+                  </div>
+                )}
               </>
             ) : (
               /* Placeholder when no remote URL yet */
