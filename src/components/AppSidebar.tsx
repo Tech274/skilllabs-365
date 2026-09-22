@@ -24,7 +24,9 @@ const adminPrimaryItems = [
   { title: "Overview", url: "/", icon: LayoutDashboard },
   { title: "VMs", url: "/vms", icon: Server },
   { title: "Sessions", url: "/sessions", icon: Users },
+  // Launch-event audit (platform_application_launch_events). Not the catalog.
   { title: "Workspaces", url: "/admin/workspace-launches", icon: AppWindow },
+  // Workspace catalog + learner assignment. Learners open /applications.
   { title: "Applications", url: "/admin/applications", icon: Layers3 },
   { title: "Labs", url: "/labs", icon: BookOpen },
   { title: "Lab Grants", url: "/admin/manual-grants", icon: Unlock },
@@ -64,6 +66,7 @@ const instructorItems = [
 
 const studentItems = [
   { title: "Dashboard", url: "/student", icon: LayoutDashboard },
+  { title: "Cloud Workspaces", url: "/applications", icon: AppWindow },
   { title: "Cloud Access", url: "/cloud-access", icon: KeyRound },
 ];
 
