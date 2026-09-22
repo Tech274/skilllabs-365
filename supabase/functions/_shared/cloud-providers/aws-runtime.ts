@@ -538,23 +538,65 @@ export async function ensureAwsNetwork(
   return { vpcId, subnetId, securityGroupId, created, source };
 }
 
-function userDataScript(username: string, password: string, isWindows: boolean): string {
-  if (isWindows) {
-    const ps = `#ps1
-net user ${username} "${password}" /add
-net localgroup administrators ${username} /add
-`;
-    return btoa(ps);
-  }
-  const sh = `#!/bin/bash
+/**
+ * Drop-in that must sort before Ubuntu's 60-cloudimg-settings.conf.
+ * OpenSSH keeps the first value it obtains for each keyword and includes
+ * sshd_config.d/*.conf in lexical order from the top of sshd_config, so
+ * 60-cloudimg-settings.conf (PasswordAuthentication no) beats both a later
+ * sed of the main file and any drop-in that sorts after 60- (including 99-*).
+ * 00- also sorts before cloud-init's 50-cloud-init.conf.
+ */
+export const SKILLHUB_SSHD_PASSWORD_DROPIN = "/etc/ssh/sshd_config.d/00-skillhub-password.conf";
+
+/**
+ * Bash user-data for Ubuntu lab VMs. Guacamole dials SSH with the Hub
+ * vm_admin_password, which sshd will not offer while the cloudimg drop-in
+ * leaves PasswordAuthentication no. Rewriting only the main sshd_config
+ * cannot override that drop-in.
+ *
+ * Runs once, at first boot (cloud-init scripts-user). Reminting a Guacamole
+ * connection does not rewrite sshd on an already-running instance.
+ */
+export function linuxLabUserDataShell(username: string, password: string): string {
+  return `#!/bin/bash
 set -e
 useradd -m -s /bin/bash ${username} || true
 echo '${username}:${password}' | chpasswd
 usermod -aG sudo ${username} || true
-sed -i 's/^PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config || true
+# Ubuntu cloud images set "PasswordAuthentication no" in
+# /etc/ssh/sshd_config.d/60-cloudimg-settings.conf. sshd uses the first
+# obtained value and includes sshd_config.d/*.conf lexically from the top
+# of sshd_config, so this file must sort before 60-cloudimg-settings.conf.
+# A sed of the main file, or a 99-* drop-in, leaves password auth off and
+# Guacamole only sees "publickey". Restart so the boot-time sshd picks it up.
+mkdir -p /etc/ssh/sshd_config.d
+cat > ${SKILLHUB_SSHD_PASSWORD_DROPIN} << 'EOF'
+# SkillHub: sorts before 60-cloudimg-settings.conf (sshd first-match wins).
+PasswordAuthentication yes
+EOF
+chmod 644 ${SKILLHUB_SSHD_PASSWORD_DROPIN}
 systemctl restart ssh || systemctl restart sshd || true
 `;
-  return btoa(sh);
+}
+
+/**
+ * Windows/RDP is a different class of sign-in. AWS Windows Server accepts
+ * password logon for a local admin (NLA); there is no sshd_config.d-style
+ * vendor drop-in that disables RDP password auth. Do not mirror the Ubuntu
+ * sshd override here.
+ */
+export function windowsLabUserDataScript(username: string, password: string): string {
+  return `#ps1
+net user ${username} "${password}" /add
+net localgroup administrators ${username} /add
+`;
+}
+
+function userDataScript(username: string, password: string, isWindows: boolean): string {
+  const body = isWindows
+    ? windowsLabUserDataScript(username, password)
+    : linuxLabUserDataShell(username, password);
+  return btoa(body);
 }
 
 /**
