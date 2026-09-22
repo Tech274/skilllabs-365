@@ -74,7 +74,8 @@ export default function AdminWorkspaceLaunches() {
           <div>
             <h1 className="text-xl font-semibold text-foreground">Workspace Launch Events</h1>
             <p className="text-sm text-muted-foreground">
-              Every learner workspace launch, with generated trial emails. Admin only.
+              Launch-event audit — who opened a workspace, including generated trial emails.
+              Catalog and learner assignment live under Applications. Admin only.
             </p>
           </div>
           <Button size="sm" className="h-8 text-xs" onClick={exportCsv} disabled={filtered.length === 0}>
