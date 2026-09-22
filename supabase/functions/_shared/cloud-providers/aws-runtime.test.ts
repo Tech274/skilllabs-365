@@ -107,10 +107,27 @@ Deno.test("Ubuntu user-data writes a pre-60 PasswordAuthentication yes drop-in a
   );
 });
 
-Deno.test("Windows user-data is not the Ubuntu sshd drop-in class", () => {
-  const script = windowsLabUserDataScript("labuser", "secret");
+Deno.test("Windows user-data is EC2Launch powershell for the Hub username, not Ubuntu sshd", () => {
+  const password = 'Aa1$ecret!"';
+  const script = windowsLabUserDataScript("labuser", password);
   assertEquals(script.includes("sshd_config"), false);
   assertEquals(script.includes("PasswordAuthentication"), false);
-  assertEquals(script.includes("net user labuser"), true);
-  assertEquals(script.includes("net localgroup administrators labuser"), true);
+  assertEquals(script.includes("#ps1"), false);
+  assertEquals(script.includes("<powershell>"), true);
+  assertEquals(script.includes("</powershell>"), true);
+  // Configured local account (labuser), not the AMI Administrator, and not raw
+  // so PowerShell cannot expand $ or quotes in the Hub password.
+  assertEquals(script.includes("labuser"), false);
+  assertEquals(script.includes(password), false);
+  // Group name "Administrators" is required; the built-in account is not the dial user.
+  assertEquals(script.includes("'Administrator'"), false);
+  assertEquals(script.includes("net user"), false);
+  assertEquals(script.includes(btoa("labuser")), true);
+  assertEquals(script.includes(btoa(password)), true);
+  assertEquals(script.includes("Remote Desktop Users"), true);
+  assertEquals(script.includes("Administrators"), true);
+  assertEquals(script.includes("PasswordComplexity = 0"), true);
+  assertEquals(script.includes("fDenyTSConnections"), true);
+  assertEquals(script.includes("UserAuthentication"), true);
+  assertEquals(script.includes("-Value 1"), true);
 });
