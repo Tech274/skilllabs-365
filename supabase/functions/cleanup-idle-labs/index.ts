@@ -96,7 +96,8 @@ async function deleteAzureVM(
   vmName: string
 ): Promise<boolean> {
   const apiVersion = "2024-03-01";
-  // Delete VM (NIC and disk have deleteOption: Delete so they'll be cleaned up)
+  // Delete VM. NIC and OS disk use deleteOption=Delete. The lab public IP is
+  // deleteOption=Delete on the NIC ipConfiguration, so it follows the NIC.
   const res = await fetch(
     `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}?api-version=${apiVersion}&forceDeletion=true`,
     {
@@ -1311,7 +1312,7 @@ Deno.serve(async (req) => {
                 currentPrivateIp: vm.private_ip ?? null,
               });
               if (outcome.kind === "promoted") {
-                await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+                await applyPromoteToRunning(supabase, vm.id, outcome.private_ip, outcome.public_ip);
                 promoted = true;
                 results.push(
                   `Stuck provisioning VM ${vm.id.substring(0, 8)}: Azure Running → promoted to running (no dealloc)`,

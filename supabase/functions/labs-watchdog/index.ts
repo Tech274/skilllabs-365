@@ -73,6 +73,7 @@ async function deleteAzureVM(
   resourceGroup: string,
   vmName: string,
 ): Promise<boolean> {
+  // NIC + OS disk deleteOption=Delete. Lab PIP is deleteOption=Delete on the NIC ipConfiguration.
   const res = await fetch(
     `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}?api-version=2024-03-01&forceDeletion=true`,
     { method: "DELETE", headers: { Authorization: `Bearer ${token}` } },
@@ -282,7 +283,7 @@ Deno.serve(async (req) => {
             currentPrivateIp: vm.private_ip ?? null,
           });
           if (outcome.kind === "promoted") {
-            await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+            await applyPromoteToRunning(supabase, vm.id, outcome.private_ip, outcome.public_ip);
             actions.push(`vm ${vm.id.slice(0, 8)}: reconciled ${vm.status}→running`);
           } else if (outcome.kind === "mapped" && (outcome.status === "failed" || outcome.status === "deallocated" || outcome.status === "stopped")) {
             // Mirror check-vm-status: sync terminal Azure states into Hub,
@@ -490,7 +491,7 @@ Deno.serve(async (req) => {
                 currentPrivateIp: null,
               });
               if (outcome.kind === "promoted") {
-                await applyPromoteToRunning(supabase, vm.id, outcome.private_ip);
+                await applyPromoteToRunning(supabase, vm.id, outcome.private_ip, outcome.public_ip);
                 promotedRunning = true;
                 privateIp = outcome.private_ip;
                 nextStatus = "running";

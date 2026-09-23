@@ -16,6 +16,16 @@ import {
   createAwsVm, resolveLabAmiId, mapToAwsInstanceType, awsVmProvisioningGaps, type AwsRuntime,
 } from "../_shared/cloud-providers/aws-runtime.ts";
 import { loadAzureNetworkDefaults } from "../_shared/azure-network-settings.ts";
+import {
+  AZURE_NETWORK_API,
+  armResourceUrl,
+  azurePublicIpResourceId,
+  buildAzureNicBody,
+  buildAzurePublicIpBody,
+  readArmIpAddress,
+  readNicPrivateIp,
+  readNicPublicIpRef,
+} from "../_shared/azure-public-ip.ts";
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
 import { findResumableVm, RESUMABLE_VM_STATUSES, startCloudVm } from "../_shared/cloud-providers/vm-resume.ts";
 import { buildWalletSnapshot, walletBlockMessage } from "../_shared/lab-wallet.ts";
@@ -49,7 +59,56 @@ async function getAzureToken(tenantId: string, clientId: string, clientSecret: s
   return data.access_token;
 }
 
-/** Create an Azure VM */
+async function azureArm(
+  token: string,
+  method: string,
+  resourceId: string,
+  body?: unknown,
+): Promise<{ ok: boolean; status: number; data: unknown; text: string }> {
+  const res = await fetch(armResourceUrl(resourceId, AZURE_NETWORK_API), {
+    method,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+  const text = await res.text();
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+  return { ok: res.ok, status: res.status, data, text };
+}
+
+async function bestEffortDeleteArm(token: string, resourceId: string): Promise<void> {
+  try {
+    await azureArm(token, "DELETE", resourceId);
+  } catch (e) {
+    console.error(`provision-lab: cleanup ${resourceId} failed:`, e);
+  }
+}
+
+/** Poll a static PIP until properties.ipAddress is populated. */
+async function waitForAzurePublicIp(
+  token: string,
+  pipId: string,
+  attempts = 8,
+): Promise<string | null> {
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await new Promise((resolve) => setTimeout(resolve, 2000));
+    const got = await azureArm(token, "GET", pipId);
+    const address = got.ok ? readArmIpAddress(got.data) : null;
+    if (address) return address;
+  }
+  return null;
+}
+
+/** Create an Azure VM with a Standard static public IP on its NIC. */
 async function createAzureVM(
   token: string,
   subscriptionId: string,
@@ -64,130 +123,134 @@ async function createAzureVM(
     subnetId: string;
     identity?: { type: "SystemAssigned" } | { type: "UserAssigned"; userAssignedIdentities: Record<string, unknown> };
   }
-): Promise<{ vmId: string; privateIp: string }> {
+): Promise<{ vmId: string; privateIp: string; publicIp: string | null }> {
   const apiVersion = "2024-03-01";
-  const nicName = `${vmName}-nic`;
+  const pipId = azurePublicIpResourceId(subscriptionId, resourceGroup, vmName);
+  let nicId = "";
+  let vmCreated = false;
 
-  // 1. Create NIC
-  const nicRes = await fetch(
-    `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Network/networkInterfaces/${nicName}?api-version=${apiVersion}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        location: options.region,
-        properties: {
-          ipConfigurations: [
-            {
-              name: "ipconfig1",
-              properties: {
-                subnet: { id: options.subnetId },
-                privateIPAllocationMethod: "Dynamic",
-              },
-            },
-          ],
-        },
-        tags: { managedBy: "skilllabs", purpose: "lab-vm" },
-      }),
+  try {
+    // 1. Allocate a Standard static public IP before the NIC so Hub can persist
+    // a real address as soon as the VM is registered (SCRUM-43).
+    const pipRes = await azureArm(token, "PUT", pipId, buildAzurePublicIpBody(options.region));
+    if (!pipRes.ok) {
+      throw new Error(`Failed to create public IP [${pipRes.status}]: ${pipRes.text}`);
     }
-  );
+    let publicIp = readArmIpAddress(pipRes.data);
+    if (!publicIp) publicIp = await waitForAzurePublicIp(token, pipId);
 
-  if (!nicRes.ok) {
-    const body = await nicRes.text();
-    throw new Error(`Failed to create NIC [${nicRes.status}]: ${body}`);
-  }
+    // 2. Create NIC associated with that PIP (private allocation stays dynamic).
+    const nicName = `${vmName}-nic`;
+    const nicResourceId =
+      `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Network/networkInterfaces/${nicName}`;
+    const nicRes = await azureArm(
+      token,
+      "PUT",
+      nicResourceId,
+      buildAzureNicBody({ region: options.region, subnetId: options.subnetId, publicIpId: pipId }),
+    );
 
-  const nicData = await nicRes.json();
-  const nicId = nicData.id;
+    if (!nicRes.ok) {
+      throw new Error(`Failed to create NIC [${nicRes.status}]: ${nicRes.text}`);
+    }
 
-  // Wait for NIC provisioning
-  await new Promise((resolve) => setTimeout(resolve, 5000));
+    const nicData = nicRes.data as { id?: string };
+    nicId = nicData.id || nicResourceId;
 
-  // 2. Determine OS image reference
-  const isWindows = options.osImage.toLowerCase().includes("windows");
-  const imageReference = isWindows
-    ? {
-        publisher: "MicrosoftWindowsServer",
-        offer: "WindowsServer",
-        sku: "2022-datacenter-azure-edition",
-        version: "latest",
+    // Wait for NIC provisioning
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+
+    // Determine OS image reference
+    const isWindows = options.osImage.toLowerCase().includes("windows");
+    const imageReference = isWindows
+      ? {
+          publisher: "MicrosoftWindowsServer",
+          offer: "WindowsServer",
+          sku: "2022-datacenter-azure-edition",
+          version: "latest",
+        }
+      : {
+          publisher: "Canonical",
+          offer: "0001-com-ubuntu-server-jammy",
+          sku: "22_04-lts-gen2",
+          version: "latest",
+        };
+
+    // 3. Create VM
+    const vmPayload: Record<string, unknown> = {
+      location: options.region,
+      properties: {
+        hardwareProfile: { vmSize: options.vmSize },
+        storageProfile: {
+          imageReference,
+          osDisk: {
+            createOption: "FromImage",
+            managedDisk: { storageAccountType: "Standard_LRS" },
+            deleteOption: "Delete",
+          },
+        },
+        osProfile: {
+          computerName: vmName.substring(0, 15),
+          adminUsername: options.adminUsername,
+          adminPassword: options.adminPassword,
+          ...(isWindows
+            ? { windowsConfiguration: { enableAutomaticUpdates: false, provisionVMAgent: true } }
+            : { linuxConfiguration: { disablePasswordAuthentication: false } }),
+        },
+        networkProfile: {
+          networkInterfaces: [{ id: nicId, properties: { primary: true, deleteOption: "Delete" } }],
+        },
+        diagnosticsProfile: {
+          bootDiagnostics: { enabled: false },
+        },
+      },
+      tags: { managedBy: "skilllabs", purpose: "lab-vm" },
+    };
+    if (options.identity) vmPayload.identity = options.identity;
+
+    const vmRes = await fetch(
+      `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}?api-version=${apiVersion}`,
+      {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(vmPayload),
       }
-    : {
-        publisher: "Canonical",
-        offer: "0001-com-ubuntu-server-jammy",
-        sku: "22_04-lts-gen2",
-        version: "latest",
-      };
+    );
 
-  // 3. Create VM
-  const vmPayload: Record<string, unknown> = {
-    location: options.region,
-    properties: {
-      hardwareProfile: { vmSize: options.vmSize },
-      storageProfile: {
-        imageReference,
-        osDisk: {
-          createOption: "FromImage",
-          managedDisk: { storageAccountType: "Standard_LRS" },
-          deleteOption: "Delete",
-        },
-      },
-      osProfile: {
-        computerName: vmName.substring(0, 15),
-        adminUsername: options.adminUsername,
-        adminPassword: options.adminPassword,
-        ...(isWindows
-          ? { windowsConfiguration: { enableAutomaticUpdates: false, provisionVMAgent: true } }
-          : { linuxConfiguration: { disablePasswordAuthentication: false } }),
-      },
-      networkProfile: {
-        networkInterfaces: [{ id: nicId, properties: { primary: true, deleteOption: "Delete" } }],
-      },
-      diagnosticsProfile: {
-        bootDiagnostics: { enabled: false },
-      },
-    },
-    tags: { managedBy: "skilllabs", purpose: "lab-vm" },
-  };
-  if (options.identity) vmPayload.identity = options.identity;
-
-  const vmRes = await fetch(
-    `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}?api-version=${apiVersion}`,
-    {
-      method: "PUT",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(vmPayload),
+    if (!vmRes.ok) {
+      const body = await vmRes.text();
+      throw new Error(`Failed to create VM [${vmRes.status}]: ${body}`);
     }
-  );
 
-  if (!vmRes.ok) {
-    const body = await vmRes.text();
-    throw new Error(`Failed to create VM [${vmRes.status}]: ${body}`);
+    vmCreated = true;
+    const vmData = await vmRes.json();
+
+    // 4. Refresh NIC addresses. Private IP is often assigned only after the NIC
+    // is attached; the static public IP was allocated in step 1.
+    const nicGet = await azureArm(token, "GET", nicId);
+    const privateIp = (nicGet.ok && readNicPrivateIp(nicGet.data)) || "pending";
+    if (!publicIp && nicGet.ok) {
+      publicIp = readNicPublicIpRef(nicGet.data).address;
+    }
+    if (!publicIp) publicIp = await waitForAzurePublicIp(token, pipId, 3);
+
+    return {
+      vmId: vmData.id || vmData.name,
+      privateIp,
+      publicIp,
+    };
+  } catch (err) {
+    // A failed launch must not leave a billable static PIP (or its NIC) behind.
+    // Once the VM exists, NIC deleteOption cleans the PIP with the VM.
+    if (!vmCreated) {
+      if (nicId) await bestEffortDeleteArm(token, nicId);
+      await bestEffortDeleteArm(token, pipId);
+    }
+    throw err;
   }
-
-  const vmData = await vmRes.json();
-
-  // 4. Get private IP from NIC
-  const nicGetRes = await fetch(
-    `https://management.azure.com${nicId}?api-version=${apiVersion}`,
-    {
-      headers: { Authorization: `Bearer ${token}` },
-    }
-  );
-  const nicGetData = await nicGetRes.json();
-  const privateIp =
-    nicGetData?.properties?.ipConfigurations?.[0]?.properties?.privateIPAddress || "pending";
-
-  return {
-    vmId: vmData.id || vmData.name,
-    privateIp,
-  };
 }
 
 
@@ -975,7 +1038,7 @@ Deno.serve(async (req) => {
     await trace.success(SOURCE, "azure-auth", "Azure service principal authenticated");
 
     // 3. Create Azure VM
-    let vmResult: { vmId: string; privateIp: string };
+    let vmResult: { vmId: string; privateIp: string; publicIp: string | null };
     await trace.start(SOURCE, "vm-create", `Creating Azure VM ${vmName}`);
     try {
       vmResult = await createAzureVM(azureToken, azure.subscriptionId, azure.resourceGroup, vmName, {
@@ -1007,6 +1070,7 @@ Deno.serve(async (req) => {
     await trace.success(SOURCE, "vm-create", "Azure VM created, waiting for it to boot", {
       azure_vm_id: vmResult.vmId,
       private_ip: vmResult.privateIp,
+      public_ip: vmResult.publicIp,
       subnet_id: azure.subnetId,
     });
 
@@ -1035,12 +1099,16 @@ Deno.serve(async (req) => {
       await trace.skipped(SOURCE, "connectivity-check", "Connectivity check disabled in platform settings");
     }
 
-    // 4. Update VM record with Azure details
+    // 4. Update VM record with Azure details.
+    // Persist public_ip now (static PIP is allocated before Running). check-vm-status
+    // promote refreshes the same column when PowerState flips to running so a
+    // late address is not left null on the Hub row.
     await supabase
       .from("virtual_machines")
       .update({
         azure_vm_id: vmResult.vmId,
         private_ip: vmResult.privateIp,
+        ...(vmResult.publicIp ? { public_ip: vmResult.publicIp } : {}),
         status: "provisioning",
       })
       .eq("id", vmRecord.id);
@@ -1055,6 +1123,7 @@ Deno.serve(async (req) => {
       vm_id: vmRecord.id,
       azure_vm_id: vmResult.vmId,
       private_ip: vmResult.privateIp,
+      public_ip: vmResult.publicIp,
       status: "provisioning",
       vm_name: vmName,
       subnet_id: azure.subnetId,

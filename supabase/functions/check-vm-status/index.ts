@@ -98,8 +98,12 @@ Deno.serve(async (req) => {
     );
 
     if (outcome.kind === "promoted") {
-      await applyPromoteToRunning(admin, vm_id, outcome.private_ip);
-      return jsonResponse({ status: "running", private_ip: outcome.private_ip });
+      await applyPromoteToRunning(admin, vm_id, outcome.private_ip, outcome.public_ip);
+      return jsonResponse({
+        status: "running",
+        private_ip: outcome.private_ip,
+        public_ip: outcome.public_ip,
+      });
     }
 
     if (outcome.kind === "mapped") {
