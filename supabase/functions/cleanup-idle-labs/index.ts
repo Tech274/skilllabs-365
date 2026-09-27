@@ -17,6 +17,10 @@ import { startCloudVm, RESUMABLE_VM_STATUSES } from "../_shared/cloud-providers/
 import { buildWalletSnapshot, walletBlockMessage, type WalletSessionRow } from "../_shared/lab-wallet.ts";
 import {
   decideSoftExpiry,
+  isHeldVm,
+  parseHeldVmList,
+  parseSoftExpiryMode,
+  softExpiryEnforced,
   softExpiryNotice,
   ORPHAN_SWEEP_STATUSES,
   SOFT_EXPIRY_STATUSES,
@@ -335,8 +339,9 @@ async function loadSoftExpiryCandidates(
     }
     const rows = (data ?? []) as SoftExpiryCandidate[];
     out.push(...rows);
-    if (rows.length < SOFT_EXPIRY_PAGE) break;
+    if (rows.length < SOFT_EXPIRY_PAGE) return out;
   }
+  console.warn(JSON.stringify({ event: "soft_expiry_candidates_capped", cap: SOFT_EXPIRY_MAX }));
   return out;
 }
 
@@ -400,6 +405,8 @@ async function notifyLearnerAndAdmins(
   if (error) console.error("notifyLearnerAndAdmins failed:", error.message);
 }
 
+/** Control-flow marker: SOFT_EXPIRY_MODE=off skips the soft-expiry sweep. */
+class SkipSweep extends Error {}
 
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
@@ -440,6 +447,10 @@ Deno.serve(async (req) => {
       auth: { autoRefreshToken: false, persistSession: false },
     });
     const azureFor = makeAzureResolver(supabase);
+    // Held VMs (smoke VM, Guac hosts, Ops holds) are never touched by automatic
+    // passes or purge. Explicit admin/learner actions on a named VM still work.
+    const heldVms = parseHeldVmList(Deno.env.get("CLEANUP_HELD_VM_IDS"));
+    const softExpiryMode = parseSoftExpiryMode(Deno.env.get("SOFT_EXPIRY_MODE"));
 
     // Student-owned cancellation of a provisioning / running VM
     if (action === "cancel-provisioning") {
@@ -921,6 +932,10 @@ Deno.serve(async (req) => {
             expiresPatch.expires_at = new Date(
               Date.now() + Number(remintTpl.duration) * 60 * 1000,
             ).toISOString();
+          } else if (remintTpl?.is_persistent) {
+            // Persistent labs are window/wallet governed; a stale expires_at must
+            // not let the next cron tick undo this Start.
+            expiresPatch.expires_at = null;
           }
         }
         await supabase.from("virtual_machines").update({
@@ -1115,8 +1130,11 @@ Deno.serve(async (req) => {
           nowMs,
         });
         if (!decision) continue;
+        const held = isHeldVm(vm, heldVms);
         due.push({
           vm_id: vm.id,
+          held,
+          would_deallocate: !held && softExpiryMode !== "off" && softExpiryEnforced(softExpiryMode, vm.status, decision),
           status: vm.status,
           user_id: vm.user_id,
           lab_template_id: vm.lab_template_id,
@@ -1130,6 +1148,8 @@ Deno.serve(async (req) => {
         success: true,
         action: "expiry-preview",
         dry_run: true,
+        mode: softExpiryMode,
+        held_vm_ids: heldVms,
         scanned: candidates.length,
         due_count: due.length,
         due,
@@ -1149,6 +1169,7 @@ Deno.serve(async (req) => {
       let purged = 0;
       if (purgeVMs?.length) {
         for (const vm of purgeVMs) {
+          if (isHeldVm(vm, heldVms)) continue;
           if (vm.azure_vm_id) {
             try {
               await deleteCloudVm(supabase, azureFor, vm);
@@ -1224,8 +1245,20 @@ Deno.serve(async (req) => {
             .eq("id", session.vm_id)
             .maybeSingle();
 
-          if (vm?.azure_vm_id) {
-            const deallocated = await stopCloudVm(supabase, azureFor, vm);
+          if (vm?.azure_vm_id && isHeldVm({ id: session.vm_id, azure_vm_id: vm.azure_vm_id }, heldVms)) {
+            results.push(`Idle session ${session.id}: VM ${session.vm_id.slice(0, 8)} is held — not deallocated`);
+          } else if (vm?.azure_vm_id) {
+            // One cloud error must never abort the whole run (soft-expiry below).
+            let deallocated = false;
+            try {
+              deallocated = await stopCloudVm(supabase, azureFor, vm);
+            } catch (e) {
+              console.error(JSON.stringify({
+                event: "idle_deallocate_failed",
+                vm_id: session.vm_id,
+                detail: e instanceof Error ? e.message : String(e),
+              }));
+            }
             if (deallocated) {
               await markVmEnded(supabase, session.vm_id, {
                 status: "deallocated",
@@ -1245,8 +1278,19 @@ Deno.serve(async (req) => {
       for (const vm of orphanVMs) {
         if (activeSessionVmIds.has(vm.id)) continue; // VM still has active session
         if (!vm.azure_vm_id) continue;
+        if (isHeldVm(vm, heldVms)) continue;
 
-        const deallocated = await stopCloudVm(supabase, azureFor, vm);
+        // One cloud error (ghost instance, wrong state) must never abort the run.
+        let deallocated = false;
+        try {
+          deallocated = await stopCloudVm(supabase, azureFor, vm);
+        } catch (e) {
+          console.error(JSON.stringify({
+            event: "orphan_deallocate_failed",
+            vm_id: vm.id,
+            detail: e instanceof Error ? e.message : String(e),
+          }));
+        }
         if (deallocated) {
           await markVmEnded(supabase, vm.id, {
             status: "deallocated",
@@ -1268,8 +1312,17 @@ Deno.serve(async (req) => {
     // deallocated are not processed twice.
     // TODO(v2): soft-hold purge — days after lab_window_expired deallocate, optionally
     // hard-delete cloud + DB under explicit admin / ALLOW_AUTO_TERMINATE. Parked.
-    const expirySummary = { scanned: 0, due: 0, deallocated: 0, stop_failed: 0 };
+    const expirySummary = {
+      mode: softExpiryMode,
+      scanned: 0,
+      due: 0,
+      deallocated: 0,
+      stop_failed: 0,
+      held_skipped: 0,
+      dry_run_due: 0,
+    };
     try {
+      if (softExpiryMode === "off") throw new SkipSweep();
       const nowMs = now.getTime();
       const candidates = await loadSoftExpiryCandidates(supabase);
       expirySummary.scanned = candidates.length;
@@ -1292,6 +1345,22 @@ Deno.serve(async (req) => {
         });
         if (!decision) continue;
         expirySummary.due += 1;
+        if (isHeldVm(vm, heldVms)) {
+          expirySummary.held_skipped += 1;
+          continue;
+        }
+        if (!softExpiryEnforced(softExpiryMode, vm.status, decision)) {
+          expirySummary.dry_run_due += 1;
+          console.log(JSON.stringify({
+            event: "soft_expiry_dry_run_due",
+            mode: softExpiryMode,
+            vm_id: vm.id,
+            status: vm.status,
+            reason: decision.reason,
+            trigger: decision.trigger,
+          }));
+          continue;
+        }
 
         await supabase
           .from("sessions")
@@ -1364,7 +1433,7 @@ Deno.serve(async (req) => {
         }
       }
     } catch (e) {
-      console.error("Soft-expiry sweep failed:", e);
+      if (!(e instanceof SkipSweep)) console.error("Soft-expiry sweep failed:", e);
     }
 
     // 3b. Pre-expiry warning (T-15m): notify learner+admins once per lab window.
@@ -1408,6 +1477,7 @@ Deno.serve(async (req) => {
 
     if (stuckVMs?.length) {
       for (const vm of stuckVMs) {
+        if (isHeldVm(vm, heldVms)) continue;
         let promoted = false;
         if (vm.azure_vm_id) {
           try {

@@ -72,7 +72,10 @@ export function isSoftExpiryStatus(status: string | null | undefined): boolean {
 export function decideSoftExpiry(input: SoftExpiryInput): SoftExpiryDecision | null {
   if (!isSoftExpiryStatus(input.status)) return null;
 
-  if (input.expiresAt) {
+  // Persistent labs are governed by template end_date + wallet only (provision
+  // never sets expires_at for them). A stale expires_at on a persistent row must
+  // not undo a learner/admin Start on the next cron tick (review follow-up).
+  if (input.expiresAt && input.template?.is_persistent !== true) {
     const expires = Date.parse(input.expiresAt);
     if (!Number.isNaN(expires) && expires < input.nowMs) {
       return { reason: "lab_window_expired", trigger: "expires_at" };
@@ -137,4 +140,73 @@ export function softExpiryNotice(
     message:
       `${lab} used all ${decision.allocatedMinutes ?? 0} allocated minutes. VM ${label} was deallocated. Resources are held, not deleted.`,
   };
+}
+
+/**
+ * Sweep mode (review follow-up). Read from the `SOFT_EXPIRY_MODE` secret.
+ *   - unset / unknown → "legacy": enforce only what the pre-SCRUM-28 sweep already
+ *     enforced (expires_at on running/provisioning/starting; end date / minutes on
+ *     running/provisioning/starting/idle). Newly covered cases (OS-stopped VMs,
+ *     idle past expires_at) are reported as dry-run until Ops opts in.
+ *   - "enforce" → full SCRUM-28 scope.
+ *   - "dry-run" → report only, never stop anything.
+ *   - "off"     → skip the soft-expiry sweep entirely.
+ */
+export type SoftExpiryMode = "legacy" | "enforce" | "dry-run" | "off";
+
+export function parseSoftExpiryMode(raw: string | null | undefined): SoftExpiryMode {
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (v === "enforce" || v === "dry-run" || v === "off") return v;
+  return "legacy";
+}
+
+const LEGACY_EXPIRES_AT_STATUSES = ["running", "provisioning", "starting"];
+const LEGACY_WALLET_STATUSES = ["running", "provisioning", "starting", "idle"];
+
+/** May the sweep actually deallocate this due VM under `mode`? */
+export function softExpiryEnforced(
+  mode: SoftExpiryMode,
+  status: string | null | undefined,
+  decision: SoftExpiryDecision,
+): boolean {
+  if (mode === "enforce") return true;
+  if (mode !== "legacy") return false;
+  const st = String(status ?? "").toLowerCase();
+  return decision.trigger === "expires_at"
+    ? LEGACY_EXPIRES_AT_STATUSES.includes(st)
+    : LEGACY_WALLET_STATUSES.includes(st);
+}
+
+/**
+ * Held VMs (smoke VM, Guac hosts, anything Ops is holding) that NO automatic
+ * cleanup pass may stop, deallocate or delete. Built-in holds plus the
+ * comma-separated `CLEANUP_HELD_VM_IDS` secret. An entry matches a Hub
+ * `virtual_machines.id` exactly, a Hub id prefix of 8+ chars (e.g. `bba27e8f`),
+ * or the cloud instance id / resource name in `azure_vm_id`.
+ */
+export const BUILTIN_HELD_VM_IDS: readonly string[] = [
+  "bba27e8f", // smoke VM held by Ops — release only on explicit owner GO
+];
+
+export function parseHeldVmList(raw: string | null | undefined): string[] {
+  const extra = String(raw ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  return [...new Set([...BUILTIN_HELD_VM_IDS.map((s) => s.toLowerCase()), ...extra])];
+}
+
+export function isHeldVm(
+  vm: { id?: string | null; azure_vm_id?: string | null },
+  held: readonly string[],
+): boolean {
+  const id = String(vm.id ?? "").toLowerCase();
+  const cloud = String(vm.azure_vm_id ?? "").toLowerCase();
+  const cloudName = cloud.includes("/") ? cloud.slice(cloud.lastIndexOf("/") + 1) : cloud;
+  for (const entry of held) {
+    if (!entry) continue;
+    if (id && (id === entry || (entry.length >= 8 && id.startsWith(entry)))) return true;
+    if (cloud && (cloud === entry || cloudName === entry)) return true;
+  }
+  return false;
 }
