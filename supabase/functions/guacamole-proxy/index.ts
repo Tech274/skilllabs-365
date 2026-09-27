@@ -22,6 +22,7 @@ import {
   liveSessionReuseVerdict,
   type ConnectionParamsLookup,
 } from "../_shared/guac-session-reuse.ts";
+import { pickHealthSession } from "../_shared/guac-health-session.ts";
 
 const SOURCE = "guacamole-proxy";
 
@@ -383,8 +384,9 @@ Deno.serve(async (req) => {
      * session's connection (activeConnections). Edge TCP to :3389 is never used
      * here: the gateway security group makes that probe false-fail.
      *
-     * Body: { action, session_id? , vm_id? } — session_id preferred; vm_id falls
-     * back to this user's most recent active session for that lab.
+     * Body: { action, session_id? , vm_id? } — session_id is the target session.
+     * vm_id falls back only to this user's latest ACTIVE session. Admins do not
+     * receive another user's latest. Health NEVER deletes.
      */
     if (action === "connection-health") {
       const { session_id, vm_id: healthVmId } = body;
@@ -393,28 +395,27 @@ Deno.serve(async (req) => {
       const healthReply = (payload: Record<string, unknown>) =>
         new Response(JSON.stringify(payload), { status: 200, headers: traceHeaders });
 
-      // 15j.3 resolve order: (a) sessions.id = session_id; (b) on miss, latest row
-      // for vm_id carrying a guac_connection_id — prefer this user; admins
-      // accept any latest for the vm. Health NEVER deletes.
       const SESS_COLS = "id, user_id, status, guac_connection_id, vm_id";
-      let sess: { id: string; user_id: string; status: string; guac_connection_id: string | null; vm_id: string | null } | null = null;
-      let resolvedVia = "none";
+      let byId: { id: string; user_id: string; status: string; guac_connection_id: string | null; vm_id: string | null } | null = null;
       if (session_id) {
         const { data } = await supabase.from("sessions").select(SESS_COLS).eq("id", session_id).maybeSingle();
-        if (data) { sess = data; resolvedVia = "session_id"; }
+        if (data) byId = data;
       }
-      if (!sess && healthVmId) {
+      let ownActive: typeof byId = null;
+      // Admins accept only the target session. The vm_id fallback is the caller's own active row.
+      if (!byId && healthVmId && !(await isAdmin())) {
         const { data: own } = await supabase.from("sessions").select(SESS_COLS)
-          .eq("vm_id", healthVmId).eq("user_id", user.id).not("guac_connection_id", "is", null)
-          .order("started_at", { ascending: false }).limit(1);
-        if (own?.[0]) { sess = own[0]; resolvedVia = "vm_id_own"; }
-        else if (await isAdmin()) {
-          const { data: anyRows } = await supabase.from("sessions").select(SESS_COLS)
-            .eq("vm_id", healthVmId).not("guac_connection_id", "is", null)
-            .order("started_at", { ascending: false }).limit(1);
-          if (anyRows?.[0]) { sess = anyRows[0]; resolvedVia = "vm_id_admin"; }
-        }
+          .eq("vm_id", healthVmId)
+          .eq("user_id", user.id)
+          .eq("status", "active")
+          .not("guac_connection_id", "is", null)
+          .order("started_at", { ascending: false })
+          .limit(1);
+        ownActive = own?.[0] ?? null;
       }
+      const picked = pickHealthSession({ byId, ownActive });
+      const sess = picked.session;
+      const resolvedVia = picked.via;
       if (!sess) {
         console.log(JSON.stringify({ scope: "connection-health", probe: "session_miss", had_session_id: !!session_id, had_vm_id: !!healthVmId }));
         return healthReply({ ready: false, reason: "Lab session not resolved yet", probe: "session_pending" });
