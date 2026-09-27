@@ -135,9 +135,11 @@ npm run functions:test    # deno test supabase/functions/
     like persistent: `expires_at` alone never stops it; it is counted in
     `template_unknown_skipped` and listed by `expiry-preview` (`template_unknown`).
     Such VMs are still covered by the idle / orphan passes.
-  * `labs-watchdog` has its own `expires_at` sweep that does **not** read
-    `SOFT_EXPIRY_MODE` or `CLEANUP_HELD_VM_IDS`. If it is scheduled, pause it
-    while rolling out the cleanup changes.
+  * `labs-watchdog` (cron job 4) has its own `expires_at` sweep. It now skips
+    VMs on `VM_PROTECTED_IDS` or `CLEANUP_HELD_VM_IDS` (same matching rules,
+    including the built-in smoke prefix `bba27e8f`) and confirms a cloud stop
+    before writing `deallocated`. It does **not** read `SOFT_EXPIRY_MODE`.
+    `ALLOW_AUTO_TERMINATE` still defaults off.
 * **Held VMs** — `CLEANUP_HELD_VM_IDS` secret, comma separated, case-insensitive,
   plus the built-in smoke VM `bba27e8f` (Hub short id), are never stopped,
   deallocated or purged by any automatic pass. An entry matches the **full Hub
@@ -169,6 +171,54 @@ select cron.schedule(
 
 Verify: `select * from cron.job_run_details order by start_time desc limit 10;` and check the function logs for `Cleanup completed: N actions taken`.
 
+### Cron job 4 — labs-watchdog
+
+Scheduled the same way as cleanup (Bearer from `app.service_role_key`, plus the
+Vault cron secret). No secret values belong in this file. Job 4 is the live
+watchdog; it authenticates with `x-cron-secret` (Vault name `cron_shared_secret`)
+and `Authorization`.
+
+```sql
+select cron.schedule(
+  'labs-watchdog',
+  '*/5 * * * *',
+  $$select net.http_post(
+      url := 'https://<project-ref>.supabase.co/functions/v1/labs-watchdog',
+      headers := jsonb_build_object(
+        'Content-Type', 'application/json',
+        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
+      ),
+      body := '{}'::jsonb
+  ) as request_id;$$
+);
+```
+
+### Cron job 9 — vm-reconcile (already live; record only)
+
+Live job name `vm-reconcile-dryrun-every-5min`, schedule `2-59/5 * * * *`,
+active. The function defaults to dry-run and writes nothing (promotions
+included) unless `VM_RECONCILE_MODE=apply` or `VM_RECONCILE_DRY_RUN=false`.
+The body below also sends `dry_run: true`. **Do not run this SQL against
+production** — job 9 already exists; this block is documentation so main
+matches live. It is not a migration.
+
+```sql
+select cron.schedule(
+  'vm-reconcile-dryrun-every-5min',
+  '2-59/5 * * * *',
+  $$select net.http_post(
+      url := 'https://<project-ref>.supabase.co/functions/v1/vm-reconcile',
+      headers := jsonb_build_object(
+        'Content-Type', 'application/json',
+        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
+      ),
+      body := '{"scope":"fleet","dry_run":true}'::jsonb
+  ) as request_id;$$
+);
+```
+
 ### Manual emergency cleanup
 
 Admin-authenticated POST to `cleanup-idle-labs`:
@@ -177,14 +227,14 @@ Admin-authenticated POST to `cleanup-idle-labs`:
 | --- | --- |
 | `{}` | full auto-cleanup pass |
 | `{"action":"expiry-preview"}` | **dry run** — list VMs the soft-expiry sweep would deallocate now, with reason/trigger (no cloud calls, no writes) |
-| `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM |
-| `{"action":"delete-vm","vm_id":"…"}` | delete one VM |
-| `{"action":"purge-failed"}` | purge failed VM records |
+| `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM after the cloud stop is confirmed (423 if guarded; 502 pending if the cloud state is not final) |
+| `{"action":"delete-vm","vm_id":"…"}` | delete one VM (explicit admin delete; still allowed on a guarded VM) |
+| `{"action":"purge-failed"}` | **410 TERMINATE_DISABLED** — stop-only, no row delete and no cloud terminate |
 | `{"action":"clear-guacamole"}` | drop all gateway connections |
 
 Students may only send `{"action":"cancel-provisioning","vm_id":"<their own VM>"}`.
 
-Nuclear option for runaway cost: delete every VM in the resource group from the Azure portal, then run `purge-failed`.
+Nuclear option for runaway cost: delete the cloud resources in the provider portal. `purge-failed` does not remove Hub rows; use `delete-vm` for an explicit admin delete of one VM.
 
 ## 6. Rollback
 
