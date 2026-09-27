@@ -104,7 +104,17 @@ npm run functions:test    # deno test supabase/functions/
   `end_date` (end of day IST) passed, or whose learner used all prepaid minutes
   → end active sessions, **deallocate** (never delete), notify learner + admins.
   Azure OS-level `stopped` still bills compute, so it is deallocated too. The
-  run response carries `soft_expiry: { scanned, due, deallocated, stop_failed }`.
+  run response carries `soft_expiry: { mode, scanned, due, deallocated, stop_failed, held_skipped, dry_run_due }`.
+  * `SOFT_EXPIRY_MODE` secret: unset = `legacy` (enforce only what the old sweep
+    enforced; OS-stopped VMs and idle-past-expires_at are logged as
+    `soft_expiry_dry_run_due`), `enforce` (full SCRUM-28 scope), `dry-run`
+    (report only), `off` (skip). Flip to `enforce` only after reviewing
+    `expiry-preview`.
+  * Persistent labs ignore `expires_at` (window + wallet only); Start clears it.
+* **Held VMs** — `CLEANUP_HELD_VM_IDS` secret (comma separated Hub VM ids, 8+ char
+  id prefixes, or cloud instance ids) plus the built-in smoke VM `bba27e8f` are
+  never stopped, deallocated or purged by any automatic pass. Explicit admin
+  actions on a named VM still work.
 * VMs stuck in `provisioning` > 10 min → mark failed and delete the Azure resource
 * orphaned Guacamole users/connections with no live session → removed
 
