@@ -12,7 +12,7 @@ import { UsageSummaryPanel } from "../UsageSummaryPanel";
 function chain(result: { data: unknown; error: null | { message: string } }) {
   // Every builder method returns the same thenable chain.
   const c: Record<string, unknown> = {};
-  for (const m of ["select", "gte", "order", "limit", "in"]) c[m] = () => c;
+  for (const m of ["select", "gte", "order", "limit", "in", "range", "eq"]) c[m] = () => c;
   c.then = (resolve: (v: unknown) => unknown) => Promise.resolve(result).then(resolve);
   return c;
 }
@@ -55,5 +55,48 @@ describe("UsageSummaryPanel", () => {
     );
     render(<UsageSummaryPanel />);
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("permission denied"));
+  });
+
+  it("pages sessions past the 1000-row cap, chunks learner lookups and counts VMs exactly", async () => {
+    const started = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const ended = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+    const all = Array.from({ length: 1500 }, (_, i) => ({
+      id: `s${i}`, user_id: `u${i % 250}`, lab_template_id: "t1", started_at: started, ended_at: ended, status: "completed",
+    }));
+    const profileChunks: number[] = [];
+    fromMock.mockImplementation((table: string) => {
+      if (table === "sessions") {
+        let range: [number, number] = [0, 999];
+        const c: Record<string, unknown> = {};
+        for (const m of ["select", "gte", "order"]) c[m] = () => c;
+        c.range = (a: number, b: number) => { range = [a, Math.min(b, a + 999)]; return c; };
+        c.then = (resolve: (v: unknown) => unknown) =>
+          Promise.resolve({ data: all.slice(range[0], range[1] + 1), error: null }).then(resolve);
+        return c;
+      }
+      if (table === "profiles") {
+        const c: Record<string, unknown> = {};
+        for (const m of ["select", "order", "range"]) c[m] = () => c;
+        c.in = (_col: string, ids: string[]) => { profileChunks.push(ids.length); return c; };
+        c.then = (resolve: (v: unknown) => unknown) => Promise.resolve({ data: [], error: null }).then(resolve);
+        return c;
+      }
+      if (table === "virtual_machines") {
+        let status = "";
+        const c: Record<string, unknown> = {};
+        c.select = () => c;
+        c.eq = (_col: string, v: string) => { status = v; return c; };
+        c.then = (resolve: (v: unknown) => unknown) =>
+          Promise.resolve({ data: null, count: status === "running" ? 1200 : 0, error: null }).then(resolve);
+        return c;
+      }
+      return chain({ data: [{ id: "t1", name: "AWS Windows Lab" }], error: null });
+    });
+
+    render(<UsageSummaryPanel />);
+    await waitFor(() => expect(screen.getAllByText("1500").length).toBeGreaterThan(0));
+    expect(screen.getAllByText("1200").length).toBeGreaterThan(0); // VMs live now: exact count, not a 1000-row sample
+    expect(Math.max(...profileChunks)).toBeLessThanOrEqual(100);
+    expect(profileChunks.reduce((a, b) => a + b, 0)).toBe(250);
   });
 });

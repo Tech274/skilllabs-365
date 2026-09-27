@@ -51,6 +51,12 @@ export type UsageReport = {
   liveVms: number;
 };
 
+/** Every Hub `vm_status` enum value (for exact per-status counts). */
+export const ALL_VM_STATUSES = [
+  "provisioning", "starting", "running", "idle", "expired",
+  "stopped", "deallocated", "terminated", "failed",
+] as const;
+
 /** VM statuses that are (or may be) burning compute right now. */
 export const LIVE_VM_STATUSES = ["running", "idle", "starting", "provisioning"] as const;
 
@@ -93,6 +99,8 @@ export function buildUsageReport(args: {
   profiles: UsageProfileRow[];
   days: number;
   nowMs?: number;
+  /** Exact per-status counts (preferred over `vms`, which may be a capped sample). */
+  vmStatusCounts?: Record<string, number>;
 }): UsageReport {
   const nowMs = args.nowMs ?? Date.now();
   const windowDays = Math.max(1, Math.floor(args.days));
@@ -146,9 +154,15 @@ export function buildUsageReport(args: {
   }
 
   const vmsByStatus: Record<string, number> = {};
-  for (const vm of args.vms) {
-    const key = (vm.status ?? "unknown").toLowerCase();
-    vmsByStatus[key] = (vmsByStatus[key] ?? 0) + 1;
+  if (args.vmStatusCounts) {
+    for (const [status, n] of Object.entries(args.vmStatusCounts)) {
+      if (n > 0) vmsByStatus[status.toLowerCase()] = (vmsByStatus[status.toLowerCase()] ?? 0) + n;
+    }
+  } else {
+    for (const vm of args.vms) {
+      const key = (vm.status ?? "unknown").toLowerCase();
+      vmsByStatus[key] = (vmsByStatus[key] ?? 0) + 1;
+    }
   }
   const liveVms = LIVE_VM_STATUSES.reduce((n, st) => n + (vmsByStatus[st] ?? 0), 0);
 

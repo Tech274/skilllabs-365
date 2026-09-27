@@ -75,4 +75,14 @@ describe("usage-report", () => {
     expect(formatMinutes(120)).toBe("2h");
     expect(formatMinutes(-5)).toBe("0m");
   });
+
+  it("exact vmStatusCounts win over a sampled vms list", () => {
+    const r = buildUsageReport({
+      days: 1, nowMs: NOW, sessions: [], templates: [], profiles: [],
+      vms: [{ status: "running" }],
+      vmStatusCounts: { running: 1200, idle: 3, terminated: 9000, failed: 0 },
+    });
+    expect(r.liveVms).toBe(1203);
+    expect(r.vmsByStatus).toEqual({ running: 1200, idle: 3, terminated: 9000 });
+  });
 });

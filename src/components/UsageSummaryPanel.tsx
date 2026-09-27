@@ -15,8 +15,9 @@ import {
   type UsageReport,
   type UsageSessionRow,
   type UsageTemplateRow,
-  type UsageVmRow,
+  ALL_VM_STATUSES,
 } from "@/lib/usage-report";
+import { dedupeBy, fetchAllForIds, fetchAllPages, PAGE_SIZE, type PageResult } from "@/lib/paged-query";
 
 const RANGES = [7, 30] as const;
 const SESSION_CAP = 5000;
@@ -31,39 +32,72 @@ export function UsageSummaryPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
+  const [warnings, setWarnings] = useState<string[]>([]);
 
   const load = useCallback(async (rangeDays: number) => {
     setLoading(true);
     setError(null);
+    setWarnings([]);
     try {
       const nowMs = Date.now();
       const since = usageWindowStart(rangeDays, nowMs).toISOString();
-      const [sessRes, vmRes, tplRes] = await Promise.all([
-        supabase
-          .from("sessions")
-          .select("id, user_id, lab_template_id, started_at, ended_at, status")
-          .gte("started_at", since)
-          .order("started_at", { ascending: false })
-          .limit(SESSION_CAP),
-        supabase.from("virtual_machines").select("status").limit(SESSION_CAP),
+      const notes: string[] = [];
+      // SCRUM-22 review follow-up: PostgREST caps every response at 1000 rows,
+      // so page (SCRUM-107 helper) instead of asking for 5000 in one request.
+      const [sessRes, tplRes, ...countRes] = await Promise.all([
+        fetchAllPages<UsageSessionRow>(
+          (from, to) =>
+            supabase
+              .from("sessions")
+              .select("id, user_id, lab_template_id, started_at, ended_at, status")
+              .gte("started_at", since)
+              .order("started_at", { ascending: false })
+              .order("id", { ascending: true })
+              .range(from, to) as unknown as PromiseLike<PageResult<UsageSessionRow>>,
+          PAGE_SIZE,
+          SESSION_CAP,
+        ),
         supabase.from("lab_templates").select("id, name"),
+        // Exact status counts (head-only) instead of sampling every VM row ever created.
+        ...ALL_VM_STATUSES.map((st) =>
+          supabase.from("virtual_machines").select("id", { count: "exact", head: true }).eq("status", st),
+        ),
       ]);
       if (sessRes.error) throw new Error(sessRes.error.message);
-      const sessions = (sessRes.data ?? []) as UsageSessionRow[];
+      const sessions = dedupeBy(sessRes.data, (s) => s.id);
+      if (tplRes.error) notes.push(`Lab names unavailable: ${tplRes.error.message}`);
+
+      const vmStatusCounts: Record<string, number> = {};
+      let vmCountFailed = false;
+      ALL_VM_STATUSES.forEach((st, i) => {
+        const r = countRes[i] as { count: number | null; error: { message: string } | null };
+        if (r.error) vmCountFailed = true;
+        else vmStatusCounts[st] = r.count ?? 0;
+      });
+      if (vmCountFailed) notes.push("Some lab machine counts could not be loaded.");
+
       const userIds = [...new Set(sessions.map((s) => s.user_id).filter((v): v is string => !!v))];
       let profiles: UsageProfileRow[] = [];
       if (userIds.length) {
-        const { data: profileRows } = await supabase
-          .from("profiles")
-          .select("user_id, display_name, email")
-          .in("user_id", userIds.slice(0, 1000));
-        profiles = (profileRows ?? []) as UsageProfileRow[];
+        // Chunked id lists: 1000 UUIDs in one URL fails once there are a few hundred learners.
+        const profRes = await fetchAllForIds<UsageProfileRow, string>(userIds, (ids, from, to) =>
+          supabase
+            .from("profiles")
+            .select("user_id, display_name, email")
+            .in("user_id", ids)
+            .order("user_id", { ascending: true })
+            .range(from, to) as unknown as PromiseLike<PageResult<UsageProfileRow>>,
+        );
+        profiles = profRes.data;
+        if (profRes.error) notes.push(`Some learner names could not be loaded: ${profRes.error.message}`);
       }
-      setTruncated(sessions.length >= SESSION_CAP);
+      setTruncated(sessRes.truncated);
+      setWarnings(notes);
       setReport(
         buildUsageReport({
           sessions,
-          vms: (vmRes.data ?? []) as UsageVmRow[],
+          vms: [],
+          vmStatusCounts: vmCountFailed ? undefined : vmStatusCounts,
           templates: (tplRes.data ?? []) as UsageTemplateRow[],
           profiles,
           days: rangeDays,
@@ -89,7 +123,8 @@ export function UsageSummaryPanel() {
 
   const downloadCsv = () => {
     if (!report) return;
-    const blob = new Blob([usageLearnersCsv(report)], { type: "text/csv;charset=utf-8" });
+    // UTF-8 BOM so Excel shows non-ASCII learner names correctly.
+    const blob = new Blob(["\uFEFF", usageLearnersCsv(report)], { type: "text/csv;charset=utf-8" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
@@ -156,6 +191,11 @@ export function UsageSummaryPanel() {
             Avg session {formatMinutes(report.totals.avgSessionMinutes)} · {report.totals.openSessions} open now
             {truncated ? ` · showing the latest ${SESSION_CAP} sessions only` : ""}
           </p>
+          {warnings.length > 0 && (
+            <div role="status" className="rounded-md border border-amber-500/40 bg-amber-500/5 p-3 text-xs text-foreground">
+              {warnings.map((w) => <p key={w}>{w}</p>)}
+            </div>
+          )}
 
           <div className="rounded-xl border border-border bg-card p-5">
             <h3 className="text-sm font-medium text-foreground mb-3">Lab time per day</h3>
