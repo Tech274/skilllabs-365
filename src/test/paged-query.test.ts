@@ -66,3 +66,28 @@ describe("dedupeBy (offset-paging drift)", () => {
     ]);
   });
 });
+
+describe("coalesceRuns (fleet reload guard)", () => {
+  it("never overlaps runs and collapses a burst into one follow-up", async () => {
+    const { coalesceRuns } = await import("@/lib/paged-query");
+    let active = 0;
+    let maxActive = 0;
+    let runs = 0;
+    const release: Array<() => void> = [];
+    const guarded = coalesceRuns(async () => {
+      runs += 1;
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((r) => release.push(r));
+      active -= 1;
+    });
+    const first = guarded();
+    for (let i = 0; i < 25; i++) void guarded(); // e.g. 25 realtime INSERTs mid-load
+    release.shift()!();
+    await new Promise((r) => setTimeout(r, 0));
+    release.shift()!();
+    await first;
+    expect(runs).toBe(2);
+    expect(maxActive).toBe(1);
+  });
+});

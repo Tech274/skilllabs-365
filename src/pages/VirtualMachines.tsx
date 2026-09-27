@@ -1,4 +1,4 @@
-import { fetchAllForIds, fetchAllPages, type PageResult } from "@/lib/paged-query";
+import { coalesceRuns, dedupeBy, fetchAllForIds, fetchAllPages, type PageResult } from "@/lib/paged-query";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
@@ -149,6 +149,9 @@ function statusLabel(s: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** Realtime INSERT bursts (e.g. load tests) collapse into one fleet reload. */
+const INSERT_RELOAD_DEBOUNCE_MS = 2000;
+
 export default function VirtualMachines() {
   const navigate = useNavigate();
   const { isSuperAdmin } = useAuth();
@@ -185,7 +188,7 @@ export default function VirtualMachines() {
     [vms],
   );
 
-  const fetchVMs = useCallback(async () => {
+  const loadVMsOnce = useCallback(async () => {
     setLoading(true);
     // No virtual_machines → profiles FK in schema (types.ts Relationships).
     // Join profiles separately like Sessions actor / User Admin / SessionAuditLog.
@@ -208,14 +211,22 @@ export default function VirtualMachines() {
     let rows: VMRow[] = [];
 
     if (error) {
+      // Review follow-up: keep the last good list (a failed page used to blank
+      // the whole fleet with a console-only error).
       console.error("Failed to load virtual_machines:", error.message);
-      setVms([]);
+      toast({
+        title: "Could not refresh the VM list",
+        description: `${error.message} — showing the last loaded list.`,
+        variant: "destructive",
+      });
       setLoading(false);
       return;
     }
 
     if (vmData) {
-      rows = vmData.map((vm: Record<string, unknown>) => {
+      // Offset paging is not snapshot-consistent: an insert between pages can
+      // repeat a row. Dedupe by id (duplicate keys, double counts, bulk ids).
+      rows = dedupeBy(vmData, (vm) => vm.id).map((vm: Record<string, unknown>) => {
         const labs = vm.lab_templates as TemplateJoin | null;
         const azureVmId = (vm.azure_vm_id as string | null) ?? null;
         return {
@@ -304,6 +315,17 @@ export default function VirtualMachines() {
         };
       });
 
+      // A failed usage chunk would under-count used minutes and OVERSTATE
+      // Available Mins — show unknown instead of a wrong number.
+      const usageFailed = Boolean(usageResult.error);
+      if (usageFailed) {
+        console.error("Failed to load wallet sessions:", usageResult.error?.message);
+        toast({
+          title: "Available minutes unavailable",
+          description: "Session usage could not be loaded; minutes are shown as unknown.",
+          variant: "destructive",
+        });
+      }
       const usageRows: UsageRow[] = (usageResult.data ?? []) as UsageRow[];
 
       if (sessionRows && sessionRows.length > 0) {
@@ -335,7 +357,7 @@ export default function VirtualMachines() {
       }
 
       rows = rows.map((r) => {
-        if (!r.user_id || !r.lab_template_id) {
+        if (usageFailed || !r.user_id || !r.lab_template_id) {
           return { ...r, availableMinutes: null, wallet: null };
         }
         const duration = r.templateDuration;
@@ -367,6 +389,20 @@ export default function VirtualMachines() {
     setVms(rows);
     setLoading(false);
   }, []);
+
+  // Review follow-up (SCRUM-107): full-fleet loads are now many requests, so
+  // serialise them. A request while one is in flight queues ONE follow-up run
+  // (latest state wins, no out-of-order setVms), and realtime INSERT bursts are
+  // debounced instead of each triggering a full reload.
+  const fetchVMs = useMemo(() => coalesceRuns(loadVMsOnce), [loadVMsOnce]);
+  const insertReloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleReload = useCallback(() => {
+    if (insertReloadTimer.current) clearTimeout(insertReloadTimer.current);
+    insertReloadTimer.current = setTimeout(() => {
+      insertReloadTimer.current = null;
+      void fetchVMs();
+    }, INSERT_RELOAD_DEBOUNCE_MS);
+  }, [fetchVMs]);
 
   const handleStopVM = async (vmId: string) => {
     setActionLoading(vmId);
@@ -532,7 +568,7 @@ export default function VirtualMachines() {
               ),
             );
           } else if (payload.eventType === "INSERT") {
-            fetchVMs();
+            scheduleReload();
           } else if (payload.eventType === "DELETE") {
             setVms((prev) => prev.filter((vm) => vm.id !== (payload.old as VMRow).id));
           }
@@ -542,8 +578,9 @@ export default function VirtualMachines() {
 
     return () => {
       supabase.removeChannel(channel);
+      if (insertReloadTimer.current) clearTimeout(insertReloadTimer.current);
     };
-  }, [fetchVMs]);
+  }, [fetchVMs, scheduleReload]);
 
   // Admin Allocation does not use learner use-provisioning — poll check-vm-status
   // for rows still in provisioning/starting so cloud Running flips Hub to running.
