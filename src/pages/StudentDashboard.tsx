@@ -53,6 +53,23 @@ export default function StudentDashboard() {
   const [ownedVmsByLab, setOwnedVmsByLab] = useState<Record<string, { id: string; status: string }>>({});
   const handoff = readStoredHandoff();
 
+  // SCRUM-106: after Cancel, reflect kept (deallocated → Start) vs removed.
+  const lastCancel = provisioning.lastCancel;
+  useEffect(() => {
+    if (!lastCancel?.labId) return;
+    const labId = lastCancel.labId;
+    setOwnedVmsByLab((prev) => {
+      const current = prev[labId];
+      if (!current || current.id !== lastCancel.vmId) return prev;
+      if (lastCancel.deleted) {
+        const next = { ...prev };
+        delete next[labId];
+        return next;
+      }
+      return lastCancel.status ? { ...prev, [labId]: { ...current, status: lastCancel.status } } : prev;
+    });
+  }, [lastCancel]);
+
   useEffect(() => {
     if (!user) return;
     const load = async () => {

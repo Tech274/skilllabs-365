@@ -9,6 +9,7 @@ import {
   stashGuacReady,
   waitForRunningAndTokenizedGuac,
 } from "@/lib/guac-connect";
+import { cancelToastCopy, parseCancelResponse, type CancelOutcome } from "@/lib/cancel-outcome";
 
 interface ProvisioningState {
   isProvisioning: boolean;
@@ -23,6 +24,8 @@ interface ProvisioningContextType extends ProvisioningState {
   startProvisioning: (labId: string, labName: string, vmId: string) => void;
   cancelProvisioning: () => Promise<void>;
   clearProvisioning: () => void;
+  /** Result of the most recent Cancel (SCRUM-106: kept vs removed). */
+  lastCancel: CancelOutcome | null;
 }
 
 const ProvisioningContext = createContext<ProvisioningContextType | null>(null);
@@ -87,6 +90,7 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
     startedAt: null,
     cancelling: false,
   });
+  const [lastCancel, setLastCancel] = useState<CancelOutcome | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -154,7 +158,9 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
         headers: idempotencyHeaders(`cancel:${state.vmId}`),
       });
       if (error || data?.error) throw new Error(await readFunctionError(error, data));
-      toast({ title: "Provisioning Cancelled", description: "Your VM has been removed." });
+      const outcome = parseCancelResponse(state.vmId, state.labId, data);
+      setLastCancel(outcome);
+      toast(cancelToastCopy(outcome));
       if (state.labId) resetIdempotency(`provision:${state.labId}`);
     } catch (err) {
       toast({
@@ -168,7 +174,7 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
   }, [state.vmId, state.labId, clearProvisioning]);
 
   return (
-    <ProvisioningContext.Provider value={{ ...state, startProvisioning, cancelProvisioning, clearProvisioning }}>
+    <ProvisioningContext.Provider value={{ ...state, startProvisioning, cancelProvisioning, clearProvisioning, lastCancel }}>
       {children}
     </ProvisioningContext.Provider>
   );

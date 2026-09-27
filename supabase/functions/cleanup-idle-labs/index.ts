@@ -1,4 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
+import { decideLearnerCancel } from "../_shared/lab-cancel-policy.ts";
 import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
@@ -223,6 +224,81 @@ async function markVmEnded(
   }).eq("id", vmId);
 }
 
+/**
+ * Learner soft-stop (Leave, and SCRUM-106 cancel of an existing allocation):
+ * deallocate the SAME VM, never delete.
+ * Honesty gate: Hub deallocated ONLY when cloud soft-stop (or reconcile) succeeded.
+ */
+async function softStopLearnerVm(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  azureFor: ReturnType<typeof makeAzureResolver>,
+  // deno-lint-ignore no-explicit-any
+  vm: any,
+  opts: { actorId: string; endedReason: string; nowIso: string; logEvent: string },
+): Promise<{ stopped: boolean; stopDetail: string | null; reconciled: boolean; hubStatus: string; priorStatus: string; live: boolean }> {
+  const targetVmId = vm.id as string;
+  const priorStatus = String(vm.status || "running");
+  const live = ["running", "provisioning", "starting", "idle"].includes(priorStatus.toLowerCase());
+  let stopped = !live;
+  let stopDetail: string | null = null;
+  let reconciled = false;
+  if (live && vm.azure_vm_id) {
+    try {
+      stopped = await stopCloudVm(supabase, azureFor, vm);
+      if (!stopped) stopDetail = "cloud soft-stop returned false";
+    } catch (e) {
+      stopDetail = e instanceof Error ? e.message : String(e);
+      console.error(JSON.stringify({
+        event: `${opts.logEvent}_stop_failed`,
+        vm_id: targetVmId,
+        instance_id: vm.azure_vm_id,
+        region: vm.region ?? null,
+        detail: stopDetail,
+      }));
+      stopped = false;
+    }
+    // Optional reconcile: Stop may have failed while cloud is already soft-stopped.
+    if (!stopped) {
+      try {
+        const recon = await isCloudAlreadySoftStopped(supabase, azureFor, vm);
+        if (recon.softStopped) {
+          stopped = true;
+          reconciled = true;
+          stopDetail = stopDetail
+            ? `${stopDetail}; reconciled: ${recon.detail}`
+            : `reconciled: ${recon.detail}`;
+        } else if (!stopDetail) {
+          stopDetail = recon.detail;
+        } else {
+          stopDetail = `${stopDetail}; ${recon.detail}`;
+        }
+      } catch (e) {
+        const reconDetail = e instanceof Error ? e.message : String(e);
+        console.error(JSON.stringify({
+          event: `${opts.logEvent}_reconcile_failed`,
+          vm_id: targetVmId,
+          instance_id: vm.azure_vm_id,
+          detail: reconDetail,
+        }));
+        stopDetail = stopDetail ? `${stopDetail}; reconcile failed: ${reconDetail}` : `reconcile failed: ${reconDetail}`;
+      }
+    }
+  }
+
+  // Session/wallet close still proceed for the learner UX; power state stays truthful.
+  const hubStatus = live ? (stopped ? "deallocated" : priorStatus) : priorStatus;
+  if (live && stopped) {
+    await markVmEnded(supabase, targetVmId, {
+      status: "deallocated",
+      ended_by: opts.actorId,
+      ended_reason: opts.endedReason,
+      ended_at: opts.nowIso,
+    });
+  }
+  return { stopped, stopDetail, reconciled, hubStatus, priorStatus, live };
+}
+
 type SoftExpiryCandidate = {
   id: string;
   azure_vm_id: string | null;
@@ -371,7 +447,7 @@ Deno.serve(async (req) => {
 
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status, user_id, lab_template_id, provider_account_id")
+        .select("id, azure_vm_id, status, user_id, lab_template_id, provider_account_id, region, private_ip, expires_at")
         .eq("id", targetVmId)
         .maybeSingle();
       if (!vm) return errorResponse("VM not found", 404);
@@ -391,6 +467,72 @@ Deno.serve(async (req) => {
       if (vm.status === "terminated" || vm.status === "failed") {
         await timeline.skipped(SOURCE, "cancel", "VM was already stopped — cancellation ignored", { status: vm.status });
         return jsonResponse({ success: true, action: "already-cancelled", vm_id: targetVmId, correlation_id: correlationId });
+      }
+
+      // SCRUM-106: a learner Cancel must never delete an allocation that already
+      // holds work (Start/resume of an existing VM, or a previously used VM).
+      // Those are soft-stopped exactly like Leave. Admin cancel keeps hard-delete.
+      let cancelIsAdmin = auth.isServiceRole;
+      if (!cancelIsAdmin) {
+        const { data: adminFlag } = await supabase.rpc("is_platform_admin", { _user_id: auth.userId });
+        cancelIsAdmin = adminFlag === true;
+      }
+      let completedSessions = 0;
+      if (!cancelIsAdmin) {
+        const { count } = await supabase
+          .from("sessions")
+          .select("id", { count: "exact", head: true })
+          .eq("vm_id", targetVmId)
+          .not("ended_at", "is", null);
+        completedSessions = count ?? 0;
+      }
+      const cancelDecision = decideLearnerCancel({
+        isAdmin: cancelIsAdmin,
+        status: vm.status,
+        completedSessions,
+      });
+      if (cancelDecision.mode === "soft_stop") {
+        const nowIso = new Date().toISOString();
+        await supabase
+          .from("sessions")
+          .update({ ended_at: nowIso, status: "completed", disconnect_reason: "learner_cancel" })
+          .eq("vm_id", targetVmId)
+          .eq("status", "active");
+        const soft = await softStopLearnerVm(supabase, azureFor, vm, {
+          actorId: auth.userId,
+          endedReason: "learner_cancel_kept",
+          nowIso,
+          logEvent: "learner_cancel",
+        });
+        await timeline.skipped(
+          SOURCE,
+          "cancel",
+          "Cancel on an existing lab machine — soft-stopped (deallocated), NOT deleted",
+          { reason: cancelDecision.reason, cloud_stop_ok: soft.stopped, hub_status: soft.hubStatus },
+        );
+        console.log(JSON.stringify({
+          event: "learner_cancel_soft_stop",
+          vm_id: targetVmId,
+          actor: auth.userId,
+          decision: cancelDecision.reason,
+          prior_status: soft.priorStatus,
+          hub_status: soft.hubStatus,
+          cloud_stop_ok: soft.stopped,
+          reconciled: soft.reconciled,
+          stop_detail: soft.stopDetail,
+        }));
+        return jsonResponse({
+          success: true,
+          action: "cancel-soft-stopped",
+          vm_id: targetVmId,
+          status: soft.hubStatus,
+          soft_stop: true,
+          deleted: false,
+          decision: cancelDecision.reason,
+          cloud_stop_ok: soft.stopped,
+          stop_detail: soft.stopDetail,
+          correlation_id: correlationId,
+        });
       }
 
       // Idempotency key guards concurrent duplicate cancels.
@@ -433,7 +575,7 @@ Deno.serve(async (req) => {
           ended_by: auth.userId,
           ended_reason: actionReason || "cancel_provisioning",
         });
-        const response = { success: true, action: "cancelled", vm_id: targetVmId, correlation_id: correlationId };
+        const response = { success: true, action: "cancelled", vm_id: targetVmId, deleted: true, correlation_id: correlationId };
         await completeIdempotency(supabase, {
           key: cancelKey,
           userId: auth.userId,
@@ -477,65 +619,9 @@ Deno.serve(async (req) => {
         .eq("vm_id", targetVmId)
         .eq("status", "active");
 
-      const priorStatus = String(vm.status || "running");
-      const live = ["running", "provisioning", "starting", "idle"].includes(priorStatus.toLowerCase());
-      let stopped = !live;
-      let stopDetail: string | null = null;
-      let reconciled = false;
-      if (live && vm.azure_vm_id) {
-        try {
-          stopped = await stopCloudVm(supabase, azureFor, vm);
-          if (!stopped) stopDetail = "cloud soft-stop returned false";
-        } catch (e) {
-          stopDetail = e instanceof Error ? e.message : String(e);
-          console.error(JSON.stringify({
-            event: "learner_leave_stop_failed",
-            vm_id: targetVmId,
-            instance_id: vm.azure_vm_id,
-            region: vm.region ?? null,
-            detail: stopDetail,
-          }));
-          stopped = false;
-        }
-        // Optional reconcile: Stop may have failed while cloud is already soft-stopped.
-        if (!stopped) {
-          try {
-            const recon = await isCloudAlreadySoftStopped(supabase, azureFor, vm);
-            if (recon.softStopped) {
-              stopped = true;
-              reconciled = true;
-              stopDetail = stopDetail
-                ? `${stopDetail}; reconciled: ${recon.detail}`
-                : `reconciled: ${recon.detail}`;
-            } else if (!stopDetail) {
-              stopDetail = recon.detail;
-            } else {
-              stopDetail = `${stopDetail}; ${recon.detail}`;
-            }
-          } catch (e) {
-            const reconDetail = e instanceof Error ? e.message : String(e);
-            console.error(JSON.stringify({
-              event: "learner_leave_reconcile_failed",
-              vm_id: targetVmId,
-              instance_id: vm.azure_vm_id,
-              detail: reconDetail,
-            }));
-            stopDetail = stopDetail ? `${stopDetail}; reconcile failed: ${reconDetail}` : `reconcile failed: ${reconDetail}`;
-          }
-        }
-      }
-
-      // Honesty gate: Hub deallocated ONLY when cloud soft-stop (or reconcile) succeeded.
-      // Session/wallet close still proceed for Leave UX; power state stays truthful.
-      const hubStatus = live ? (stopped ? "deallocated" : priorStatus) : priorStatus;
-      if (live && stopped) {
-        await markVmEnded(supabase, targetVmId, {
-          status: "deallocated",
-          ended_by: auth.userId,
-          ended_reason: "learner_leave",
-          ended_at: nowIso,
-        });
-      }
+      const { stopped, stopDetail, reconciled, hubStatus, priorStatus } = await softStopLearnerVm(
+        supabase, azureFor, vm, { actorId: auth.userId, endedReason: "learner_leave", nowIso, logEvent: "learner_leave" },
+      );
 
       let wallet = {
         allocated_minutes: 0,

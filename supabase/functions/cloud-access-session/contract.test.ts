@@ -30,10 +30,17 @@ Deno.test("cleanup-idle-labs exposes owner-scoped learner actions", async () => 
   // The obsolete action name must not come back.
   assertEquals(cleanup.includes("deallocate-vm"), false);
   // Soft-stop Leave must never hard-delete.
-  assert(cleanup.includes('ended_reason: "learner_leave"'));
+  assert(cleanup.includes('endedReason: "learner_leave"'));
+  assert(cleanup.includes("ended_reason: opts.endedReason"));
   assertEquals(cleanup.includes('action === "manual-stop"'), false);
   // Leave honesty: Hub deallocated only when cloud_stop_ok (or reconcile) succeeds.
   assert(cleanup.includes("cloud_stop_ok: stopped"));
   assert(cleanup.includes("isCloudAlreadySoftStopped"));
   assert(cleanup.includes("Honesty gate: Hub deallocated ONLY when cloud soft-stop"));
+  // SCRUM-106: learner cancel of an existing allocation soft-stops, never deletes.
+  assert(cleanup.includes("decideLearnerCancel("));
+  assert(cleanup.includes('action: "cancel-soft-stopped"'));
+  const softIdx = cleanup.indexOf('cancelDecision.mode === "soft_stop"');
+  const deleteIdx = cleanup.indexOf("await deleteCloudVm(supabase, azureFor, vm);");
+  assert(softIdx > 0 && deleteIdx > softIdx, "soft-stop branch must run before the cancel hard-delete");
 });
