@@ -1,5 +1,5 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { decideLearnerCancel } from "../_shared/lab-cancel-policy.ts";
+import { CANCEL_PENDING_STOP_REASON, decideLearnerCancel } from "../_shared/lab-cancel-policy.ts";
 import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
@@ -483,24 +483,42 @@ Deno.serve(async (req) => {
       // SCRUM-106: a learner Cancel must never delete an allocation that already
       // holds work (Start/resume of an existing VM, or a previously used VM).
       // Those are soft-stopped exactly like Leave. Admin cancel keeps hard-delete.
-      let cancelIsAdmin = auth.isServiceRole;
-      if (!cancelIsAdmin) {
+      // Review follow-up: an admin clicking the learner panel's Cancel is NOT an
+      // implicit hard delete; that needs the service role (operator retry) or an
+      // explicit `force_delete: true` from an admin.
+      let cancelIsAdmin = false;
+      if (!auth.isServiceRole) {
         const { data: adminFlag } = await supabase.rpc("is_platform_admin", { _user_id: auth.userId });
         cancelIsAdmin = adminFlag === true;
       }
-      let completedSessions = 0;
-      if (!cancelIsAdmin) {
-        const { count } = await supabase
+      const forceDelete = rawBody.force_delete === true;
+      let priorSessions = 0;
+      let isPersistent: boolean | null = null;
+      if (!auth.isServiceRole && !(cancelIsAdmin && forceDelete)) {
+        // ANY session (active or ended) is learner use — a first, still-active
+        // session must never be hard-deleted on Cancel.
+        const { count, error: countErr } = await supabase
           .from("sessions")
           .select("id", { count: "exact", head: true })
-          .eq("vm_id", targetVmId)
-          .not("ended_at", "is", null);
-        completedSessions = count ?? 0;
+          .eq("vm_id", targetVmId);
+        // Fail safe: if usage cannot be read, treat the VM as used (soft-stop).
+        priorSessions = countErr ? 1 : (count ?? 0);
+        if (vm.lab_template_id) {
+          const { data: cancelTpl } = await supabase
+            .from("lab_templates")
+            .select("is_persistent")
+            .eq("id", vm.lab_template_id)
+            .maybeSingle();
+          if (cancelTpl) isPersistent = Boolean(cancelTpl.is_persistent);
+        }
       }
       const cancelDecision = decideLearnerCancel({
+        isServiceRole: auth.isServiceRole,
         isAdmin: cancelIsAdmin,
+        forceDelete,
         status: vm.status,
-        completedSessions,
+        priorSessions,
+        isPersistent,
       });
       if (cancelDecision.mode === "soft_stop") {
         const nowIso = new Date().toISOString();
@@ -515,6 +533,15 @@ Deno.serve(async (req) => {
           nowIso,
           logEvent: "learner_cancel",
         });
+        if (soft.live && !soft.stopped) {
+          // Cloud refused the stop (e.g. AWS StopInstances on a `pending` instance
+          // while resuming). Leave the power state truthful but mark the row so the
+          // cron orphan pass retries the soft-stop instead of leaving it billing.
+          await supabase.from("virtual_machines").update({
+            ended_by: auth.userId,
+            ended_reason: CANCEL_PENDING_STOP_REASON,
+          }).eq("id", targetVmId);
+        }
         await timeline.skipped(
           SOURCE,
           "cancel",
@@ -1207,7 +1234,8 @@ Deno.serve(async (req) => {
     const { data: orphanVMs } = await supabase
       .from("virtual_machines")
       .select("id, azure_vm_id, status, provider_account_id, region")
-      .in("status", [...ORPHAN_SWEEP_STATUSES])
+      // + VMs whose learner Cancel could not stop them while `starting` (retry here).
+      .or(`status.in.(${ORPHAN_SWEEP_STATUSES.join(",")}),and(status.eq.starting,ended_reason.eq.${CANCEL_PENDING_STOP_REASON})`)
       .not("azure_vm_id", "is", null);
 
     // Check which running VMs have no active session
