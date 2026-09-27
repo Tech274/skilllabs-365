@@ -31,6 +31,23 @@ export function isResumableStatus(status: string | null | undefined): boolean {
   return (RESUMABLE_STATUSES as readonly string[]).includes(String(status).toLowerCase());
 }
 
+/**
+ * SCRUM-21: may the session countdown end the lab now?
+ * Only on a trusted expiry — never while the allocation is powered off or
+ * waking up (remint), because the on-screen expires_at is the pre-Leave value
+ * until Start resets it server-side and the page re-reads it.
+ */
+export function shouldEndOnCountdown(opts: {
+  remainingMs: number;
+  reminting: boolean;
+  vmStatus: string | null | undefined;
+}): boolean {
+  if (!Number.isFinite(opts.remainingMs) || opts.remainingMs > 0) return false;
+  if (opts.reminting) return false;
+  if (needsRemint(opts.vmStatus)) return false;
+  return true;
+}
+
 export const REMINT_FAIL_CODE = "REMINT_START_FAILED";
 
 export const REMINT_CALM_COPY =

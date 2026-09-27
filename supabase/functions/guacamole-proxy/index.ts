@@ -17,6 +17,11 @@ import {
   type GuacLabAddress,
 } from "../_shared/guac-hosts.ts";
 import { applyRdpGuacSecurityDefaults } from "../_shared/guac-rdp-params.ts";
+import {
+  canReplayCreateSession,
+  liveSessionReuseVerdict,
+  type ConnectionParamsLookup,
+} from "../_shared/guac-session-reuse.ts";
 
 const SOURCE = "guacamole-proxy";
 
@@ -222,6 +227,29 @@ async function createGuacConnection(guacBaseUrl: string, token: string, dataSour
 async function deleteGuacConnection(guacBaseUrl: string, token: string, dataSource: string, connectionId: string): Promise<void> {
   const res = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/connections/${connectionId}?token=${token}`, { method: "DELETE" });
   if (!res.ok && res.status !== 404) console.error(`Failed to delete connection ${connectionId}: ${await res.text()}`);
+}
+
+/** Read a Guacamole connection's parameters (hostname/port) for remint reuse checks. */
+async function fetchGuacConnectionParams(
+  guacBaseUrl: string, token: string, dataSource: string, connectionId: string,
+): Promise<ConnectionParamsLookup> {
+  try {
+    const res = await fetch(
+      `${guacBaseUrl}/api/session/data/${dataSource}/connections/${encodeURIComponent(connectionId)}/parameters?token=${token}`,
+    );
+    if (res.status === 404) {
+      await res.text().catch(() => "");
+      return { kind: "missing" };
+    }
+    if (!res.ok) {
+      await res.text().catch(() => "");
+      return { kind: "unknown" };
+    }
+    const params = await res.json();
+    return params && typeof params === "object" ? { kind: "ok", params } : { kind: "unknown" };
+  } catch {
+    return { kind: "unknown" };
+  }
 }
 
 async function createScopedGuacUser(
@@ -541,14 +569,58 @@ Deno.serve(async (req) => {
         correlationId,
       });
       pendingClaim = { key: sessionKey, action: "guac-create-session" };
+      let claimOutcome = claim.outcome;
       if (claim.outcome === "replay") {
-        pendingClaim = null;
-        await timeline.skipped(SOURCE, "guacamole-connect", "Duplicate connect request replayed", { key: sessionKey });
-        return new Response(JSON.stringify({ ...claim.response, idempotent_replay: true }), {
-          status: 200, headers: traceHeaders,
+        // SCRUM-21: a replay may only hand back a session that is still active.
+        // Without an Idempotency-Key the key defaults to guac-session:<vm_id>,
+        // so after Leave → Start every Connect replayed the pre-Leave (ended)
+        // session and connection-health could never report ready:true.
+        const { data: activeRows } = await supabase
+          .from("sessions")
+          .select("id")
+          .eq("vm_id", vm_id)
+          .eq("user_id", user.id)
+          .eq("status", "active");
+        const activeIds = (activeRows ?? []).map((r: { id: string }) => String(r.id));
+        if (canReplayCreateSession(claim.response, activeIds)) {
+          pendingClaim = null;
+          await timeline.skipped(SOURCE, "guacamole-connect", "Duplicate connect request replayed", { key: sessionKey });
+          return new Response(JSON.stringify({ ...claim.response, idempotent_replay: true }), {
+            status: 200, headers: traceHeaders,
+          });
+        }
+        // Stored result points at an ended session: drop it and mint a fresh one.
+        await releaseIdempotency(supabase, { key: sessionKey, userId: user.id, action: "guac-create-session" });
+        const reclaim = await claimIdempotency(supabase, {
+          key: sessionKey,
+          userId: user.id,
+          action: "guac-create-session",
+          correlationId,
         });
+        claimOutcome = reclaim.outcome;
+        if (reclaim.outcome === "new") {
+          console.log(JSON.stringify({
+            scope: "guac-create-session",
+            event: "stale_replay_discarded",
+            vm_id,
+            stale_session_id: typeof claim.response?.session_id === "string" ? claim.response.session_id : null,
+          }));
+          await timeline.skipped(
+            SOURCE,
+            "guacamole-connect",
+            "Previous connect result pointed at an ended session — minting a fresh one",
+            { key: sessionKey },
+          );
+        } else if (reclaim.outcome === "replay") {
+          // A concurrent request completed between release and re-claim; its
+          // response is brand new, so hand it back.
+          pendingClaim = null;
+          return new Response(JSON.stringify({ ...reclaim.response, idempotent_replay: true }), {
+            status: 200, headers: traceHeaders,
+          });
+        }
       }
-      if (claim.outcome === "in_progress") {
+      if (claimOutcome === "in_progress") {
         pendingClaim = null;
         await timeline.skipped(SOURCE, "guacamole-connect", "Duplicate connect request ignored — one is already running", { key: sessionKey });
         return new Response(
@@ -569,12 +641,32 @@ Deno.serve(async (req) => {
         .maybeSingle();
 
       if (liveSession?.guac_connection_id && liveSession.guac_username) {
+        // SCRUM-21: only reuse while the gateway connection still dials the lab's
+        // CURRENT address. After Stop→Start the public IP can change; reusing the
+        // old connection leaves a tunnel that never opens (ready:true never comes).
+        const paramsLookup = await fetchGuacConnectionParams(
+          guacBaseUrl, adminToken, dataSource, liveSession.guac_connection_id,
+        );
+        const verdict = liveSessionReuseVerdict(paramsLookup, labAddr.hostname);
         const rotated = randomSuffix(32);
-        const pwRes = await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users/${encodeURIComponent(liveSession.guac_username)}/password?token=${adminToken}`, {
-          method: "PUT", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ newPassword: rotated, oldPassword: "" }),
-        });
-        if (pwRes.ok) {
+        const pwRes = verdict.reuse
+          ? await fetch(`${guacBaseUrl}/api/session/data/${dataSource}/users/${encodeURIComponent(liveSession.guac_username)}/password?token=${adminToken}`, {
+            method: "PUT", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ newPassword: rotated, oldPassword: "" }),
+          })
+          : null;
+        if (!verdict.reuse) {
+          console.log(JSON.stringify({
+            scope: "guac-create-session",
+            event: "live_session_not_reused",
+            reason: verdict.reason,
+            vm_id,
+            session_id: liveSession.id,
+            dial_hostname: labAddr.hostname,
+            connection_hostname: paramsLookup.kind === "ok" ? paramsLookup.params.hostname ?? null : null,
+          }));
+        }
+        if (pwRes?.ok) {
           const scoped = await getGuacToken(guacAdminUrl!, liveSession.guac_username, rotated);
           const reusedClientId = btoa(`${liveSession.guac_connection_id}\0c\0${dataSource}`);
           const reused = {
@@ -607,18 +699,21 @@ Deno.serve(async (req) => {
           pendingClaim = null;
           return new Response(JSON.stringify(reused), { status: 200, headers: traceHeaders });
         }
-        // Reuse failed (stale Guac user, etc.) — tear down before minting a replacement.
-        const failTxt = await pwRes.text().catch(() => "");
-        console.warn(`live session reuse password-rotate failed [${pwRes.status}]: ${failTxt.slice(0, 200)}`);
+        // Reuse failed (stale Guac user, stale dial address, etc.) — tear down before minting a replacement.
+        const supersedeReason = verdict.reuse ? "reuse_failed_superseded" : `remint_${verdict.reason}`;
+        if (pwRes) {
+          const failTxt = await pwRes.text().catch(() => "");
+          console.warn(`live session reuse password-rotate failed [${pwRes.status}]: ${failTxt.slice(0, 200)}`);
+        }
         await deleteScopedGuacUser(guacBaseUrl, adminToken, dataSource, liveSession.guac_username);
         await deleteGuacConnection(guacBaseUrl, adminToken, dataSource, liveSession.guac_connection_id);
         await supabase.from("sessions").update({
           ended_at: new Date().toISOString(),
           status: "completed",
-          disconnect_reason: "reuse_failed_superseded",
+          disconnect_reason: supersedeReason,
         }).eq("id", liveSession.id);
         await logSessionEvent(supabase, liveSession.id, "session_end", {
-          reason: "reuse_failed_superseded", correlation_id: correlationId, http_status: pwRes.status,
+          reason: supersedeReason, correlation_id: correlationId, http_status: pwRes?.status ?? null,
         });
       }
 
