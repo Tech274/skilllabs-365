@@ -1,3 +1,4 @@
+import { fetchAllForIds, fetchAllPages, type PageResult } from "@/lib/paged-query";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
@@ -188,12 +189,21 @@ export default function VirtualMachines() {
     setLoading(true);
     // No virtual_machines → profiles FK in schema (types.ts Relationships).
     // Join profiles separately like Sessions actor / User Admin / SessionAuditLog.
-    const { data: vmData, error } = await supabase
-      .from("virtual_machines")
-      .select(
-        "*, lab_templates(name, duration, is_persistent, start_date, end_date)",
-      )
-      .order("created_at", { ascending: false });
+    // SCRUM-107: page past the 1000-row PostgREST cap (stable order: created_at, id).
+    const { data: vmData, error, truncated: vmTruncated } = await fetchAllPages<Record<string, unknown>>(
+      (from, to) =>
+        supabase
+          .from("virtual_machines")
+          .select(
+            "*, lab_templates(name, duration, is_persistent, start_date, end_date)",
+          )
+          .order("created_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to) as unknown as PromiseLike<PageResult<Record<string, unknown>>>,
+    );
+    if (vmTruncated) {
+      console.warn(`virtual_machines: showing first ${vmData.length} rows (hard cap reached)`);
+    }
 
     let rows: VMRow[] = [];
 
@@ -240,30 +250,43 @@ export default function VirtualMachines() {
         ended_at: string | null;
       };
 
-      const profilesQuery =
-        userIds.length > 0
-          ? supabase.from("profiles").select("user_id, display_name, email").in("user_id", userIds)
-          : Promise.resolve({ data: [] as ProfileRow[] });
+      type GuacRow = { vm_id: string | null; guac_username: string | null; started_at: string | null };
 
-      const guacQuery = supabase
-        .from("sessions")
-        .select("vm_id, guac_username, started_at")
-        .in("vm_id", vmIds)
-        .not("guac_username", "is", null)
-        .order("started_at", { ascending: false });
+      // SCRUM-107: chunk id lists (URL size) and page each chunk (1000-row cap),
+      // so owner names, lab usernames and wallet minutes cover the whole fleet.
+      const profilesQuery = fetchAllForIds<ProfileRow, string>(userIds, (ids, from, to) =>
+        supabase
+          .from("profiles")
+          .select("user_id, display_name, email")
+          .in("user_id", ids)
+          .order("user_id", { ascending: true })
+          .range(from, to) as unknown as PromiseLike<PageResult<ProfileRow>>,
+      );
 
-      const usageQuery =
-        userIds.length > 0
-          ? supabase
-              .from("sessions")
-              .select("user_id, lab_template_id, started_at, ended_at")
-              .in("user_id", userIds)
-          : null;
+      const guacQuery = fetchAllForIds<GuacRow, string>(vmIds, (ids, from, to) =>
+        supabase
+          .from("sessions")
+          .select("vm_id, guac_username, started_at")
+          .in("vm_id", ids)
+          .not("guac_username", "is", null)
+          .order("started_at", { ascending: false })
+          .order("id", { ascending: true })
+          .range(from, to) as unknown as PromiseLike<PageResult<GuacRow>>,
+      );
+
+      const usageQuery = fetchAllForIds<UsageRow, string>(userIds, (ids, from, to) =>
+        supabase
+          .from("sessions")
+          .select("user_id, lab_template_id, started_at, ended_at")
+          .in("user_id", ids)
+          .order("id", { ascending: true })
+          .range(from, to) as unknown as PromiseLike<PageResult<UsageRow>>,
+      );
 
       const [profilesResult, { data: sessionRows }, usageResult] = await Promise.all([
         profilesQuery,
         guacQuery,
-        usageQuery ?? Promise.resolve({ data: [] as UsageRow[] }),
+        usageQuery,
       ]);
 
       const profileMap = new Map(
