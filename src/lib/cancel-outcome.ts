@@ -28,6 +28,25 @@ export function parseCancelResponse(
   };
 }
 
+/** Local dashboard card status for a kept VM whose cloud stop is still pending. */
+export const PAUSING_CARD_STATUS = "pausing";
+
+const LIVE_AFTER_CANCEL = new Set(["provisioning", "starting", "running", "idle"]);
+
+/** True when Cancel kept the VM but the cloud stop has not gone through yet. */
+export function isPendingStopOutcome(outcome: CancelOutcome): boolean {
+  return !outcome.deleted && !!outcome.status && LIVE_AFTER_CANCEL.has(outcome.status.toLowerCase());
+}
+
+/**
+ * Card status to show after Cancel (Riley #58): a kept VM that is still
+ * powering on shows "Pausing…" (the cron finishes the stop), never "Starting".
+ */
+export function cardStatusAfterCancel(outcome: CancelOutcome): string | null {
+  if (outcome.deleted || !outcome.status) return null;
+  return isPendingStopOutcome(outcome) ? PAUSING_CARD_STATUS : outcome.status;
+}
+
 export function cancelToastCopy(outcome: CancelOutcome): { title: string; description: string } {
   if (outcome.deleted) {
     return { title: "Provisioning Cancelled", description: "Your VM has been removed." };
@@ -36,6 +55,13 @@ export function cancelToastCopy(outcome: CancelOutcome): { title: string; descri
     return {
       title: "Lab paused",
       description: "Your lab machine was kept (not deleted). Press Start to resume where you left off.",
+    };
+  }
+  if (isPendingStopOutcome(outcome)) {
+    return {
+      title: "Pausing lab",
+      description:
+        "Your lab machine was NOT deleted. It was still powering on, so it will pause automatically within a few minutes. Press Start if you want to keep using it instead.",
     };
   }
   return {

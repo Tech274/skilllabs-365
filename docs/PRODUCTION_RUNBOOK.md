@@ -98,23 +98,58 @@ npm run functions:test    # deno test supabase/functions/
 `cleanup-idle-labs` handles, in one scheduled run (`action` omitted → `auto-cleanup`):
 
 * idle VMs (no session activity > 15 min) → deallocate
-* orphan VMs (`running` / `idle`, no active session) → deallocate
+* orphan VMs (`running` / `idle`, no active session) → deallocate; also retries a
+  learner Cancel whose cloud stop failed while the VM was `starting`
+* **Stop failures are recorded on the VM row, not only in logs.** When an idle,
+  orphan or Cancel-retry stop fails, `ended_reason` becomes
+  `cleanup_stop_retry:<n>` / `learner_cancel_pending_stop:<n>` and `ended_at`
+  the attempt time. /vms shows a "Stop retry n/6" badge. Retries back off 5 →
+  10 → 20 → 40 → 60 min; after 6 failures the row becomes
+  `stop_failed_needs_admin:<n>` (red "Stop failed — needs admin" badge on /vms),
+  automatic retries stop and admins get ONE `vm_stop_failed` notification.
+  Admin Stop / Delete / Start clears it. The run response carries
+  `stop_retry: { failed, escalated_needs_admin, backoff_skipped, needs_admin_skipped, resumed_by_learner_skipped }`.
+* A learner who presses **Start** on the "Pausing…" card (Cancel still pending)
+  goes through `start-vm`, which clears the marker so the cron cannot stop the VM
+  they just restarted.
 * **soft-expiry** (SCRUM-28) — any VM in `running` / `provisioning` / `starting` /
   `idle` / `stopped` whose `expires_at` passed, whose persistent template
   `end_date` (end of day IST) passed, or whose learner used all prepaid minutes
   → end active sessions, **deallocate** (never delete), notify learner + admins.
   Azure OS-level `stopped` still bills compute, so it is deallocated too. The
-  run response carries `soft_expiry: { mode, scanned, due, deallocated, stop_failed, held_skipped, dry_run_due }`.
-  * `SOFT_EXPIRY_MODE` secret: unset = `legacy` (enforce only what the old sweep
-    enforced; OS-stopped VMs and idle-past-expires_at are logged as
+  run response carries `soft_expiry: { mode, mode_configured, mode_warning, scanned, due, deallocated, stop_failed, held_skipped, dry_run_due, template_unknown_skipped }`.
+  * `SOFT_EXPIRY_MODE` secret: unset/empty = `legacy` (enforce only what the old
+    sweep enforced; OS-stopped VMs and idle-past-expires_at are logged as
     `soft_expiry_dry_run_due`), `enforce` (full SCRUM-28 scope), `dry-run`
-    (report only), `off` (skip). Flip to `enforce` only after reviewing
-    `expiry-preview`.
+    (report only), `off` (skip). **Any other value (e.g. `dry_run`, `disabled`)
+    fails safe to `dry-run`**, logs `soft_expiry_mode_invalid` and shows up as
+    `soft_expiry.mode_warning`. Flip to `enforce` only after reviewing `expiry-preview`.
+  * **`SOFT_EXPIRY_MODE` only gates the soft-expiry sweep.** The idle pass, the
+    orphan pass (incl. Cancel retries) and the stuck-provisioning pass run in
+    every mode, including `off` (product decision). Note: `legacy` pages up to
+    2000 candidates where the old sweep stopped at 200 rows, so the first
+    `legacy` run can deallocate a backlog the old sweep never reached — start
+    with `dry-run`.
   * Persistent labs ignore `expires_at` (window + wallet only); Start clears it.
-* **Held VMs** — `CLEANUP_HELD_VM_IDS` secret (comma separated Hub VM ids, 8+ char
-  id prefixes, or cloud instance ids) plus the built-in smoke VM `bba27e8f` are
-  never stopped, deallocated or purged by any automatic pass. Explicit admin
-  actions on a named VM still work.
+    Unknown persistence (no template, missing row, failed lookup) is treated
+    like persistent: `expires_at` alone never stops it; it is counted in
+    `template_unknown_skipped` and listed by `expiry-preview` (`template_unknown`).
+    Such VMs are still covered by the idle / orphan passes.
+  * `labs-watchdog` has its own `expires_at` sweep that does **not** read
+    `SOFT_EXPIRY_MODE` or `CLEANUP_HELD_VM_IDS`. If it is scheduled, pause it
+    while rolling out the cleanup changes.
+* **Held VMs** — `CLEANUP_HELD_VM_IDS` secret, comma separated, case-insensitive,
+  plus the built-in smoke VM `bba27e8f` (Hub short id), are never stopped,
+  deallocated or purged by any automatic pass. An entry matches the **full Hub
+  VM id** (UUID), a **Hub id prefix of 8+ hex characters** (a trailing `…`
+  copied from the UI is ignored), the **cloud instance id** exactly as stored in
+  `azure_vm_id` (AWS `i-…` or the full Azure ARM id) or the **VM name** (last
+  segment of the Azure ARM id). Cloud names are never prefix-matched. AWS Name
+  tags are not stored on the Hub row, so for AWS use the instance id. Shorter
+  entries are reported in `held_vm_warnings`. Put **both** the full Hub id and
+  the cloud id of each held VM in the secret, e.g.
+  `CLEANUP_HELD_VM_IDS=<full Hub UUID of the smoke VM>,<its i-… instance id or Azure VM name>`.
+  Explicit admin actions on a named VM still work.
 * VMs stuck in `provisioning` > 10 min → mark failed and delete the Azure resource
 * orphaned Guacamole users/connections with no live session → removed
 

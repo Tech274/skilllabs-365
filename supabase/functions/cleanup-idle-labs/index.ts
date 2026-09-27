@@ -17,15 +17,24 @@ import { startCloudVm, RESUMABLE_VM_STATUSES } from "../_shared/cloud-providers/
 import { buildWalletSnapshot, walletBlockMessage, type WalletSessionRow } from "../_shared/lab-wallet.ts";
 import {
   decideSoftExpiry,
+  expiresAtSkippedReason,
   isHeldVm,
-  parseHeldVmList,
-  parseSoftExpiryMode,
+  parseHeldVmConfig,
+  resolveSoftExpiryMode,
   softExpiryEnforced,
   softExpiryNotice,
   ORPHAN_SWEEP_STATUSES,
   SOFT_EXPIRY_STATUSES,
   type SoftExpiryTemplate,
 } from "../_shared/lab-expiry.ts";
+import {
+  effectiveStopRetry,
+  formatStopRetry,
+  isLearnerResumablePendingStop,
+  isStopRetryDue,
+  nextStopRetryAfterFailure,
+  type StopRetryState,
+} from "../_shared/stop-retry.ts";
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -352,12 +361,18 @@ async function cachedTemplate(
   templateId: string,
 ): Promise<SoftExpiryTemplate | null> {
   if (cache.has(templateId)) return cache.get(templateId) ?? null;
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from("lab_templates")
     .select("id, name, duration, is_persistent, end_date")
     .eq("id", templateId)
     .maybeSingle();
-  const tpl = (data ?? null) as SoftExpiryTemplate | null;
+  // A failed lookup (or a missing row) returns null = persistence UNKNOWN.
+  // decideSoftExpiry treats unknown like persistent (expires_at alone never
+  // stops it) — the cautious default, same as the SCRUM-106 Cancel policy.
+  if (error) {
+    console.error(JSON.stringify({ event: "soft_expiry_template_lookup_failed", template_id: templateId, detail: error.message }));
+  }
+  const tpl = (error ? null : (data ?? null)) as SoftExpiryTemplate | null;
   cache.set(templateId, tpl);
   return tpl;
 }
@@ -405,6 +420,85 @@ async function notifyLearnerAndAdmins(
   if (error) console.error("notifyLearnerAndAdmins failed:", error.message);
 }
 
+/**
+ * expires_at patch for a Start: non-persistent → now + duration; persistent →
+ * null (window/wallet governed; a stale expires_at must not let the next cron
+ * tick undo this Start). Unknown template → leave expires_at untouched.
+ */
+async function remintExpiresPatch(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  templateId: string | null | undefined,
+): Promise<Record<string, unknown>> {
+  const patch: Record<string, unknown> = {};
+  if (!templateId) return patch;
+  const { data: remintTpl } = await supabase
+    .from("lab_templates")
+    .select("duration, is_persistent")
+    .eq("id", templateId)
+    .maybeSingle();
+  if (remintTpl && !remintTpl.is_persistent && Number(remintTpl.duration) > 0) {
+    patch.expires_at = new Date(Date.now() + Number(remintTpl.duration) * 60 * 1000).toISOString();
+  } else if (remintTpl?.is_persistent) {
+    patch.expires_at = null;
+  }
+  return patch;
+}
+
+/** Per-run counters for idle / orphan / Cancel-retry cloud stop failures. */
+type StopRetrySummary = {
+  failed: number;
+  escalated_needs_admin: number;
+  backoff_skipped: number;
+  needs_admin_skipped: number;
+  resumed_by_learner_skipped: number;
+};
+
+/**
+ * Record a failed automatic cloud stop ON THE VM ROW (visible to admins on
+ * /vms), with a retry counter + backoff (see _shared/stop-retry.ts). After
+ * STOP_RETRY_MAX_ATTEMPTS the row is flagged `stop_failed_needs_admin:<n>`,
+ * retries stop and admins get ONE notification — never only a log line.
+ */
+async function recordStopFailure(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  vm: { id: string; azure_vm_id?: string | null },
+  current: StopRetryState | null,
+  opts: { pass: "idle" | "orphan" | "cancel_retry"; detail: string | null; nowIso: string; summary: StopRetrySummary },
+) {
+  const next = nextStopRetryAfterFailure(current, opts.pass === "cancel_retry" ? "cancel" : "cleanup");
+  const marker = formatStopRetry(next.state);
+  const patch: Record<string, unknown> = { ended_reason: marker, ended_at: opts.nowIso };
+  // Keep the learner as ended_by on a Cancel marker; idle/orphan are the cron's.
+  if (opts.pass !== "cancel_retry") patch.ended_by = SOURCE;
+  const { error } = await supabase.from("virtual_machines").update(patch).eq("id", vm.id);
+  if (error) console.error("recordStopFailure: marker update failed", error.message);
+  opts.summary.failed += 1;
+  console.error(JSON.stringify({
+    event: "cleanup_stop_failed",
+    pass: opts.pass,
+    vm_id: vm.id,
+    attempts: next.state.attempts,
+    marker,
+    escalated: next.escalated,
+    detail: opts.detail,
+  }));
+  if (next.escalated) {
+    opts.summary.escalated_needs_admin += 1;
+    const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
+    await notifyLearnerAndAdmins(supabase, {
+      userId: null, // admins only
+      type: "vm_stop_failed",
+      title: "Lab VM needs attention — automatic stop failed",
+      message:
+        `Cleanup could not stop VM ${label} (${vm.id}) after ${next.state.attempts} attempts (${opts.pass}). ` +
+        `Automatic retries have stopped. Last error: ${(opts.detail ?? "unknown").slice(0, 200)}. ` +
+        `Check the instance in the cloud console, then Stop or Delete it from /vms.`,
+    });
+  }
+}
+
 /** Control-flow marker: SOFT_EXPIRY_MODE=off skips the soft-expiry sweep. */
 class SkipSweep extends Error {}
 
@@ -449,8 +543,18 @@ Deno.serve(async (req) => {
     const azureFor = makeAzureResolver(supabase);
     // Held VMs (smoke VM, Guac hosts, Ops holds) are never touched by automatic
     // passes or purge. Explicit admin/learner actions on a named VM still work.
-    const heldVms = parseHeldVmList(Deno.env.get("CLEANUP_HELD_VM_IDS"));
-    const softExpiryMode = parseSoftExpiryMode(Deno.env.get("SOFT_EXPIRY_MODE"));
+    const heldConfig = parseHeldVmConfig(Deno.env.get("CLEANUP_HELD_VM_IDS"));
+    const heldVms = heldConfig.entries;
+    for (const w of heldConfig.warnings) console.warn(JSON.stringify({ event: "held_vm_entry_warning", detail: w }));
+    // SOFT_EXPIRY_MODE gates ONLY the soft-expiry sweep. The idle, orphan
+    // (incl. Cancel pending-stop retries) and stuck-provisioning passes run in
+    // every mode, including `off` — product decision, keep it that way.
+    // Unknown values fail safe to dry-run (warned + reported in the response).
+    const softExpiryModeConfig = resolveSoftExpiryMode(Deno.env.get("SOFT_EXPIRY_MODE"));
+    const softExpiryMode = softExpiryModeConfig.mode;
+    if (softExpiryModeConfig.warning) {
+      console.warn(JSON.stringify({ event: "soft_expiry_mode_invalid", detail: softExpiryModeConfig.warning }));
+    }
 
     // Student-owned cancellation of a provisioning / running VM
     if (action === "cancel-provisioning") {
@@ -537,9 +641,11 @@ Deno.serve(async (req) => {
           // Cloud refused the stop (e.g. AWS StopInstances on a `pending` instance
           // while resuming). Leave the power state truthful but mark the row so the
           // cron orphan pass retries the soft-stop instead of leaving it billing.
+          // Retry count / backoff / admin escalation: _shared/stop-retry.ts.
           await supabase.from("virtual_machines").update({
             ended_by: auth.userId,
             ended_reason: CANCEL_PENDING_STOP_REASON,
+            ended_at: nowIso,
           }).eq("id", targetVmId);
         }
         await timeline.skipped(
@@ -731,7 +837,7 @@ Deno.serve(async (req) => {
     if ((action === "stop-vm" || action === "delete-vm" || action === "start-vm") && targetVmId) {
       const { data: vm } = await supabase
         .from("virtual_machines")
-        .select("id, azure_vm_id, status, provider_account_id, region, private_ip, expires_at, user_id, lab_template_id")
+        .select("id, azure_vm_id, status, provider_account_id, region, private_ip, expires_at, user_id, lab_template_id, ended_reason")
         .eq("id", targetVmId)
         .maybeSingle();
 
@@ -748,7 +854,11 @@ Deno.serve(async (req) => {
         if (forbidden) return forbidden;
 
         const status = String(vm.status || "").toLowerCase();
-        if (!(RESUMABLE_VM_STATUSES as readonly string[]).includes(status)) {
+        // Riley #58: Start from the learner's "Pausing…" card (a Cancel whose cloud
+        // stop is still pending on a live VM) must take the Cancel back — clear the
+        // retry marker so the next cron tick cannot stop a VM the learner restarted.
+        const resumePendingStop = isLearnerResumablePendingStop(status, (vm as { ended_reason?: string | null }).ended_reason);
+        if (!resumePendingStop && !(RESUMABLE_VM_STATUSES as readonly string[]).includes(status)) {
           return new Response(JSON.stringify({
             error: `VM status "${vm.status}" is not startable (need stopped/deallocated)`,
             vm_id: targetVmId,
@@ -842,6 +952,49 @@ Deno.serve(async (req) => {
               status: 403, headers: { ...corsHeaders, "Content-Type": "application/json" },
             });
           }
+        }
+
+        if (resumePendingStop) {
+          // The VM never stopped (it is still powering on / running): no cloud
+          // call. Clear the marker only if it is still the one we read, so a
+          // concurrent cron stop wins cleanly (learner then just presses Start).
+          const staleReason = (vm as { ended_reason?: string | null }).ended_reason ?? "";
+          const resumeExpires = await remintExpiresPatch(supabase, (vm as { lab_template_id?: string | null }).lab_template_id);
+          const { data: cleared } = await supabase
+            .from("virtual_machines")
+            .update({ ended_by: null, ended_reason: null, ended_at: null, ...resumeExpires })
+            .eq("id", targetVmId)
+            .eq("status", vm.status)
+            .eq("ended_reason", staleReason)
+            .select("id");
+          if (!cleared || cleared.length === 0) {
+            return new Response(JSON.stringify({
+              error: "Your lab machine was just paused. Press Start again to resume it.",
+              code: "VM_STATE_CHANGED",
+              vm_id: targetVmId,
+            }), {
+              status: 409, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+          const resumeReason = actionReason || (isPlatformAdmin ? "admin_start" : "learner_start");
+          console.log(JSON.stringify({
+            event: "vm_start_pending_stop_cancelled",
+            vm_id: targetVmId,
+            actor: auth.userId,
+            prior_status: vm.status,
+            cleared_marker: staleReason,
+            reason: resumeReason,
+          }));
+          return new Response(JSON.stringify({
+            success: true,
+            action: "resumed-pending-stop",
+            vm_id: targetVmId,
+            status: vm.status,
+            reminted: true,
+            reason: resumeReason,
+          }), {
+            status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
         }
 
         const provider = await providerOf(supabase, vm.provider_account_id);
@@ -947,24 +1100,7 @@ Deno.serve(async (req) => {
           }
         }
         // P0c: reset expires_at on remint from template.duration (non-persistent).
-        const expiresPatch: Record<string, unknown> = {};
-        const remintTplId = (vm as { lab_template_id?: string | null }).lab_template_id;
-        if (remintTplId) {
-          const { data: remintTpl } = await supabase
-            .from("lab_templates")
-            .select("duration, is_persistent")
-            .eq("id", remintTplId)
-            .maybeSingle();
-          if (remintTpl && !remintTpl.is_persistent && Number(remintTpl.duration) > 0) {
-            expiresPatch.expires_at = new Date(
-              Date.now() + Number(remintTpl.duration) * 60 * 1000,
-            ).toISOString();
-          } else if (remintTpl?.is_persistent) {
-            // Persistent labs are window/wallet governed; a stale expires_at must
-            // not let the next cron tick undo this Start.
-            expiresPatch.expires_at = null;
-          }
-        }
+        const expiresPatch = await remintExpiresPatch(supabase, (vm as { lab_template_id?: string | null }).lab_template_id);
         await supabase.from("virtual_machines").update({
           status: "starting",
           ended_by: null,
@@ -1142,6 +1278,8 @@ Deno.serve(async (req) => {
       const templateCache = new Map<string, SoftExpiryTemplate | null>();
       const usageCache = new Map<string, WalletSessionRow[]>();
       const due: Array<Record<string, unknown>> = [];
+      // Past expires_at but persistence unknown → NOT stopped (cautious default).
+      const templateUnknown: Array<Record<string, unknown>> = [];
       for (const vm of candidates) {
         const tpl = vm.lab_template_id
           ? await cachedTemplate(supabase, templateCache, vm.lab_template_id)
@@ -1156,7 +1294,12 @@ Deno.serve(async (req) => {
           sessions,
           nowMs,
         });
-        if (!decision) continue;
+        if (!decision) {
+          if (expiresAtSkippedReason({ status: vm.status, expiresAt: vm.expires_at, template: tpl, nowMs }) === "template_unknown") {
+            templateUnknown.push({ vm_id: vm.id, status: vm.status, lab_template_id: vm.lab_template_id, expires_at: vm.expires_at });
+          }
+          continue;
+        }
         const held = isHeldVm(vm, heldVms);
         due.push({
           vm_id: vm.id,
@@ -1176,10 +1319,15 @@ Deno.serve(async (req) => {
         action: "expiry-preview",
         dry_run: true,
         mode: softExpiryMode,
+        mode_configured: softExpiryModeConfig.configured,
+        mode_warning: softExpiryModeConfig.warning,
         held_vm_ids: heldVms,
+        held_vm_warnings: heldConfig.warnings,
         scanned: candidates.length,
         due_count: due.length,
         due,
+        template_unknown_count: templateUnknown.length,
+        template_unknown: templateUnknown,
       }), {
         status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
@@ -1231,12 +1379,25 @@ Deno.serve(async (req) => {
     // 2. Find VMs that are running but their session was ended (stopped labs)
     // NOTE: Exclude "provisioning" VMs — they don't have sessions yet and are handled
     // separately by the stuck-provisioning check (10min timeout)
+    //
+    // NOTE: the idle, orphan and stuck-provisioning passes run in EVERY
+    // SOFT_EXPIRY_MODE (including `off`); that switch only gates the soft-expiry
+    // sweep below. Product decision — do not change without Ops sign-off.
     const { data: orphanVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, status, provider_account_id, region")
-      // + VMs whose learner Cancel could not stop them while `starting` (retry here).
-      .or(`status.in.(${ORPHAN_SWEEP_STATUSES.join(",")}),and(status.eq.starting,ended_reason.eq.${CANCEL_PENDING_STOP_REASON})`)
+      .select("id, azure_vm_id, status, provider_account_id, region, ended_reason, ended_at")
+      // + VMs whose learner Cancel could not stop them while `starting` (retry
+      // here, with backoff: learner_cancel_pending_stop or …_pending_stop:<n>).
+      .or(`status.in.(${ORPHAN_SWEEP_STATUSES.join(",")}),and(status.eq.starting,ended_reason.like.${CANCEL_PENDING_STOP_REASON}*)`)
       .not("azure_vm_id", "is", null);
+    const stopRetrySummary: StopRetrySummary = {
+      failed: 0,
+      escalated_needs_admin: 0,
+      backoff_skipped: 0,
+      needs_admin_skipped: 0,
+      resumed_by_learner_skipped: 0,
+    };
+    const nowMsForRetry = now.getTime();
 
     // Check which running VMs have no active session
     const activeSessionVmIds = new Set<string>();
@@ -1269,23 +1430,40 @@ Deno.serve(async (req) => {
           // Get VM details
           const { data: vm } = await supabase
             .from("virtual_machines")
-            .select("azure_vm_id, provider_account_id, region")
+            .select("azure_vm_id, provider_account_id, region, ended_reason, ended_at")
             .eq("id", session.vm_id)
             .maybeSingle();
+          const idleRetry = vm ? effectiveStopRetry(vm.ended_reason, vm.ended_at, nowMsForRetry) : null;
 
           if (vm?.azure_vm_id && isHeldVm({ id: session.vm_id, azure_vm_id: vm.azure_vm_id }, heldVms)) {
             results.push(`Idle session ${session.id}: VM ${session.vm_id.slice(0, 8)} is held — not deallocated`);
+          } else if (vm?.azure_vm_id && idleRetry?.kind === "needs_admin") {
+            // Automatic stops already gave up on this VM; an admin was notified.
+            stopRetrySummary.needs_admin_skipped += 1;
+            results.push(`Idle session ${session.id}: VM ${session.vm_id.slice(0, 8)} needs admin (stop failed) — not retried`);
           } else if (vm?.azure_vm_id) {
             // One cloud error must never abort the whole run (soft-expiry below).
             let deallocated = false;
+            let stopDetail: string | null = null;
             try {
               deallocated = await stopCloudVm(supabase, azureFor, vm);
+              if (!deallocated) stopDetail = "cloud soft-stop returned false";
             } catch (e) {
+              stopDetail = e instanceof Error ? e.message : String(e);
               console.error(JSON.stringify({
                 event: "idle_deallocate_failed",
                 vm_id: session.vm_id,
-                detail: e instanceof Error ? e.message : String(e),
+                detail: stopDetail,
               }));
+            }
+            if (!deallocated) {
+              // Visible to admins on the VM row (+ one notification on escalation).
+              await recordStopFailure(supabase, { id: session.vm_id, azure_vm_id: vm.azure_vm_id }, idleRetry, {
+                pass: "idle",
+                detail: stopDetail,
+                nowIso: now.toISOString(),
+                summary: stopRetrySummary,
+              });
             }
             if (deallocated) {
               await markVmEnded(supabase, session.vm_id, {
@@ -1308,25 +1486,62 @@ Deno.serve(async (req) => {
         if (!vm.azure_vm_id) continue;
         if (isHeldVm(vm, heldVms)) continue;
 
+        const retry = effectiveStopRetry(vm.ended_reason, vm.ended_at, nowMsForRetry);
+        if (retry?.kind === "needs_admin") {
+          stopRetrySummary.needs_admin_skipped += 1;
+          continue;
+        }
+        if (!isStopRetryDue(retry, vm.ended_at, nowMsForRetry)) {
+          stopRetrySummary.backoff_skipped += 1;
+          continue;
+        }
+        const isCancelRetry = retry?.kind === "cancel";
+        if (isCancelRetry) {
+          // The learner may have pressed Start ("take back" the Cancel) since the
+          // list was read: re-check the marker right before stopping.
+          const { data: fresh } = await supabase
+            .from("virtual_machines")
+            .select("status, ended_reason")
+            .eq("id", vm.id)
+            .maybeSingle();
+          if (!fresh || fresh.ended_reason !== vm.ended_reason || fresh.status !== vm.status) {
+            stopRetrySummary.resumed_by_learner_skipped += 1;
+            continue;
+          }
+        }
+
         // One cloud error (ghost instance, wrong state) must never abort the run.
         let deallocated = false;
+        let stopDetail: string | null = null;
         try {
           deallocated = await stopCloudVm(supabase, azureFor, vm);
+          if (!deallocated) stopDetail = "cloud soft-stop returned false";
         } catch (e) {
+          stopDetail = e instanceof Error ? e.message : String(e);
           console.error(JSON.stringify({
             event: "orphan_deallocate_failed",
             vm_id: vm.id,
-            detail: e instanceof Error ? e.message : String(e),
+            detail: stopDetail,
           }));
+        }
+        if (!deallocated) {
+          // Recorded on the VM row (visible on /vms) with backoff; escalates to
+          // stop_failed_needs_admin + one admin notification after N attempts.
+          await recordStopFailure(supabase, vm, retry, {
+            pass: isCancelRetry ? "cancel_retry" : "orphan",
+            detail: stopDetail,
+            nowIso: now.toISOString(),
+            summary: stopRetrySummary,
+          });
         }
         if (deallocated) {
           await markVmEnded(supabase, vm.id, {
             status: "deallocated",
             ended_by: SOURCE,
-            ended_reason: "orphan_no_session",
+            ended_reason: isCancelRetry ? "learner_cancel_kept" : "orphan_no_session",
             ended_at: now.toISOString(),
           });
-          results.push(`Orphan VM ${vm.azure_vm_id}: deallocated`);
+          results.push(`Orphan VM ${vm.azure_vm_id}: deallocated${isCancelRetry ? " (Cancel pending-stop retry)" : ""}`);
         }
       }
     }
@@ -1342,6 +1557,10 @@ Deno.serve(async (req) => {
     // hard-delete cloud + DB under explicit admin / ALLOW_AUTO_TERMINATE. Parked.
     const expirySummary = {
       mode: softExpiryMode,
+      // Raw secret + warning when an unknown value failed safe to dry-run.
+      mode_configured: softExpiryModeConfig.configured,
+      mode_warning: softExpiryModeConfig.warning,
+      template_unknown_skipped: 0,
       scanned: 0,
       due: 0,
       deallocated: 0,
@@ -1371,7 +1590,18 @@ Deno.serve(async (req) => {
           sessions,
           nowMs,
         });
-        if (!decision) continue;
+        if (!decision) {
+          if (expiresAtSkippedReason({ status: vm.status, expiresAt: vm.expires_at, template: tpl, nowMs }) === "template_unknown") {
+            expirySummary.template_unknown_skipped += 1;
+            console.warn(JSON.stringify({
+              event: "soft_expiry_template_unknown",
+              vm_id: vm.id,
+              lab_template_id: vm.lab_template_id,
+              expires_at: vm.expires_at,
+            }));
+          }
+          continue;
+        }
         expirySummary.due += 1;
         if (isHeldVm(vm, heldVms)) {
           expirySummary.held_skipped += 1;
@@ -1739,6 +1969,8 @@ Deno.serve(async (req) => {
         details: results,
         idle_timeout_minutes: IDLE_TIMEOUT_MINUTES,
         soft_expiry: expirySummary,
+        stop_retry: stopRetrySummary,
+        held_vm_warnings: heldConfig.warnings,
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );

@@ -27,6 +27,8 @@ import { MessageCircle } from "lucide-react";
 import { LabWalletPanel } from "@/components/LabWalletPanel";
 import { buildLabWallet, isStartBlocked, startBlockedMessage } from "@/lib/lab-wallet";
 import { isResumableStatus, remintAndWaitRunning } from "@/lib/lab-remint";
+import { cardStatusAfterCancel, PAUSING_CARD_STATUS } from "@/lib/cancel-outcome";
+import { isPendingCancelStop } from "@/lib/stop-retry";
 
 type LabTemplate = Tables<"lab_templates">;
 type Session = Tables<"sessions">;
@@ -66,7 +68,9 @@ export default function StudentDashboard() {
         delete next[labId];
         return next;
       }
-      return lastCancel.status ? { ...prev, [labId]: { ...current, status: lastCancel.status } } : prev;
+      // Riley #58: a kept VM still powering on shows "Pausing…", not "Starting".
+      const cardStatus = cardStatusAfterCancel(lastCancel);
+      return cardStatus ? { ...prev, [labId]: { ...current, status: cardStatus } } : prev;
     });
   }, [lastCancel]);
 
@@ -79,7 +83,7 @@ export default function StudentDashboard() {
         listGrants({ userId: user.id }).catch(() => []),
         supabase
           .from("virtual_machines")
-          .select("id, status, lab_template_id, created_at")
+          .select("id, status, lab_template_id, created_at, ended_reason")
           .eq("user_id", user.id)
           .in("status", ["deallocated", "stopped", "provisioning", "starting", "running", "idle"])
           .order("created_at", { ascending: false }),
@@ -90,7 +94,9 @@ export default function StudentDashboard() {
       for (const row of vmRes.data ?? []) {
         const tid = row.lab_template_id as string | null;
         if (!tid || byLab[tid]) continue; // newest first
-        byLab[tid] = { id: row.id as string, status: String(row.status) };
+        // A Cancel whose cloud stop is still pending (cron retry) → "Pausing…".
+        const pending = isPendingCancelStop(String(row.status), (row as { ended_reason?: string | null }).ended_reason);
+        byLab[tid] = { id: row.id as string, status: pending ? PAUSING_CARD_STATUS : String(row.status) };
       }
       setOwnedVmsByLab(byLab);
       const active = (grants || []).filter((g: GrantRow) => g.active !== false);
@@ -130,8 +136,16 @@ export default function StudentDashboard() {
       const existing = ownedVmsByLab[lab.id];
       // Start-from-deallocated: resume SAME vm_id via start-vm.
       // Do NOT call provision-lab for remint — non-persistent would spin a NEW VM (Lex refused).
-      if (existing && isResumableStatus(existing.status)) {
-        toast({ title: "Starting lab", description: "Resuming your existing machine…" });
+      // "Pausing…" (Cancel stop still pending): Start MUST go through start-vm,
+      // which takes the Cancel back server-side so the next cron tick cannot
+      // stop the machine the learner just restarted (Riley #58).
+      const pausing = existing?.status === PAUSING_CARD_STATUS;
+      if (existing && (isResumableStatus(existing.status) || pausing)) {
+        toast(
+          pausing
+            ? { title: "Keeping your lab on", description: "Cancelling the pause — your machine keeps running…" }
+            : { title: "Starting lab", description: "Resuming your existing machine…" },
+        );
         provisioning.startProvisioning(lab.id, lab.name, existing.id);
         await remintAndWaitRunning({
           vmId: existing.id,
@@ -183,6 +197,14 @@ export default function StudentDashboard() {
     } catch (err: unknown) {
       resetIdempotency(`provision:${lab.id}`);
       const raw = err instanceof Error ? err.message : "Failed to provision VM. Please try again.";
+      // The cron paused the machine between the card render and this Start:
+      // show Start (normal resume) on the next click.
+      if (/just paused/i.test(raw)) {
+        setOwnedVmsByLab((prev) => {
+          const cur = prev[lab.id];
+          return cur ? { ...prev, [lab.id]: { ...cur, status: "deallocated" } } : prev;
+        });
+      }
       const message = learnerConnectHoldCopy(raw);
       setLaunchErrors((prev) => ({ ...prev, [lab.id]: message }));
       toast({ title: "Technical glitch", description: message, variant: "destructive" });
@@ -363,6 +385,11 @@ export default function StudentDashboard() {
                             learnerFacing
                           />
                         )}
+                        {ownedVmsByLab[lab.id]?.status === PAUSING_CARD_STATUS && !(provisioning.isProvisioning && provisioning.labId === lab.id) && (
+                          <p className="text-[11px] text-muted-foreground leading-snug" role="status">
+                            Pausing… your lab machine will stop in a few minutes. Press Start to keep using it.
+                          </p>
+                        )}
                         {provisioning.isProvisioning && provisioning.labId === lab.id && (
                           <ProvisioningProgress
                             startedAt={provisioning.startedAt!}
@@ -383,7 +410,7 @@ export default function StudentDashboard() {
                         >
                           {(() => {
                             const owned = ownedVmsByLab[lab.id];
-                            const canResume = owned && isResumableStatus(owned.status);
+                            const canResume = owned && (isResumableStatus(owned.status) || owned.status === PAUSING_CARD_STATUS);
                             if (launchingId === lab.id || (provisioning.isProvisioning && provisioning.labId === lab.id)) {
                               return <><Loader2 className="h-3.5 w-3.5 animate-spin" /> {canResume ? "Starting…" : "Provisioning..."}</>;
                             }
