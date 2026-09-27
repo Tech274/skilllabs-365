@@ -48,6 +48,8 @@ export type StartCloudVmResult = {
    * Callers must mark the Hub VM failed/terminated — never StartInstances.
    */
   ghost?: boolean;
+  /** i-* id would have been sent to Azure start — refused (REMINT_PROVIDER_MISMATCH). */
+  mismatch?: boolean;
 };
 
 /** Newest reusable VM this learner already holds for this template, if any. */
@@ -125,6 +127,61 @@ async function waitUntilAwsStopped(
   return { state: last, detail: `timed out waiting for stopped (last=${last})` };
 }
 
+/** True when the cloud id is an EC2 instance id (i-xxxxxxxx). */
+export function isAwsInstanceId(id: string | null | undefined): boolean {
+  return typeof id === "string" && /^i-[0-9a-f]{8,}$/i.test(id.trim());
+}
+
+/**
+ * 15i.1 remint provider resolve order:
+ *   (a) cloud_provider_accounts.provider for vm.provider_account_id
+ *   (b) lab_templates.provider
+ *   (c) azure_vm_id "i-*" → aws; anything else → azure
+ * A lone vm.provider stamp is NEVER consulted (DB default is 'azure').
+ * If the resolved answer is azure but the id is i-*, callers get mismatch and fail closed.
+ */
+export function resolveRemintProvider(args: {
+  accountProvider?: string | null;
+  templateProvider?: string | null;
+  cloudId?: string | null;
+}): { provider: "aws" | "azure"; source: "account" | "template" | "cloud_id"; mismatch: boolean } {
+  const norm = (p?: string | null) => (p === "aws" || p === "azure" ? p : null);
+  const idSays: "aws" | "azure" = isAwsInstanceId(args.cloudId) ? "aws" : "azure";
+  const acct = norm(args.accountProvider);
+  const tmpl = norm(args.templateProvider);
+  const provider = acct ?? tmpl ?? idSays;
+  const source = acct ? "account" : tmpl ? "template" : "cloud_id";
+  const mismatch = provider === "azure" && isAwsInstanceId(args.cloudId);
+  return { provider, source, mismatch };
+}
+
+/**
+ * After a successful Start, poll the cloud until Running and return the FRESH
+ * IPs. Never reuse a deallocated-era public_ip.
+ */
+export async function waitForRunningAndIps(
+  supabase: SupabaseLike,
+  provider: string,
+  vm: ResumableVm,
+  maxMs = 120_000,
+): Promise<{ running: boolean; state: string; publicIp: string | null; privateIp: string | null }> {
+  if (provider !== "aws" || !vm.azure_vm_id) {
+    return { running: false, state: "starting", publicIp: null, privateIp: null };
+  }
+  const rt = await resolveAwsRuntime(supabase, vm.provider_account_id);
+  if (vm.region) rt.defaultRegion = String(vm.region);
+  const deadline = Date.now() + maxMs;
+  let last = { state: "pending" as string, publicIp: null as string | null, privateIp: null as string | null };
+  while (Date.now() < deadline) {
+    const d = await describeAwsInstance(rt, String(vm.azure_vm_id));
+    last = { state: d.state, publicIp: d.publicIp, privateIp: d.privateIp };
+    if (d.state === "running" && d.publicIp) return { running: true, ...last };
+    if (d.state === "terminated" || d.state === "shutting-down" || d.state === "not-found") break;
+    await sleep(4_000);
+  }
+  return { running: false, ...last };
+}
+
 /**
  * Power the existing allocation back on. Returns ok when the cloud accepted the
  * start (or the instance is already running/pending). The VM row is never
@@ -140,6 +197,15 @@ export async function startCloudVm(
   vm: ResumableVm,
 ): Promise<StartCloudVmResult> {
   if (!vm.azure_vm_id) return { ok: false, detail: "VM has no cloud instance id" };
+
+  // Fail closed: never send an EC2 i-* id to the Azure start API.
+  if (provider !== "aws" && isAwsInstanceId(vm.azure_vm_id)) {
+    return {
+      ok: false,
+      mismatch: true,
+      detail: `REMINT_PROVIDER_MISMATCH: ${vm.azure_vm_id} is an EC2 id but resolved provider is ${provider}`,
+    };
+  }
 
   if (provider === "aws") {
     const instanceId = String(vm.azure_vm_id);

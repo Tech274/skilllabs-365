@@ -393,18 +393,31 @@ Deno.serve(async (req) => {
       const healthReply = (payload: Record<string, unknown>) =>
         new Response(JSON.stringify(payload), { status: 200, headers: traceHeaders });
 
-      let sessQuery = supabase
-        .from("sessions")
-        .select("id, user_id, status, guac_connection_id, vm_id")
-        .order("started_at", { ascending: false })
-        .limit(1);
-      sessQuery = session_id
-        ? sessQuery.eq("id", session_id)
-        : sessQuery.eq("vm_id", healthVmId).eq("user_id", user.id).eq("status", "active");
-      const { data: sessRows } = await sessQuery;
-      const sess = sessRows?.[0];
+      // 15j.3 resolve order: (a) sessions.id = session_id; (b) on miss, latest row
+      // for vm_id carrying a guac_connection_id — prefer this user; admins
+      // accept any latest for the vm. Health NEVER deletes.
+      const SESS_COLS = "id, user_id, status, guac_connection_id, vm_id";
+      let sess: { id: string; user_id: string; status: string; guac_connection_id: string | null; vm_id: string | null } | null = null;
+      let resolvedVia = "none";
+      if (session_id) {
+        const { data } = await supabase.from("sessions").select(SESS_COLS).eq("id", session_id).maybeSingle();
+        if (data) { sess = data; resolvedVia = "session_id"; }
+      }
+      if (!sess && healthVmId) {
+        const { data: own } = await supabase.from("sessions").select(SESS_COLS)
+          .eq("vm_id", healthVmId).eq("user_id", user.id).not("guac_connection_id", "is", null)
+          .order("started_at", { ascending: false }).limit(1);
+        if (own?.[0]) { sess = own[0]; resolvedVia = "vm_id_own"; }
+        else if (await isAdmin()) {
+          const { data: anyRows } = await supabase.from("sessions").select(SESS_COLS)
+            .eq("vm_id", healthVmId).not("guac_connection_id", "is", null)
+            .order("started_at", { ascending: false }).limit(1);
+          if (anyRows?.[0]) { sess = anyRows[0]; resolvedVia = "vm_id_admin"; }
+        }
+      }
       if (!sess) {
-        return healthReply({ ready: false, reason: "No lab session found", probe: "guac_missing" });
+        console.log(JSON.stringify({ scope: "connection-health", probe: "session_miss", had_session_id: !!session_id, had_vm_id: !!healthVmId }));
+        return healthReply({ ready: false, reason: "Lab session not resolved yet", probe: "session_pending" });
       }
       if (sess.user_id !== user.id && !(await isAdmin())) {
         return new Response(JSON.stringify({ error: "Forbidden" }), {
@@ -477,13 +490,15 @@ Deno.serve(async (req) => {
         ]
           .filter((v) => v !== undefined && v !== null)
           .map((v) => String(v).trim());
-      const ready = actives.some((entry) => idFieldsOf(entry).includes(wanted));
+      const sameId = (a: string) => a === wanted || (/^\d+$/.test(a) && /^\d+$/.test(wanted) && Number(a) === Number(wanted));
+      const ready = actives.some((entry) => idFieldsOf(entry).some(sameId));
 
       if (!ready) {
         // No secrets: only counts and id shapes, to explain a persistent false.
         console.log(
           JSON.stringify({
             scope: "connection-health",
+            resolved_via: resolvedVia,
             probe: actives.length === 0 ? "no_tunnel" : "id_mismatch",
             active_count: actives.length,
             wanted_id: wanted,

@@ -7,6 +7,7 @@ import {
   applyPromoteToRunning,
 } from "../_shared/azure-reconcile.ts";
 import { resolveAwsRuntime, describeAwsInstance } from "../_shared/cloud-providers/aws-runtime.ts";
+import { reconcileWritesEnabled, reconcileVms, type ReconcileVm } from "../_shared/vm-reconcile.ts";
 
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
@@ -17,29 +18,56 @@ Deno.serve(async (req) => {
   try {
     const auth = await requireUser(req);
     if (auth instanceof Response) return auth;
-    const supabase = auth.supabase;
 
     const { vm_id } = await req.json();
     if (!vm_id) return errorResponse("vm_id is required", 400);
 
-    const { data: vm } = await supabase.from("virtual_machines").select("*").eq("id", vm_id).maybeSingle();
+    const admin = serviceClient();
+    const { data: vm } = await admin.from("virtual_machines").select("*").eq("id", vm_id).maybeSingle();
     if (!vm) return errorResponse("VM not found", 404);
 
     const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
     if (forbidden) return forbidden;
 
-    // Promote both fresh provision AND Start-from-deallocated (status=starting).
-    // Admin Start / persistent remint set "starting" after cloud StartInstances;
-    // without this gate Hub stays Starting forever (same class of bug as PR #22 RLS).
+    const applyReconcile = reconcileWritesEnabled();
+
+    // P2a reconcile is report-only unless VM_RECONCILE_MODE=apply or
+    // VM_RECONCILE_DRY_RUN=false. The call still describes the cloud.
+    let drift: Record<string, unknown> | null = null;
+    if (vm.azure_vm_id) {
+      try {
+        const [r] = await reconcileVms(admin, [vm as ReconcileVm], {
+          source: "check-vm-status",
+          dryRun: !applyReconcile,
+        });
+        if (applyReconcile && r) {
+          return jsonResponse({
+            status: r.after.status,
+            public_ip: r.after.public_ip,
+            private_ip: r.after.private_ip,
+            changed: r.changed,
+            code: r.code ?? null,
+            ...(r.would_be ? { drift: { cloud_state: r.cloud_state, would_be: r.would_be } } : {}),
+          });
+        }
+        if (r?.would_be) {
+          drift = { cloud_state: r.cloud_state, would_be: r.would_be, code: r.code ?? null };
+        }
+      } catch (e) {
+        console.error("check-vm-status reconcile (report) failed:", e instanceof Error ? e.message : e);
+      }
+    }
+
+    // Live promotion path (main): only provisioning|starting rows are written
+    // here. Other statuses return as stored. Opt-in reconcile above replaces
+    // this path when writes are enabled.
     if (vm.status !== "provisioning" && vm.status !== "starting") {
-      return jsonResponse({ status: vm.status });
+      return jsonResponse({ status: vm.status, ...(drift ? { drift } : {}) });
     }
 
     if (!vm.azure_vm_id) {
       return jsonResponse({ status: vm.status });
     }
-
-    const admin = serviceClient();
 
     // Resolve which cloud owns this VM via its provider account.
     let provider = "azure";
@@ -58,7 +86,6 @@ Deno.serve(async (req) => {
     // forever even when EC2/Azure is already Running (loadtest02 prv_ca91e584).
     if (provider === "aws") {
       const aws = await resolveAwsRuntime(admin, vm.provider_account_id);
-      // Prefer the VM's stored region when present
       if (vm.region) aws.defaultRegion = String(vm.region);
       const desc = await describeAwsInstance(aws, vm.azure_vm_id);
       if (desc.state === "running") {
@@ -74,8 +101,6 @@ Deno.serve(async (req) => {
         return jsonResponse({ status: "failed" });
       }
       if (desc.state === "stopped" || desc.state === "stopping") {
-        // StartInstances in flight can still report stopped briefly — do not
-        // regress Hub "starting" back to stopped (Start-from-deallocated).
         if (vm.status === "starting") {
           return jsonResponse({ status: "starting" });
         }
@@ -107,7 +132,6 @@ Deno.serve(async (req) => {
     }
 
     if (outcome.kind === "mapped") {
-      // Same Start-in-flight guard for Azure deallocate/stopped flicker.
       if (
         vm.status === "starting" &&
         (outcome.status === "stopped" || outcome.status === "deallocated")

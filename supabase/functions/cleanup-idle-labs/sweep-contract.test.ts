@@ -10,9 +10,14 @@ Deno.test("idle / orphan cloud errors are isolated per VM (run never aborts)", (
 
 Deno.test("held VMs are skipped by every automatic pass and purge", () => {
   assert(src.includes('parseHeldVmConfig(Deno.env.get("CLEANUP_HELD_VM_IDS"))'));
-  // purge, idle, orphan, soft-expiry, stuck-provisioning, preview
+  // preview, idle, orphan, soft-expiry, stuck-provisioning, plus explicit 423 paths
   const hits = src.split("isHeldVm(").length - 1;
   assert(hits >= 6, `expected >= 6 held checks, got ${hits}`);
+  assert(src.includes("isVmGuarded("));
+  // purge-failed is stop-only: 410, no row delete
+  assert(src.includes("TERMINATE_DISABLED"));
+  assert(src.includes("status: 410"));
+  assert(!src.includes('.from("virtual_machines").delete()'));
 });
 
 Deno.test("soft-expiry sweep honours SOFT_EXPIRY_MODE", () => {
