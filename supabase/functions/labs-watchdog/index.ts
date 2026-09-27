@@ -483,6 +483,14 @@ Deno.serve(async (req) => {
           allow_auto_terminate: hardDeleteAllowed,
         });
 
+        // A protected VM must not lose its session on the way to a refused stop
+        // or auto-terminate. Re-check after the claim in case the outer skip moved.
+        if (isVmGuarded(vm)) {
+          await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
+          skipped.push(`vm ${vm.id.slice(0, 8)}: protected`);
+          continue;
+        }
+
         await supabase
           .from("sessions")
           .update({ status: "completed", ended_at: nowIso })
@@ -591,6 +599,11 @@ Deno.serve(async (req) => {
             reason: endedReason,
             endedBy: SOURCE,
           }, stopBudget);
+          if (res.code === "VM_PROTECTED") {
+            await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
+            actions.push(`vm ${vm.id.slice(0, 8)}: protected — stop refused`);
+            continue;
+          }
           await auditSweep(supabase, {
             actorType: "watchdog",
             source: SOURCE,
@@ -618,6 +631,13 @@ Deno.serve(async (req) => {
           azureDeallocated = true;
           nextStatus = "deallocated";
         } else if (!promotedRunning && vm.azure_vm_id && hardDeleteAllowed) {
+          // ALLOW_AUTO_TERMINATE stays default off. Ordering below is unchanged
+          // for an unguarded VM. A guarded VM never reaches the delete.
+          if (isVmGuarded(vm)) {
+            await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
+            actions.push(`vm ${vm.id.slice(0, 8)}: protected — auto-terminate skipped`);
+            continue;
+          }
           // Existing main hard-delete path (ALLOW_AUTO_TERMINATE, default off).
           stopConfirmed = true;
           try {

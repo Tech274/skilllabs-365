@@ -358,13 +358,12 @@ Deno.test("delete-vm: a VM guarded by either list is 423, with no admin bypass",
   assertEquals(guardedDeleteBlock({ id: "cafe0000-1111-2222-3333-444455556666" }, empty), null);
 });
 
-Deno.test("learner-leave 423 says the session closed and the protected VM kept running", () => {
+Deno.test("learner-leave on a guarded VM is success so the SPA does not show Leave failed", () => {
   assertEquals(guardedLearnerLeaveBody(), {
-    error: "VM_PROTECTED",
-    code: "VM_PROTECTED",
+    success: true,
+    kept_running: true,
+    reason: "VM_PROTECTED",
     session_closed: true,
-    vm_kept_running: true,
-    message: "Session closed; VM kept running because it is protected.",
   });
 });
 

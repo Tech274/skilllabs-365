@@ -397,19 +397,20 @@ export function guardedDeleteBlock(
   return { error: "VM_PROTECTED", code: "VM_PROTECTED", vm_id: vm.id ?? null };
 }
 
-/** 423 body for learner-leave on a guarded VM. The session row is already closed. */
+/**
+ * Learner leave on a guarded VM. HTTP 200 so the SPA does not show "Leave failed".
+ * The session row is already closed; the VM stays running.
+ */
 export function guardedLearnerLeaveBody(): {
-  error: "VM_PROTECTED";
-  code: "VM_PROTECTED";
+  success: true;
+  kept_running: true;
+  reason: "VM_PROTECTED";
   session_closed: true;
-  vm_kept_running: true;
-  message: string;
 } {
   return {
-    error: "VM_PROTECTED",
-    code: "VM_PROTECTED",
+    success: true,
+    kept_running: true,
+    reason: "VM_PROTECTED",
     session_closed: true,
-    vm_kept_running: true,
-    message: "Session closed; VM kept running because it is protected.",
   };
 }
