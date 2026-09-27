@@ -43,4 +43,12 @@ Deno.test("cleanup-idle-labs exposes owner-scoped learner actions", async () => 
   const softIdx = cleanup.indexOf('cancelDecision.mode === "soft_stop"');
   const deleteIdx = cleanup.indexOf("await deleteCloudVm(supabase, azureFor, vm);");
   assert(softIdx > 0 && deleteIdx > softIdx, "soft-stop branch must run before the cancel hard-delete");
+  // Review follow-up: any session (active or ended) counts; persistence checked;
+  // admin hard delete needs an explicit force_delete; failed stop is retried by cron.
+  assertEquals(cleanup.includes('.not("ended_at", "is", null);\n        completedSessions'), false);
+  assert(cleanup.includes("priorSessions = countErr ? 1 : (count ?? 0);"));
+  assert(cleanup.includes('.select("is_persistent")'));
+  assert(cleanup.includes("rawBody.force_delete === true"));
+  assert(cleanup.includes("ended_reason: CANCEL_PENDING_STOP_REASON"));
+  assert(cleanup.includes("ended_reason.eq.${CANCEL_PENDING_STOP_REASON}"));
 });

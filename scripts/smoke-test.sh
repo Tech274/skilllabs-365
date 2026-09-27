@@ -95,9 +95,17 @@ SESSION_STATUS=$(rest "sessions?id=eq.$SESSION_ID&select=status" | python3 -c 'i
 [ "$SESSION_STATUS" != "active" ] || fail "session $SESSION_ID is still active after end-session"
 
 log "Cancelling the lab and verifying cleanup"
-api cleanup-idle-labs "{\"action\":\"cancel-provisioning\",\"vm_id\":\"$VM_ID\"}" >/dev/null
+CANCEL=$(api cleanup-idle-labs "{\"action\":\"cancel-provisioning\",\"vm_id\":\"$VM_ID\"}")
+CANCEL_DELETED=$(printf '%s' "$CANCEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin).get("deleted","")).lower())' 2>/dev/null || echo "")
 VM_STATUS=$(rest "virtual_machines?id=eq.$VM_ID&select=status" | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r[0]["status"] if r else "")')
-[ "$VM_STATUS" = "terminated" ] || fail "VM was not terminated (status: $VM_STATUS)"
+if [ "$CANCEL_DELETED" = "false" ]; then
+  # SCRUM-106: a used VM (the smoke opened a session) is soft-stopped, never deleted.
+  [ "$VM_STATUS" = "deallocated" ] || fail "Cancel kept the VM but it is not deallocated (status: $VM_STATUS)"
+  echo "::warning::Smoke VM $VM_ID was soft-stopped (kept, deallocated) per SCRUM-106 — an admin must purge it (delete-vm) to avoid storage cost."
+  VM_ID=""  # nothing more to clean up as the learner
+else
+  [ "$VM_STATUS" = "terminated" ] || fail "VM was not terminated (status: $VM_STATUS)"
+fi
 VM_ID=""
 
 log "Provisioning timeline for $CORRELATION_ID"
