@@ -81,3 +81,28 @@ export function dedupeBy<T>(rows: readonly T[], key: (row: T) => unknown): T[] {
   }
   return out;
 }
+
+/**
+ * Serialise an async loader: a call while one run is in flight queues exactly
+ * ONE follow-up run (so the latest state is always loaded) instead of starting
+ * an overlapping run that could finish out of order.
+ */
+export function coalesceRuns(run: () => Promise<void>): () => Promise<void> {
+  let running = false;
+  let queued = false;
+  return async () => {
+    if (running) {
+      queued = true;
+      return;
+    }
+    running = true;
+    try {
+      do {
+        queued = false;
+        await run();
+      } while (queued);
+    } finally {
+      running = false;
+    }
+  };
+}
