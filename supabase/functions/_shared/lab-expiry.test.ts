@@ -3,6 +3,7 @@ import {
   decideSoftExpiry,
   expiresAtSkippedReason,
   isHeldVm,
+  isVmGuarded,
   isSoftExpiryStatus,
   parseHeldVmConfig,
   parseHeldVmList,
@@ -251,4 +252,65 @@ Deno.test("short held entries are reported, not silently ignored", () => {
   assertEquals(cfg.warnings.length, 1);
   assertEquals(cfg.warnings[0].includes("abc123"), true);
   assertEquals(parseHeldVmConfig(undefined).warnings, []);
+});
+
+const HUB = "11111111-2222-3333-4444-555555555555";
+const ARM = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/lab-3f2a1b9c";
+
+Deno.test("union guard: protected by either list stays protected", () => {
+  const lists = {
+    protectedEntries: ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+    heldEntries: ["bba27e8f", HUB],
+  };
+  assertEquals(isVmGuarded({ id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }, lists), true);
+  assertEquals(isVmGuarded({ id: HUB }, lists), true);
+  assertEquals(isVmGuarded({ id: "cafebabe-0000-0000-0000-000000000000" }, lists), false);
+});
+
+Deno.test("union guard: prefix, cloud id and Azure name apply to BOTH lists", () => {
+  const fromProtected = {
+    protectedEntries: ["abc12345", "i-0123456789abcdef0", "lab-3f2a1b9c"],
+    heldEntries: ["bba27e8f"],
+  };
+  assertEquals(
+    isVmGuarded({ id: "abc12345-1111-2222-3333-444455556666", azure_vm_id: "other" }, fromProtected),
+    true,
+  );
+  assertEquals(
+    isVmGuarded({ id: "other", azure_vm_id: "i-0123456789abcdef0" }, fromProtected),
+    true,
+  );
+  assertEquals(
+    isVmGuarded({ id: "other", azure_vm_id: ARM }, fromProtected),
+    true,
+  );
+  const fromHeld = {
+    protectedEntries: [] as string[],
+    heldEntries: ["bba27e8f", "def98765", "i-0abc", "lab-heldname"],
+  };
+  assertEquals(isVmGuarded({ id: "def98765-0000-0000-0000-000000000000" }, fromHeld), true);
+  assertEquals(isVmGuarded({ id: "x", azure_vm_id: "i-0abc" }, fromHeld), true);
+  assertEquals(
+    isVmGuarded({
+      id: "x",
+      azure_vm_id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/lab-heldname",
+    }, fromHeld),
+    true,
+  );
+});
+
+Deno.test("union guard: built-in smoke prefix bba27e8f stays protected with empty secrets", () => {
+  const lists = { protectedEntries: [] as string[], heldEntries: parseHeldVmList(undefined) };
+  assertEquals(
+    isVmGuarded({ id: "bba27e8f-1111-2222-3333-444455556666", azure_vm_id: "i-0other" }, lists),
+    true,
+  );
+  assertEquals(isVmGuarded({ id: "cafe0000-1111-2222-3333-444455556666" }, lists), false);
+});
+
+Deno.test("SOFT_EXPIRY_MODE=dry-run never authorises a cloud stop", () => {
+  const decision = { reason: "lab_window_expired", trigger: "expires_at" } as const;
+  for (const status of ["running", "provisioning", "starting", "idle", "stopped"]) {
+    assertEquals(softExpiryEnforced("dry-run", status, decision), false);
+  }
 });
