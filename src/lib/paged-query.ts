@@ -106,3 +106,42 @@ export function coalesceRuns(run: () => Promise<void>): () => Promise<void> {
     }
   };
 }
+
+/**
+ * Trailing debounce with a max wait (Riley, #59). Each call pushes the run back
+ * by `waitMs`, but a run is never postponed more than `maxWaitMs` after the
+ * first pending call — so a steady stream of realtime INSERTs (load-test ramp)
+ * still refreshes the list every `maxWaitMs` instead of never.
+ */
+export function debounceWithMaxWait(
+  fn: () => void,
+  waitMs: number,
+  maxWaitMs: number,
+  clock: {
+    setTimeout: (cb: () => void, ms: number) => ReturnType<typeof setTimeout>;
+    clearTimeout: (t: ReturnType<typeof setTimeout>) => void;
+    now: () => number;
+  } = { setTimeout: (cb, ms) => setTimeout(cb, ms), clearTimeout: (t) => clearTimeout(t), now: () => Date.now() },
+): { schedule: () => void; cancel: () => void } {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let firstPendingAt: number | null = null;
+  const fire = () => {
+    timer = null;
+    firstPendingAt = null;
+    fn();
+  };
+  return {
+    schedule() {
+      const now = clock.now();
+      if (firstPendingAt === null) firstPendingAt = now;
+      if (timer) clock.clearTimeout(timer);
+      const untilMax = Math.max(0, firstPendingAt + maxWaitMs - now);
+      timer = clock.setTimeout(fire, Math.min(waitMs, untilMax));
+    },
+    cancel() {
+      if (timer) clock.clearTimeout(timer);
+      timer = null;
+      firstPendingAt = null;
+    },
+  };
+}

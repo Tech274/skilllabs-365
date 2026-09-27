@@ -139,7 +139,8 @@ export function UsageSummaryPanel() {
         <div>
           <h2 id="usage-heading" className="text-lg font-semibold text-foreground">Lab usage</h2>
           <p className="text-xs text-muted-foreground">
-            Live from lab sessions (IST days). Open sessions count up to now.
+            Live from lab sessions (IST days). Open sessions count up to now. A session is counted
+            whole on the IST day it started; sessions that started before the window are not included.
           </p>
         </div>
         <div className="flex items-center gap-2">

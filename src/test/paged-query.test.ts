@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { chunk, fetchAllForIds, fetchAllPages } from "@/lib/paged-query";
 
 function table(n: number) {
@@ -89,5 +89,47 @@ describe("coalesceRuns (fleet reload guard)", () => {
     await first;
     expect(runs).toBe(2);
     expect(maxActive).toBe(1);
+  });
+});
+
+describe("debounceWithMaxWait (/vms INSERT reloads)", () => {
+  it("a steady stream of inserts still reloads every maxWait", async () => {
+    const { debounceWithMaxWait } = await import("@/lib/paged-query");
+    vi.useFakeTimers();
+    try {
+      let runs = 0;
+      const d = debounceWithMaxWait(() => { runs += 1; }, 2000, 10_000);
+      // An INSERT every second for 25 s never pauses 2 s.
+      for (let t = 0; t < 25; t++) {
+        d.schedule();
+        vi.advanceTimersByTime(1000);
+      }
+      expect(runs).toBe(2); // at ~10 s and ~20 s
+      vi.advanceTimersByTime(2000);
+      expect(runs).toBe(3); // trailing run after the stream stops
+      d.cancel();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a single burst still collapses into one run after the quiet period", async () => {
+    const { debounceWithMaxWait } = await import("@/lib/paged-query");
+    vi.useFakeTimers();
+    try {
+      let runs = 0;
+      const d = debounceWithMaxWait(() => { runs += 1; }, 2000, 10_000);
+      for (let i = 0; i < 50; i++) d.schedule();
+      vi.advanceTimersByTime(1999);
+      expect(runs).toBe(0);
+      vi.advanceTimersByTime(1);
+      expect(runs).toBe(1);
+      d.schedule();
+      d.cancel();
+      vi.advanceTimersByTime(20_000);
+      expect(runs).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
