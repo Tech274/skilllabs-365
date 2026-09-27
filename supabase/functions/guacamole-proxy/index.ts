@@ -1,7 +1,7 @@
 import { corsHeadersFor } from "../_shared/auth.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { correlationHeaders, correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
-import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
+import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseCompletedIdempotency, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
 import {
   describeAwsInstance,
@@ -589,8 +589,14 @@ Deno.serve(async (req) => {
             status: 200, headers: traceHeaders,
           });
         }
-        // Stored result points at an ended session: drop it and mint a fresh one.
-        await releaseIdempotency(supabase, { key: sessionKey, userId: user.id, action: "guac-create-session" });
+        // Stored result points at an ended session: drop ONLY that completed row
+        // (never a concurrent request's in-progress re-claim) and mint a fresh one.
+        await releaseCompletedIdempotency(supabase, {
+          key: sessionKey,
+          userId: user.id,
+          action: "guac-create-session",
+          correlationId: claim.correlationId,
+        });
         const reclaim = await claimIdempotency(supabase, {
           key: sessionKey,
           userId: user.id,

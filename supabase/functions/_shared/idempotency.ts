@@ -100,3 +100,26 @@ export async function findInFlightVm(
     .maybeSingle();
   return data ?? null;
 }
+
+/**
+ * Drop a COMPLETED claim so a stale stored result can be re-minted (SCRUM-21
+ * review follow-up). Unlike releaseIdempotency this never deletes an
+ * `in_progress` claim, and when `correlationId` is given it only deletes the
+ * exact stale row that was replayed. A concurrent request that already
+ * re-claimed (or completed) the key is therefore left alone, so two parallel
+ * Connects cannot both mint a session.
+ */
+export async function releaseCompletedIdempotency(
+  supabase: SupabaseClient,
+  args: { key: string; userId: string; action: string; correlationId?: string | null },
+): Promise<void> {
+  let q = supabase
+    .from("provisioning_idempotency")
+    .delete()
+    .eq("user_id", args.userId)
+    .eq("action", args.action)
+    .eq("idempotency_key", args.key)
+    .eq("status", "completed");
+  if (args.correlationId) q = q.eq("correlation_id", args.correlationId);
+  await q;
+}
