@@ -61,3 +61,12 @@ describe("SCRUM-23 hosting config", () => {
     ]);
   });
 });
+
+describe("SCRUM-23 review follow-up", () => {
+  it("prebuild does not rewrite vercel.json (would mask the drift test in CI)", () => {
+    const pkg = JSON.parse(readFileSync(resolve(root, "package.json"), "utf8"));
+    expect(pkg.scripts.prebuild).toContain("--build");
+    const gen = readFileSync(resolve(root, "scripts/generate-headers.ts"), "utf8");
+    expect(gen).toMatch(/if \(!process\.argv\.includes\("--build"\)\)/);
+  });
+});
