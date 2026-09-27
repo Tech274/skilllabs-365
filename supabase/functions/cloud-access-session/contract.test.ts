@@ -50,5 +50,10 @@ Deno.test("cleanup-idle-labs exposes owner-scoped learner actions", async () => 
   assert(cleanup.includes('.select("is_persistent")'));
   assert(cleanup.includes("rawBody.force_delete === true"));
   assert(cleanup.includes("ended_reason: CANCEL_PENDING_STOP_REASON"));
-  assert(cleanup.includes("ended_reason.eq.${CANCEL_PENDING_STOP_REASON}"));
+  assert(cleanup.includes("ended_reason.like.${CANCEL_PENDING_STOP_REASON}*"));
+  // Riley #58: capped retries + admin-visible failures + Start takes the Cancel back.
+  assert(cleanup.includes("await recordStopFailure(supabase, vm, retry, {"));
+  assert(cleanup.includes('pass: "idle",'));
+  assert(cleanup.includes("isLearnerResumablePendingStop(status,"));
+  assert(cleanup.includes('action: "resumed-pending-stop"'));
 });

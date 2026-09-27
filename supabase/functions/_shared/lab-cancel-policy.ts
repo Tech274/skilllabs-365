@@ -65,5 +65,8 @@ export function decideLearnerCancel(input: LearnerCancelInput): LearnerCancelDec
   return { mode: "delete", reason: "fresh_allocation" };
 }
 
-/** Marker left on a VM whose Cancel soft-stop could not stop the cloud VM yet. */
-export const CANCEL_PENDING_STOP_REASON = "learner_cancel_pending_stop";
+/**
+ * Marker left on a VM whose Cancel soft-stop could not stop the cloud VM yet.
+ * Retry count, backoff and admin escalation live in `stop-retry.ts`.
+ */
+export { CANCEL_PENDING_STOP_REASON } from "./stop-retry.ts";

@@ -26,3 +26,21 @@ describe("parseCancelResponse (SCRUM-106)", () => {
     expect(cancelToastCopy(o).description).toMatch(/NOT deleted/);
   });
 });
+
+describe("Cancel while the VM is still powering on (Riley #58)", () => {
+  it("card shows Pausing, not Starting, and the toast agrees", async () => {
+    const { cardStatusAfterCancel, PAUSING_CARD_STATUS } = await import("@/lib/cancel-outcome");
+    const o = parseCancelResponse("vm1", "lab1", { action: "cancel-soft-stopped", deleted: false, status: "starting", cloud_stop_ok: false });
+    expect(cardStatusAfterCancel(o)).toBe(PAUSING_CARD_STATUS);
+    const copy = cancelToastCopy(o);
+    expect(copy.title).toBe("Pausing lab");
+    expect(copy.description).toMatch(/pause automatically/);
+    expect(copy.description).toMatch(/Press Start/);
+  });
+
+  it("deallocated stays deallocated; deleted has no card", async () => {
+    const { cardStatusAfterCancel } = await import("@/lib/cancel-outcome");
+    expect(cardStatusAfterCancel(parseCancelResponse("vm1", "lab1", { deleted: false, status: "deallocated" }))).toBe("deallocated");
+    expect(cardStatusAfterCancel(parseCancelResponse("vm1", "lab1", { action: "cancelled", deleted: true }))).toBeNull();
+  });
+});

@@ -1,10 +1,13 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   decideSoftExpiry,
+  expiresAtSkippedReason,
   isHeldVm,
   isSoftExpiryStatus,
+  parseHeldVmConfig,
   parseHeldVmList,
   parseSoftExpiryMode,
+  resolveSoftExpiryMode,
   softExpiryEnforced,
   softExpiryNotice,
   ORPHAN_SWEEP_STATUSES,
@@ -38,7 +41,7 @@ Deno.test("expires_at in the past → lab_window_expired (idle included)", () =>
   const d = decideSoftExpiry({
     status: "idle",
     expiresAt: "2026-09-27T18:00:00Z",
-    template: null,
+    template: { duration: 60, is_persistent: false },
     nowMs: AFTER_END,
   });
   assertEquals(d, { reason: "lab_window_expired", trigger: "expires_at" });
@@ -139,7 +142,25 @@ Deno.test("SOFT_EXPIRY_MODE parsing defaults to legacy", () => {
   assertEquals(parseSoftExpiryMode("ENFORCE"), "enforce");
   assertEquals(parseSoftExpiryMode("dry-run"), "dry-run");
   assertEquals(parseSoftExpiryMode("off"), "off");
-  assertEquals(parseSoftExpiryMode("yes"), "legacy");
+  assertEquals(parseSoftExpiryMode(" legacy "), "legacy");
+  assertEquals(parseSoftExpiryMode("   "), "legacy");
+});
+
+Deno.test("unknown / typo SOFT_EXPIRY_MODE fails SAFE to dry-run with a warning (Riley #54)", () => {
+  for (const typo of ["dry_run", "dryrun", "disabled", "false", "yes", "Enforced"]) {
+    const cfg = resolveSoftExpiryMode(typo);
+    assertEquals(cfg.mode, "dry-run", typo);
+    assertEquals(cfg.configured, typo);
+    assertEquals(typeof cfg.warning === "string" && cfg.warning.includes(typo), true);
+    // dry-run never enforces anything.
+    assertEquals(
+      softExpiryEnforced(cfg.mode, "running", { reason: "lab_window_expired", trigger: "expires_at" }),
+      false,
+    );
+  }
+  // Unset keeps legacy (backward compatible) with no warning.
+  assertEquals(resolveSoftExpiryMode(undefined), { mode: "legacy", configured: null, warning: null });
+  assertEquals(resolveSoftExpiryMode("ENFORCE").warning, null);
 });
 
 Deno.test("legacy mode enforces only the pre-SCRUM-28 scope", () => {
@@ -168,4 +189,66 @@ Deno.test("held list: smoke VM built in, extra ids from secret, prefix and insta
   assertEquals(isHeldVm({ id: "cafebabe-0000-0000-0000-000000000000", azure_vm_id: "i-0other" }, held), false);
   // Short fragments never prefix-match.
   assertEquals(isHeldVm({ id: "abc12345-0000" }, parseHeldVmList("abc")), false);
+});
+
+// ---- Riley re-check of #54 -------------------------------------------------
+
+Deno.test("unknown persistence (no template / lookup failed) is cautious: expires_at alone never stops it", () => {
+  for (const template of [null, undefined, { name: "x" }]) {
+    assertEquals(
+      decideSoftExpiry({ status: "running", expiresAt: "2026-01-01T00:00:00Z", template, nowMs: AFTER_END }),
+      null,
+    );
+    assertEquals(
+      expiresAtSkippedReason({ status: "running", expiresAt: "2026-01-01T00:00:00Z", template, nowMs: AFTER_END }),
+      "template_unknown",
+    );
+  }
+  assertEquals(
+    expiresAtSkippedReason({ status: "running", expiresAt: "2026-01-01T00:00:00Z", template: persistent, nowMs: AFTER_END }),
+    "persistent",
+  );
+  // Known non-persistent: not skipped (the trigger fires).
+  assertEquals(
+    expiresAtSkippedReason({
+      status: "running", expiresAt: "2026-01-01T00:00:00Z", template: { is_persistent: false }, nowMs: AFTER_END,
+    }),
+    null,
+  );
+  // Future / unset expires_at or a held status: nothing to report.
+  assertEquals(expiresAtSkippedReason({ status: "running", expiresAt: "2027-01-01T00:00:00Z", template: null, nowMs: AFTER_END }), null);
+  assertEquals(expiresAtSkippedReason({ status: "deallocated", expiresAt: "2026-01-01T00:00:00Z", template: null, nowMs: AFTER_END }), null);
+});
+
+Deno.test("held list matches full Hub id, cloud instance id and VM name", () => {
+  const hubId = "0f6c2a7e-1d2b-4c3d-8e9f-a0b1c2d3e4f5";
+  const armId = "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/lab-3f2a1b9c-mf3k2";
+  const held = parseHeldVmList(`${hubId}, i-0123456789abcdef0, LAB-3F2A1B9C-MF3K2`);
+  // Full Hub row id.
+  assertEquals(isHeldVm({ id: hubId.toUpperCase(), azure_vm_id: null }, held), true);
+  // AWS instance id (exact).
+  assertEquals(isHeldVm({ id: "other", azure_vm_id: "i-0123456789abcdef0" }, held), true);
+  // Azure VM name = last ARM segment (case-insensitive, trailing slash tolerated).
+  assertEquals(isHeldVm({ id: "other", azure_vm_id: armId }, held), true);
+  assertEquals(isHeldVm({ id: "other", azure_vm_id: `${armId}/` }, held), true);
+  // Full ARM id as the entry also works.
+  assertEquals(isHeldVm({ id: "other", azure_vm_id: armId }, parseHeldVmList(armId)), true);
+  // A cloud-name fragment never prefix-matches (cannot hold a whole template's fleet).
+  assertEquals(isHeldVm({ id: "other", azure_vm_id: armId }, parseHeldVmList("lab-3f2a1b9c")), false);
+  assertEquals(isHeldVm({ id: "other", azure_vm_id: "i-0123456789abcdef1" }, held), false);
+});
+
+Deno.test("built-in smoke hold bba27e8f matches the Hub short id, also when copied with an ellipsis", () => {
+  const held = parseHeldVmList(undefined);
+  assertEquals(isHeldVm({ id: "bba27e8f-1111-2222-3333-444455556666", azure_vm_id: "i-0aaaaaaaaaaaaaaaa" }, held), true);
+  assertEquals(isHeldVm({ id: "cafe0000-1111-2222-3333-444455556666", azure_vm_id: "i-0aaaaaaaaaaaaaaaa" }, held), false);
+  assertEquals(isHeldVm({ id: "0f6c2a7e-1d2b-4c3d-8e9f-a0b1c2d3e4f5" }, parseHeldVmList("0f6c2a7e…")), true);
+  assertEquals(isHeldVm({ id: "0f6c2a7e-1d2b-4c3d-8e9f-a0b1c2d3e4f5" }, parseHeldVmList("0f6c2a7e...")), true);
+});
+
+Deno.test("short held entries are reported, not silently ignored", () => {
+  const cfg = parseHeldVmConfig("abc123, 0f6c2a7e, i-0123456789abcdef0");
+  assertEquals(cfg.warnings.length, 1);
+  assertEquals(cfg.warnings[0].includes("abc123"), true);
+  assertEquals(parseHeldVmConfig(undefined).warnings, []);
 });
