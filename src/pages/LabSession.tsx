@@ -392,6 +392,10 @@ export default function LabSession() {
         // refresh and leave the pre-Leave expires_at on screen, so the countdown
         // flipped to "Expired"/disconnected right after a successful remint.
         // P0c: refresh expires_at after remint reset on the server.
+        // Review follow-up: if the refresh fails, never keep the pre-Leave value
+        // (it would flip to "Expired"/disconnect right after a good remint).
+        // Unknown → "—"; the server-side sweep still enforces the real expiry.
+        let expiresRefreshed = false;
         try {
           const { data: refreshed } = await supabase
             .from("virtual_machines")
@@ -410,11 +414,16 @@ export default function LabSession() {
                 isPersistent: Boolean((tpl as { is_persistent?: boolean } | null)?.is_persistent),
               }),
             }));
+            expiresRefreshed = true;
           }
         } catch (e) {
           console.warn("[remint] expires_at refresh failed", e);
         }
         if (cancelled) return;
+        if (!expiresRefreshed) {
+          console.warn("[remint] expires_at not refreshed — hiding stale countdown");
+          setSession((prev) => ({ ...prev, expiresAt: "" }));
+        }
         setReminting(false);
         // vmStatus → running re-runs this effect, and that pass mints the fresh
         // Guac session. Minting here as well would race two create-session calls.
