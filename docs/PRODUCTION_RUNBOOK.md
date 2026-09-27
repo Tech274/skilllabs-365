@@ -96,7 +96,13 @@ npm run functions:test    # deno test supabase/functions/
 `cleanup-idle-labs` handles, in one scheduled run (`action` omitted → `auto-cleanup`):
 
 * idle VMs (no session activity > 15 min) → deallocate
-* expired sessions (past `expires_at`) → deallocate / terminate
+* orphan VMs (`running` / `idle`, no active session) → deallocate
+* **soft-expiry** (SCRUM-28) — any VM in `running` / `provisioning` / `starting` /
+  `idle` / `stopped` whose `expires_at` passed, whose persistent template
+  `end_date` (end of day IST) passed, or whose learner used all prepaid minutes
+  → end active sessions, **deallocate** (never delete), notify learner + admins.
+  Azure OS-level `stopped` still bills compute, so it is deallocated too. The
+  run response carries `soft_expiry: { scanned, due, deallocated, stop_failed }`.
 * VMs stuck in `provisioning` > 10 min → mark failed and delete the Azure resource
 * orphaned Guacamole users/connections with no live session → removed
 
@@ -123,6 +129,7 @@ Admin-authenticated POST to `cleanup-idle-labs`:
 | Body | Effect |
 | --- | --- |
 | `{}` | full auto-cleanup pass |
+| `{"action":"expiry-preview"}` | **dry run** — list VMs the soft-expiry sweep would deallocate now, with reason/trigger (no cloud calls, no writes) |
 | `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM |
 | `{"action":"delete-vm","vm_id":"…"}` | delete one VM |
 | `{"action":"purge-failed"}` | purge failed VM records |

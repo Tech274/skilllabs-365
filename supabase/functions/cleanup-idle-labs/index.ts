@@ -13,7 +13,14 @@ import {
   resolveAwsRuntime, stopAwsInstance, terminateAwsInstance, describeAwsInstance,
 } from "../_shared/cloud-providers/aws-runtime.ts";
 import { startCloudVm, RESUMABLE_VM_STATUSES } from "../_shared/cloud-providers/vm-resume.ts";
-import { buildWalletSnapshot, walletBlockMessage } from "../_shared/lab-wallet.ts";
+import { buildWalletSnapshot, walletBlockMessage, type WalletSessionRow } from "../_shared/lab-wallet.ts";
+import {
+  decideSoftExpiry,
+  softExpiryNotice,
+  ORPHAN_SWEEP_STATUSES,
+  SOFT_EXPIRY_STATUSES,
+  type SoftExpiryTemplate,
+} from "../_shared/lab-expiry.ts";
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -214,6 +221,86 @@ async function markVmEnded(
     ended_reason: patch.ended_reason,
     ended_at,
   }).eq("id", vmId);
+}
+
+type SoftExpiryCandidate = {
+  id: string;
+  azure_vm_id: string | null;
+  status: string;
+  expires_at: string | null;
+  user_id: string | null;
+  lab_template_id: string | null;
+  provider_account_id: string | null;
+  region: string | null;
+};
+
+const SOFT_EXPIRY_PAGE = 200;
+const SOFT_EXPIRY_MAX = 2000;
+
+/**
+ * Every VM that may still bill compute, paged (the old sweep stopped at 200
+ * rows). `region` is selected so AWS stops hit the VM's own region.
+ */
+async function loadSoftExpiryCandidates(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+): Promise<SoftExpiryCandidate[]> {
+  const out: SoftExpiryCandidate[] = [];
+  for (let from = 0; from < SOFT_EXPIRY_MAX; from += SOFT_EXPIRY_PAGE) {
+    const { data, error } = await supabase
+      .from("virtual_machines")
+      .select("id, azure_vm_id, status, expires_at, user_id, lab_template_id, provider_account_id, region")
+      .in("status", [...SOFT_EXPIRY_STATUSES])
+      .order("id", { ascending: true })
+      .range(from, from + SOFT_EXPIRY_PAGE - 1);
+    if (error) {
+      console.error("soft-expiry candidate query failed:", error.message);
+      break;
+    }
+    const rows = (data ?? []) as SoftExpiryCandidate[];
+    out.push(...rows);
+    if (rows.length < SOFT_EXPIRY_PAGE) break;
+  }
+  return out;
+}
+
+async function cachedTemplate(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  cache: Map<string, SoftExpiryTemplate | null>,
+  templateId: string,
+): Promise<SoftExpiryTemplate | null> {
+  if (cache.has(templateId)) return cache.get(templateId) ?? null;
+  const { data } = await supabase
+    .from("lab_templates")
+    .select("id, name, duration, is_persistent, end_date")
+    .eq("id", templateId)
+    .maybeSingle();
+  const tpl = (data ?? null) as SoftExpiryTemplate | null;
+  cache.set(templateId, tpl);
+  return tpl;
+}
+
+/** Wallet usage = this learner's sessions on this template (same query as the Start gate). */
+async function cachedUsage(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  cache: Map<string, WalletSessionRow[]>,
+  userId: string,
+  templateId: string,
+): Promise<WalletSessionRow[]> {
+  const key = `${userId}:${templateId}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const { data } = await supabase
+    .from("sessions")
+    .select("started_at, ended_at")
+    .eq("user_id", userId)
+    .eq("lab_template_id", templateId)
+    .limit(500);
+  const rows = (data ?? []) as WalletSessionRow[];
+  cache.set(key, rows);
+  return rows;
 }
 
 /** Notify learner (if any) + all admins via notifications table. */
@@ -919,6 +1006,52 @@ Deno.serve(async (req) => {
       });
     }
 
+    // Admin dry run (SCRUM-28): which VMs the soft-expiry sweep WOULD deallocate
+    // right now, and why. Read-only — no cloud calls, no DB writes.
+    if (action === "expiry-preview") {
+      const nowMs = Date.now();
+      const candidates = await loadSoftExpiryCandidates(supabase);
+      const templateCache = new Map<string, SoftExpiryTemplate | null>();
+      const usageCache = new Map<string, WalletSessionRow[]>();
+      const due: Array<Record<string, unknown>> = [];
+      for (const vm of candidates) {
+        const tpl = vm.lab_template_id
+          ? await cachedTemplate(supabase, templateCache, vm.lab_template_id)
+          : null;
+        const sessions = tpl && vm.user_id && vm.lab_template_id
+          ? await cachedUsage(supabase, usageCache, vm.user_id, vm.lab_template_id)
+          : [];
+        const decision = decideSoftExpiry({
+          status: vm.status,
+          expiresAt: vm.expires_at,
+          template: tpl,
+          sessions,
+          nowMs,
+        });
+        if (!decision) continue;
+        due.push({
+          vm_id: vm.id,
+          status: vm.status,
+          user_id: vm.user_id,
+          lab_template_id: vm.lab_template_id,
+          template_name: tpl?.name ?? null,
+          expires_at: vm.expires_at,
+          template_end_date: tpl?.end_date ?? null,
+          ...decision,
+        });
+      }
+      return new Response(JSON.stringify({
+        success: true,
+        action: "expiry-preview",
+        dry_run: true,
+        scanned: candidates.length,
+        due_count: due.length,
+        due,
+      }), {
+        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
     // Handle purge: delete all failed/terminated VM records from database
     if (action === "purge-failed") {
       // First clean up any Azure resources that might still exist
@@ -966,8 +1099,8 @@ Deno.serve(async (req) => {
     // separately by the stuck-provisioning check (10min timeout)
     const { data: orphanVMs } = await supabase
       .from("virtual_machines")
-      .select("id, azure_vm_id, status, provider_account_id")
-      .eq("status", "running")
+      .select("id, azure_vm_id, status, provider_account_id, region")
+      .in("status", [...ORPHAN_SWEEP_STATUSES])
       .not("azure_vm_id", "is", null);
 
     // Check which running VMs have no active session
@@ -981,16 +1114,6 @@ Deno.serve(async (req) => {
     if (activeSessions) {
       activeSessions.forEach((s) => { if (s.vm_id) activeSessionVmIds.add(s.vm_id); });
     }
-
-    // 3. Find expired VMs
-    // TODO(v2): soft-hold purge — days after lab_window_expired deallocate, optionally
-    // hard-delete Azure + DB under explicit admin / ALLOW_AUTO_TERMINATE. Parked.
-
-    const { data: expiredVMs } = await supabase
-      .from("virtual_machines")
-      .select("id, azure_vm_id, status, expires_at, provider_account_id, user_id")
-      .in("status", ["running", "provisioning", "starting"])
-      .lt("expires_at", now.toISOString());
 
     // Process idle sessions: end session + deallocate VM
     if (idleSessions?.length) {
@@ -1011,7 +1134,7 @@ Deno.serve(async (req) => {
           // Get VM details
           const { data: vm } = await supabase
             .from("virtual_machines")
-            .select("azure_vm_id, provider_account_id")
+            .select("azure_vm_id, provider_account_id, region")
             .eq("id", session.vm_id)
             .maybeSingle();
 
@@ -1050,186 +1173,112 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Process expired VMs — soft path: deallocate + DB deallocated (NEVER silent hard-delete).
-    // Hard delete remains admin-only (delete-vm / cancel-provisioning / purge-failed).
-    if (expiredVMs?.length) {
-      for (const vm of expiredVMs) {
-        // End any active sessions for this VM
-        await supabase
-          .from("sessions")
-          .update({ ended_at: now.toISOString(), status: "completed", disconnect_reason: "lab_window_expired" })
-          .eq("vm_id", vm.id)
-          .eq("status", "active");
-
-        let azureOk = true;
-        let stopDetail: string | null = null;
-        if (vm.azure_vm_id) {
-          try {
-            azureOk = await stopCloudVm(supabase, azureFor, vm);
-            if (!azureOk) stopDetail = "cloud soft-stop returned false";
-          } catch (e) {
-            azureOk = false;
-            stopDetail = e instanceof Error ? e.message : String(e);
-            console.error("expired soft-path deallocate failed", e);
-          }
-          if (!azureOk) {
-            try {
-              const recon = await isCloudAlreadySoftStopped(supabase, azureFor, vm);
-              if (recon.softStopped) {
-                azureOk = true;
-                stopDetail = stopDetail ? `${stopDetail}; reconciled: ${recon.detail}` : `reconciled: ${recon.detail}`;
-              }
-            } catch (e) {
-              console.error("expired soft-path reconcile failed", e);
-            }
-          }
-        }
-
-        // Honesty gate: mark Hub deallocated only when cloud soft-stop (or reconcile) succeeded.
-        const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
-        if (azureOk) {
-          await markVmEnded(supabase, vm.id, {
-            status: "deallocated",
-            ended_by: SOURCE,
-            ended_reason: "lab_window_expired",
-            ended_at: now.toISOString(),
-          });
-          await notifyLearnerAndAdmins(supabase, {
-            userId: vm.user_id,
-            type: "lab_expired",
-            title: "Lab window expired — VM deallocated",
-            message: `Lab VM ${label} reached expires_at and was soft-stopped (deallocated). Resources are held, not deleted. Contact an admin to resume or purge.`,
-          });
-          results.push(`Expired VM ${label}: deallocated (soft)`);
-        } else {
-          console.error(JSON.stringify({
-            event: "expired_soft_stop_failed",
-            vm_id: vm.id,
-            detail: stopDetail,
-          }));
-          results.push(`Expired VM ${label}: cloud stop failed — Hub status left as ${vm.status}${stopDetail ? ` [${stopDetail.slice(0, 120)}]` : ""}`);
-        }
-      }
-    }
-
-    // 3a-wallet. Wallet soft-expiry: template end_date EOD IST reached, OR the
-    // learner's remaining minutes (allocated − used-by-session) hit zero.
-    // Soft path only: deallocate + notify. Never a silent terminate/delete.
+    // 3. Soft-expiry sweep (SCRUM-28) — ONE pass over every VM that may still
+    // bill compute (running / provisioning / starting / idle / OS-stopped).
+    // Triggers (see _shared/lab-expiry.ts): VM expires_at passed, persistent
+    // template end_date (EOD IST) passed, or prepaid minutes used up.
+    // Soft path only: end sessions + deallocate + notify. NEVER a silent
+    // terminate/delete. Runs after the idle/orphan passes so VMs they already
+    // deallocated are not processed twice.
+    // TODO(v2): soft-hold purge — days after lab_window_expired deallocate, optionally
+    // hard-delete cloud + DB under explicit admin / ALLOW_AUTO_TERMINATE. Parked.
+    const expirySummary = { scanned: 0, due: 0, deallocated: 0, stop_failed: 0 };
     try {
-      const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
-      const endOfDayIst = (iso: string): number => {
-        const d = new Date(iso);
-        if (Number.isNaN(d.getTime())) return Number.NaN;
-        const ist = new Date(d.getTime() + IST_OFFSET_MS);
-        ist.setUTCHours(23, 59, 59, 999);
-        return ist.getTime() - IST_OFFSET_MS;
-      };
+      const nowMs = now.getTime();
+      const candidates = await loadSoftExpiryCandidates(supabase);
+      expirySummary.scanned = candidates.length;
+      const templateCache = new Map<string, SoftExpiryTemplate | null>();
+      const usageCache = new Map<string, WalletSessionRow[]>();
 
-      const { data: liveVMs } = await supabase
-        .from("virtual_machines")
-        .select("id, azure_vm_id, status, user_id, lab_template_id, provider_account_id")
-        .in("status", ["running", "provisioning", "starting", "idle"])
-        .not("lab_template_id", "is", null)
-        .limit(200);
-
-      for (const vm of liveVMs ?? []) {
-        const { data: tpl } = await supabase
-          .from("lab_templates")
-          .select("id, name, duration, is_persistent, end_date")
-          .eq("id", vm.lab_template_id)
-          .maybeSingle();
-        if (!tpl) continue;
-
-        const windowEnded = Boolean(tpl.end_date) && now.getTime() > endOfDayIst(tpl.end_date as string);
-
-        // Used minutes come from real session usage for this learner + template.
-        let usedMinutes = 0;
-        if (vm.user_id) {
-          const { data: usage } = await supabase
-            .from("sessions")
-            .select("started_at, ended_at")
-            .eq("user_id", vm.user_id)
-            .eq("lab_template_id", tpl.id)
-            .limit(500);
-          for (const s of usage ?? []) {
-            if (!s.started_at) continue;
-            const start = new Date(s.started_at).getTime();
-            const end = s.ended_at ? new Date(s.ended_at).getTime() : now.getTime();
-            if (Number.isNaN(start) || Number.isNaN(end) || end <= start) continue;
-            usedMinutes += (end - start) / 60000;
-          }
-        }
-        const allocated = Number(tpl.duration ?? 0);
-        const exhausted = allocated > 0 && usedMinutes >= allocated;
-
-        if (!windowEnded && !exhausted) continue;
+      for (const vm of candidates) {
+        const tpl = vm.lab_template_id
+          ? await cachedTemplate(supabase, templateCache, vm.lab_template_id)
+          : null;
+        const sessions = tpl && vm.user_id && vm.lab_template_id
+          ? await cachedUsage(supabase, usageCache, vm.user_id, vm.lab_template_id)
+          : [];
+        const decision = decideSoftExpiry({
+          status: vm.status,
+          expiresAt: vm.expires_at,
+          template: tpl,
+          sessions,
+          nowMs,
+        });
+        if (!decision) continue;
+        expirySummary.due += 1;
 
         await supabase
           .from("sessions")
-          .update({
-            ended_at: now.toISOString(),
-            status: "completed",
-            disconnect_reason: windowEnded ? "lab_window_expired" : "lab_minutes_exhausted",
-          })
+          .update({ ended_at: now.toISOString(), status: "completed", disconnect_reason: decision.reason })
           .eq("vm_id", vm.id)
           .eq("status", "active");
 
-        let azureOk = true;
+        let cloudOk = true;
         let stopDetail: string | null = null;
         if (vm.azure_vm_id) {
+          const cloudVm = { ...vm, azure_vm_id: vm.azure_vm_id };
           try {
-            azureOk = await stopCloudVm(supabase, azureFor, vm);
-            if (!azureOk) stopDetail = "cloud soft-stop returned false";
+            cloudOk = await stopCloudVm(supabase, azureFor, cloudVm);
+            if (!cloudOk) stopDetail = "cloud soft-stop returned false";
           } catch (e) {
-            azureOk = false;
+            cloudOk = false;
             stopDetail = e instanceof Error ? e.message : String(e);
-            console.error("wallet soft-expiry deallocate failed", e);
+            console.error("soft-expiry deallocate failed", e);
           }
-          if (!azureOk) {
+          if (!cloudOk) {
             try {
-              const recon = await isCloudAlreadySoftStopped(supabase, azureFor, vm);
-              if (recon.softStopped) {
-                azureOk = true;
+              const recon = await isCloudAlreadySoftStopped(supabase, azureFor, cloudVm);
+              // An Azure OS-level "stopped" VM is still allocated (billed) — only a
+              // real deallocate may clear it. AWS stopped is already soft-stopped.
+              const reconOk = recon.softStopped && recon.detail !== "azure mapped=stopped";
+              if (reconOk) {
+                cloudOk = true;
                 stopDetail = stopDetail ? `${stopDetail}; reconciled: ${recon.detail}` : `reconciled: ${recon.detail}`;
               }
             } catch (e) {
-              console.error("wallet soft-expiry reconcile failed", e);
+              console.error("soft-expiry reconcile failed", e);
             }
           }
         }
 
         const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
-        if (azureOk) {
+        // Honesty gate: mark Hub deallocated only when cloud soft-stop (or reconcile) succeeded.
+        if (cloudOk) {
           await markVmEnded(supabase, vm.id, {
             status: "deallocated",
             ended_by: SOURCE,
-            ended_reason: windowEnded ? "lab_window_expired" : "lab_minutes_exhausted",
+            ended_reason: decision.reason,
             ended_at: now.toISOString(),
           });
-          await notifyLearnerAndAdmins(supabase, {
-            userId: vm.user_id,
-            type: windowEnded ? "lab_expired" : "lab_minutes_exhausted",
-            title: windowEnded ? "Lab window ended — VM deallocated" : "Lab minutes used up — VM deallocated",
-            message: windowEnded
-              ? `Lab ${tpl.name} reached its end date (EOD IST). VM ${label} was deallocated. Resources are held, not deleted.`
-              : `Lab ${tpl.name} used all ${allocated} allocated minutes. VM ${label} was deallocated. Resources are held, not deleted.`,
-          });
-          results.push(
-            `Wallet soft-expiry ${label}: ${windowEnded ? "window ended" : "minutes exhausted"} → deallocated`,
-          );
-        } else {
-          console.error(JSON.stringify({
-            event: "wallet_soft_stop_failed",
+          const notice = softExpiryNotice(decision, label, tpl?.name ?? null);
+          await notifyLearnerAndAdmins(supabase, { userId: vm.user_id, ...notice });
+          expirySummary.deallocated += 1;
+          console.log(JSON.stringify({
+            event: "soft_expiry_deallocated",
             vm_id: vm.id,
+            prior_status: vm.status,
+            reason: decision.reason,
+            trigger: decision.trigger,
+            detail: stopDetail,
+          }));
+          results.push(`Soft-expiry ${label}: ${decision.trigger} (was ${vm.status}) → deallocated`);
+        } else {
+          expirySummary.stop_failed += 1;
+          console.error(JSON.stringify({
+            event: "soft_expiry_stop_failed",
+            vm_id: vm.id,
+            prior_status: vm.status,
+            reason: decision.reason,
+            trigger: decision.trigger,
             detail: stopDetail,
           }));
           results.push(
-            `Wallet soft-expiry ${label}: cloud stop failed — Hub status left as ${vm.status}${stopDetail ? ` [${stopDetail.slice(0, 120)}]` : ""}`,
+            `Soft-expiry ${label}: cloud stop failed — Hub status left as ${vm.status}${stopDetail ? ` [${stopDetail.slice(0, 120)}]` : ""}`,
           );
         }
       }
     } catch (e) {
-      console.error("Wallet soft-expiry sweep failed:", e);
+      console.error("Soft-expiry sweep failed:", e);
     }
 
     // 3b. Pre-expiry warning (T-15m): notify learner+admins once per lab window.
@@ -1238,7 +1287,7 @@ Deno.serve(async (req) => {
       const { data: soonExpiring } = await supabase
         .from("virtual_machines")
         .select("id, user_id, azure_vm_id, expires_at")
-        .in("status", ["running", "provisioning", "starting"])
+        .in("status", ["running", "provisioning", "starting", "idle"])
         .not("expires_at", "is", null)
         .gt("expires_at", now.toISOString())
         .lte("expires_at", warnHorizon)
@@ -1505,6 +1554,7 @@ Deno.serve(async (req) => {
         actions_taken: results.length,
         details: results,
         idle_timeout_minutes: IDLE_TIMEOUT_MINUTES,
+        soft_expiry: expirySummary,
       }),
       { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
