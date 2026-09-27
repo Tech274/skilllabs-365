@@ -6,7 +6,8 @@
  *     <meta> injected into index.html so the policy survives hosts that ignore
  *     header files),
  *   - `scripts/generate-headers.ts`, which writes `public/_headers` for the
- *     static host (Netlify/Cloudflare `_headers` syntax).
+ *     static host (Netlify/Cloudflare `_headers` syntax) and `vercel.json`
+ *     (Vercel headers + SPA rewrites, SCRUM-23).
  *
  * Scope note: these are document-level headers, so they cover every route —
  * student (`/student`, `/cloud-access/*`, `/lab/*`) and admin (`/admin/*`)
@@ -129,8 +130,60 @@ export function headersFile(opts: HeaderOptions = {}): string {
     "",
     "# Static assets are content-hashed and safe to cache immutably.",
     "/assets/*",
-    "  Cache-Control: public, max-age=31536000, immutable",
+    "  Cache-Control: " + IMMUTABLE_ASSET_CACHE,
     "",
   ];
   return lines.join("\n");
+}
+
+/** Long-lived cache for content-hashed Vite assets. */
+export const IMMUTABLE_ASSET_CACHE = "public, max-age=31536000, immutable";
+
+export interface VercelConfig {
+  $schema: string;
+  framework: "vite";
+  installCommand: string;
+  buildCommand: string;
+  outputDirectory: string;
+  cleanUrls: boolean;
+  trailingSlash: boolean;
+  rewrites: Array<{ source: string; destination: string }>;
+  headers: Array<{ source: string; headers: Array<{ key: string; value: string }> }>;
+}
+
+/**
+ * Renders `vercel.json` (SCRUM-23 host prep). Same production headers as
+ * `_headers`, plus the SPA fallback: Vercel serves real files from `dist/`
+ * first and rewrites every other path to `/index.html`, so deep links such as
+ * `/lab/<id>` or `/admin/cloud-reports` load the app instead of a 404.
+ */
+export function vercelConfig(opts: HeaderOptions = {}): VercelConfig {
+  const headers = securityHeaders({ ...opts, dev: false });
+  return {
+    $schema: "https://openapi.vercel.sh/vercel.json",
+    framework: "vite",
+    installCommand: "npm ci",
+    buildCommand: "npm run build",
+    outputDirectory: "dist",
+    cleanUrls: false,
+    trailingSlash: false,
+    // Missing hashed assets must 404 (not return index.html as JS), so the SPA
+    // fallback skips /assets/.
+    rewrites: [{ source: "/((?!assets/).*)", destination: "/index.html" }],
+    headers: [
+      {
+        source: "/(.*)",
+        headers: Object.entries(headers).map(([key, value]) => ({ key, value })),
+      },
+      {
+        source: "/assets/(.*)",
+        headers: [{ key: "Cache-Control", value: IMMUTABLE_ASSET_CACHE }],
+      },
+    ],
+  };
+}
+
+/** Serialised `vercel.json` exactly as committed (2-space JSON + newline). */
+export function vercelConfigFile(opts: HeaderOptions = {}): string {
+  return `${JSON.stringify(vercelConfig(opts), null, 2)}\n`;
 }
