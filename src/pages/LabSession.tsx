@@ -31,6 +31,7 @@ import { supabase } from "@/integrations/supabase/client";
 import {
   needsRemint,
   remintAndWaitRunning,
+  shouldEndOnCountdown,
   REMINT_CALM_COPY,
   REMINT_FAIL_CODE,
 } from "@/lib/lab-remint";
@@ -386,8 +387,10 @@ export default function LabSession() {
           return;
         }
         if (cancelled) return;
-        setReminting(false);
-        setVmStatus("running");
+        // SCRUM-21: refresh expires_at BEFORE flipping vmStatus. setVmStatus
+        // re-runs this effect (cancelling this pass), which used to drop the
+        // refresh and leave the pre-Leave expires_at on screen, so the countdown
+        // flipped to "Expired"/disconnected right after a successful remint.
         // P0c: refresh expires_at after remint reset on the server.
         try {
           const { data: refreshed } = await supabase
@@ -411,6 +414,12 @@ export default function LabSession() {
         } catch (e) {
           console.warn("[remint] expires_at refresh failed", e);
         }
+        if (cancelled) return;
+        setReminting(false);
+        // vmStatus → running re-runs this effect, and that pass mints the fresh
+        // Guac session. Minting here as well would race two create-session calls.
+        setVmStatus("running");
+        return;
       }
       if (!cancelled) await createGuacSession(vmId);
     })();
@@ -470,6 +479,8 @@ export default function LabSession() {
   }, []);
 
   // Countdown timer — wait for real expiresAt (never fake module-load 2h).
+  // SCRUM-21: a pre-remint expires_at is stale. While the machine is powered off
+  // or waking up, never end the session on it — Start resets it server-side.
   useEffect(() => {
     if (!session.expiresAt) {
       setTimeRemaining("—");
@@ -477,6 +488,10 @@ export default function LabSession() {
     }
     const interval = setInterval(() => {
       const remaining = new Date(session.expiresAt).getTime() - Date.now();
+      if (remaining <= 0 && !shouldEndOnCountdown({ remainingMs: remaining, reminting, vmStatus })) {
+        setTimeRemaining("—");
+        return;
+      }
       if (remaining <= 0) {
         setTimeRemaining("Expired");
         setConnectionState("disconnected");
@@ -489,7 +504,7 @@ export default function LabSession() {
       setTimeRemaining(`${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`);
     }, 1000);
     return () => clearInterval(interval);
-  }, [session.expiresAt]);
+  }, [session.expiresAt, reminting, vmStatus]);
 
   const toggleFullscreen = () => {
     if (!document.fullscreenElement) {
