@@ -56,3 +56,13 @@ describe("chunk / fetchAllForIds", () => {
     expect(res.data).toEqual(ids);
   });
 });
+
+describe("dedupeBy (offset-paging drift)", () => {
+  it("keeps the first row per key", async () => {
+    const { dedupeBy } = await import("@/lib/paged-query");
+    expect(dedupeBy([{ id: 1, v: "a" }, { id: 2, v: "b" }, { id: 1, v: "c" }], (r) => r.id)).toEqual([
+      { id: 1, v: "a" },
+      { id: 2, v: "b" },
+    ]);
+  });
+});

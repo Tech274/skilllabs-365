@@ -65,3 +65,19 @@ export async function fetchAllForIds<T, I>(
   }
   return { data: out, error: null, truncated };
 }
+
+/**
+ * Drop repeated rows by key (first wins). Offset paging is not snapshot
+ * consistent: an insert between pages shifts rows, so one can appear twice.
+ */
+export function dedupeBy<T>(rows: readonly T[], key: (row: T) => unknown): T[] {
+  const seen = new Set<unknown>();
+  const out: T[] = [];
+  for (const row of rows) {
+    const k = key(row);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(row);
+  }
+  return out;
+}
