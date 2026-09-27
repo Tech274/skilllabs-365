@@ -1,16 +1,43 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   interpretStopConfirm,
+  isFinalStopState,
   newStopPollBudget,
   pollCloudUntilFinal,
   POLL_INTERVAL_MS,
+  stopVmHonest,
 } from "./vm-stop.ts";
 
 Deno.test("stop-confirm: only final states confirm", () => {
   assertEquals(interpretStopConfirm("aws", "stopped").ok, true);
   assertEquals(interpretStopConfirm("aws", "stopped").pending, undefined);
   assertEquals(interpretStopConfirm("azure", "deallocated").ok, true);
-  assertEquals(interpretStopConfirm("azure", "stopped").ok, true);
+  assertEquals(isFinalStopState("azure", "deallocated"), true);
+  assertEquals(isFinalStopState("aws", "stopped"), true);
+});
+
+Deno.test("stop-confirm: Azure stopped is still allocated and stays pending", () => {
+  const stopped = interpretStopConfirm("azure", "stopped");
+  assertEquals(stopped.ok, false);
+  assertEquals(stopped.pending, true);
+  assertEquals(isFinalStopState("azure", "stopped"), false);
+});
+
+Deno.test("stopVmHonest refuses a guarded VM before any cloud call", async () => {
+  let cloudCalled = false;
+  const res = await stopVmHonest(
+    {},
+    async () => {
+      cloudCalled = true;
+      throw new Error("cloud resolver must not run");
+    },
+    { id: "bba27e8f-aaaa-bbbb-cccc-ddddeeeeffff", azure_vm_id: "i-0123456789abcdef0" },
+    { finalStatus: "deallocated", reason: "test", endedBy: "test" },
+  );
+  assertEquals(cloudCalled, false);
+  assertEquals(res.ok, false);
+  assertEquals(res.code, "VM_PROTECTED");
+  assertEquals(res.error, "VM_PROTECTED");
 });
 
 Deno.test("stop-confirm: transitional states are pending, never success", () => {
@@ -19,7 +46,7 @@ Deno.test("stop-confirm: transitional states are pending, never success", () => 
     assertEquals(aws.ok, false);
     assertEquals(aws.pending, true);
   }
-  for (const state of ["stopping", "deallocating"]) {
+  for (const state of ["stopping", "deallocating", "stopped"]) {
     const az = interpretStopConfirm("azure", state);
     assertEquals(az.ok, false);
     assertEquals(az.pending, true);

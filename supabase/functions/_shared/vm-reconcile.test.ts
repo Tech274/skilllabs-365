@@ -1,8 +1,10 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   effectiveReconcileDryRun,
+  planAzure,
   reconcilePersistence,
   reconcileWritesEnabled,
+  type ReconcileVm,
 } from "./vm-reconcile.ts";
 
 function withEnv(pairs: Record<string, string | null>, fn: () => void) {
@@ -55,6 +57,29 @@ Deno.test("vm-reconcile opt-in enables writes; body dry_run still forces a repor
     reconcilePersistence({ dryRun: false, drift: true, protected: false, promote: true }),
     "write",
   );
+});
+
+Deno.test("Azure stopped does not finalise a Hub stop as deallocated", () => {
+  const fresh = new Date().toISOString();
+  const vm: ReconcileVm = {
+    id: "vm-1",
+    status: "running",
+    azure_vm_id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/lab-1",
+    network_info: { stop_pending: { at: fresh, reason: "admin_stop", by: "admin" } },
+  };
+  const pending = planAzure(vm, { kind: "mapped", status: "stopped" }, Date.now());
+  assertEquals(pending.code, "HUB_STOP_PENDING");
+  assertEquals(pending.status, undefined);
+  assertEquals(pending.finaliseHubStop, undefined);
+
+  const done = planAzure(vm, { kind: "mapped", status: "deallocated" }, Date.now());
+  assertEquals(done.status, "deallocated");
+  assertEquals(done.finaliseHubStop?.reason, "admin_stop");
+
+  const external: ReconcileVm = { ...vm, network_info: {} };
+  const observed = planAzure(external, { kind: "mapped", status: "stopped" }, Date.now());
+  assertEquals(observed.status, "stopped");
+  assertEquals(observed.finaliseHubStop, undefined);
 });
 
 Deno.test("vm-reconcile dry-run does not write a protected or unchanged row", () => {

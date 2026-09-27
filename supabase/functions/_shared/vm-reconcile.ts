@@ -226,8 +226,8 @@ function inStartHold(vm: ReconcileVm, nowMs: number): boolean {
   return Number.isFinite(u) && nowMs - u < START_HOLD_MS;
 }
 
-/** Hub → stopped-ish transition for a cloud-confirmed stop. */
-function planStop(vm: ReconcileVm, cloud: string, target: "stopped" | "deallocated", nowMs: number, final: boolean): Plan {
+/** Hub → stopped-ish transition for a cloud-confirmed stop. `final` is false for Azure stopped. */
+export function planStop(vm: ReconcileVm, cloud: string, target: "stopped" | "deallocated", nowMs: number, final: boolean): Plan {
   if (vm.status === "starting" && inStartHold(vm, nowMs)) return { cloud_state: cloud, code: "START_IN_FLIGHT_HOLD" };
   if (!HUB_LIVE.has(vm.status)) return { cloud_state: cloud }; // already deallocated|stopped|failed → no status change
   const hubStop = stopPendingFresh(vm, nowMs);
@@ -271,7 +271,7 @@ function planAws(vm: ReconcileVm, d: AwsDesc, nowMs: number): Plan {
 }
 
 // deno-lint-ignore no-explicit-any
-function planAzure(vm: ReconcileVm, outcome: any, nowMs: number): Plan {
+export function planAzure(vm: ReconcileVm, outcome: any, nowMs: number): Plan {
   if (outcome.kind === "azure_unavailable") return { cloud_state: "unavailable", code: "VM_RECONCILE_CLOUD_UNAVAILABLE" };
   if (outcome.kind === "still_provisioning") return { cloud_state: "transitional" };
   if (outcome.kind === "promoted") {
@@ -285,7 +285,10 @@ function planAzure(vm: ReconcileVm, outcome: any, nowMs: number): Plan {
   }
   if (outcome.kind === "mapped") {
     const st = String(outcome.status);
-    if (st === "deallocated" || st === "stopped") return planStop(vm, st, st as "stopped" | "deallocated", nowMs, true);
+    // Same mapping as stop-confirm: only deallocated is final. stopped is still
+    // allocated, so a fresh Hub stop stays pending and is not written deallocated.
+    if (st === "deallocated") return planStop(vm, st, "deallocated", nowMs, true);
+    if (st === "stopped") return planStop(vm, st, "stopped", nowMs, false);
     if (st === "failed") {
       if (vm.status === "failed") return { cloud_state: st };
       return { cloud_state: st, status: "failed", endedReason: "external_terminate", externalKind: HUB_LIVE.has(vm.status) ? "vm.external_terminate" : undefined };

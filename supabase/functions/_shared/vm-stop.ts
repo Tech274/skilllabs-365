@@ -1,11 +1,14 @@
 // P2a-0 — Sweep guard. The ONLY place that writes a stop status to
 // public.virtual_machines. Stop-only: no TerminateInstances / Azure DELETE.
 //
-//   protectedVmIds()  — env VM_PROTECTED_IDS (comma UUIDs). Never hardcoded.
+//   protectedVmIds()  — VM_PROTECTED_IDS, matched with the same rules as the
+//                       held list (prefix, cloud id, Azure name). Never hardcoded.
 //   isSweepExempt()   — protected | persistent_in_window (one helper, no copies).
 //   auditSweep()      — admin_audit_logs + provisioning_events, throttled.
-//   stopVmHonest()    — cloud stop → describe → write status ONLY when the
-//                       cloud confirms stopping/stopped/deallocating/deallocated.
+//   stopVmHonest()    — refuses a guarded VM before any cloud call. Otherwise
+//                       cloud stop → describe → write status ONLY when the
+//                       cloud is FINAL: AWS "stopped", Azure "deallocated".
+//                       Azure "stopped" is still allocated and stays pending.
 
 import { resolveAzureRuntime } from "./cloud-providers/azure-runtime.ts";
 import { resolveAwsRuntime, stopAwsInstance, describeAwsInstance } from "./cloud-providers/aws-runtime.ts";
@@ -225,9 +228,11 @@ export async function auditSweep(admin: Admin, a: SweepAudit): Promise<void> {
 // when the cloud reports one of these. "stopping"/"deallocating" = accepted,
 // NOT confirmed: keep polling.
 export const AWS_FINAL = new Set(["stopped"]);
-export const AZURE_FINAL = new Set(["deallocated", "stopped"]);
+// Azure "stopped" is PowerState/stopped: the guest is down but the VM is still
+// allocated and still billing. Only "deallocated" confirms a deallocate.
+export const AZURE_FINAL = new Set(["deallocated"]);
 export const AWS_PENDING = new Set(["stopping"]);
-export const AZURE_PENDING = new Set(["deallocating", "stopping"]);
+export const AZURE_PENDING = new Set(["deallocating", "stopping", "stopped"]);
 
 export const POLL_INTERVAL_MS = 3_000;
 export const PER_VM_POLL_CAP_MS = 30_000;
@@ -349,7 +354,11 @@ export async function stopVmHonest(
   vm: SweepVm,
   opts: { finalStatus: "deallocated" | "failed"; reason: string; endedBy: string },
   budget: StopPollBudget = newStopPollBudget(), // default: full poll budget per call
-): Promise<{ ok: boolean; pending?: boolean; cloudState: string | null; error?: string }> {
+): Promise<{ ok: boolean; pending?: boolean; cloudState: string | null; error?: string; code?: "VM_PROTECTED" }> {
+  // Inside the writer, not only at the call site, so no caller can bypass it.
+  if (isVmGuarded(vm)) {
+    return { ok: false, cloudState: null, error: "VM_PROTECTED", code: "VM_PROTECTED" };
+  }
   if (!vm.azure_vm_id) return { ok: false, cloudState: "no_instance", error: "VM has no cloud instance id" };
   const provider = await providerOf(admin, vm.provider_account_id, vm.azure_vm_id);
   let stopError: string | undefined;
