@@ -10,11 +10,19 @@ Apps is a later option and is not covered here.
 | --- | --- |
 | `vercel.json` | Vite build → `dist/`, SPA fallback, production security headers, immutable cache for `/assets/*`. **Generated. Do not hand-edit.** |
 | `scripts/security-headers.ts` | Single source of truth for CSP / HSTS / frame-ancestors. `vercelConfig()` renders `vercel.json`. `headersFile()` renders `public/_headers`. |
-| `scripts/generate-headers.ts` | Runs on `prebuild`. Rewrites both files. |
+| `scripts/generate-headers.ts` | `npm run headers:generate` rewrites both files. `prebuild` (`--build`) refreshes only `public/_headers`, so a stale committed `vercel.json` still fails CI. |
 | `src/test/hosting-config.test.ts` | CI fails if either committed file drifts from the generator, or if the SPA fallback or headers regress. |
 
 After changing `scripts/security-headers.ts`, run `npm run headers:generate` and
-commit **both** `public/_headers` and `vercel.json`. Vercel reads `vercel.json`
+commit **both** `public/_headers` and `vercel.json`.
+
+### Headers Vercel adds that production does not send today
+Live `skillhub365.co.in` currently sends only HSTS (`max-age=31536000; includeSubDomains`),
+nosniff and Referrer-Policy. The CSP is a `<meta>` tag. At cutover `vercel.json` newly
+enforces `frame-ancestors 'none'`, `X-Frame-Options: DENY`, COOP `same-origin`, CORP
+`same-site`, `Permissions-Policy` and HSTS 2y **with `preload`**. Smoke these on the preview.
+COOP severs `window.opener` for cross-origin popups (e.g. `/oauth/notion/return`).
+Treat `preload` as a one-way door: do not submit the domain to the preload list without GO. Vercel reads `vercel.json`
 *before* the build runs, so only the committed file counts.
 
 ### SPA fallback
