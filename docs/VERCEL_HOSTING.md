@@ -25,6 +25,13 @@ COOP severs `window.opener` for cross-origin popups (e.g. `/oauth/notion/return`
 Treat `preload` as a one-way door: do not submit the domain to the preload list without GO. Vercel reads `vercel.json`
 *before* the build runs, so only the committed file counts.
 
+Also re-check on the preview (Riley, #51): `Permissions-Policy` does not list
+`keyboard-map` or `clipboard-*`, so the Guac iframe's `allow=` delegation relies
+on browser defaults — confirm the click-once typing gate, keyboard-map and
+clipboard in both Guac hosts. `microphone=()` blocks Guac audio input if anyone
+relies on it. `CSP_EXTRA_ORIGINS` only reaches the CSP header if `vercel.json`
+is regenerated with it set and committed.
+
 ### SPA fallback
 `/((?!assets/).*)` → `/index.html`. Vercel serves real files from `dist/`
 first. Every other path, e.g. `/lab/<id>` or `/admin/cloud-reports`, gets the

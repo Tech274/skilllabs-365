@@ -1,4 +1,6 @@
-import { coalesceRuns, dedupeBy, fetchAllForIds, fetchAllPages, type PageResult } from "@/lib/paged-query";
+import { coalesceRuns, debounceWithMaxWait, dedupeBy, fetchAllForIds, fetchAllPages, type PageResult } from "@/lib/paged-query";
+import { parseStopRetry, stopRetryBadge } from "@/lib/stop-retry";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { DashboardLayout } from "@/components/DashboardLayout";
 import { StatusBadge } from "@/components/StatusBadge";
 import { Input } from "@/components/ui/input";
@@ -17,6 +19,7 @@ import {
   Info,
   Monitor,
   Play,
+  AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { VMStatus } from "@/lib/types";
@@ -68,6 +71,8 @@ interface VMRow {
   labUsername?: string | null;
   instanceName?: string | null;
   labName?: string | null;
+  /** Cleanup stop-retry marker lives here (see src/lib/stop-retry.ts). */
+  ended_reason?: string | null;
   /** Template duration / window snapshot for wallet + expiry display. */
   templateDuration?: number | null;
   templateIsPersistent?: boolean | null;
@@ -151,6 +156,12 @@ function statusLabel(s: string): string {
 
 /** Realtime INSERT bursts (e.g. load tests) collapse into one fleet reload. */
 const INSERT_RELOAD_DEBOUNCE_MS = 2000;
+/** ...but a steady stream of INSERTs still reloads at least this often (Riley #59). */
+const INSERT_RELOAD_MAX_WAIT_MS = 10_000;
+
+function formatClock(d: Date): string {
+  return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
 
 export default function VirtualMachines() {
   const navigate = useNavigate();
@@ -167,6 +178,12 @@ export default function VirtualMachines() {
   const [bulkDeleteConfirmText, setBulkDeleteConfirmText] = useState("");
   const [deleteConfirmVmId, setDeleteConfirmVmId] = useState<string | null>(null);
   const [deleteConfirmText, setDeleteConfirmText] = useState("");
+  /** Last successful fleet load; shown in the stale banner. */
+  const [lastLoadedAt, setLastLoadedAt] = useState<Date | null>(null);
+  /** Set when the latest refresh failed and the list on screen is older. */
+  const [staleError, setStaleError] = useState<string | null>(null);
+  /** Wallet usage failed on the latest load → Available Mins shown as unknown. */
+  const [usageUnavailable, setUsageUnavailable] = useState(false);
 
   // Honor Overview KPI deep-links: /vms?status=running|idle|active|...
   useEffect(() => {
@@ -214,6 +231,8 @@ export default function VirtualMachines() {
       // Review follow-up: keep the last good list (a failed page used to blank
       // the whole fleet with a console-only error).
       console.error("Failed to load virtual_machines:", error.message);
+      // Inline banner (stays until the next good load) + a toast for attention.
+      setStaleError(error.message);
       toast({
         title: "Could not refresh the VM list",
         description: `${error.message} — showing the last loaded list.`,
@@ -318,6 +337,7 @@ export default function VirtualMachines() {
       // A failed usage chunk would under-count used minutes and OVERSTATE
       // Available Mins — show unknown instead of a wrong number.
       const usageFailed = Boolean(usageResult.error);
+      setUsageUnavailable(usageFailed);
       if (usageFailed) {
         console.error("Failed to load wallet sessions:", usageResult.error?.message);
         toast({
@@ -387,6 +407,8 @@ export default function VirtualMachines() {
     }
 
     setVms(rows);
+    setStaleError(null);
+    setLastLoadedAt(new Date());
     setLoading(false);
   }, []);
 
@@ -395,14 +417,13 @@ export default function VirtualMachines() {
   // (latest state wins, no out-of-order setVms), and realtime INSERT bursts are
   // debounced instead of each triggering a full reload.
   const fetchVMs = useMemo(() => coalesceRuns(loadVMsOnce), [loadVMsOnce]);
-  const insertReloadTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const scheduleReload = useCallback(() => {
-    if (insertReloadTimer.current) clearTimeout(insertReloadTimer.current);
-    insertReloadTimer.current = setTimeout(() => {
-      insertReloadTimer.current = null;
-      void fetchVMs();
-    }, INSERT_RELOAD_DEBOUNCE_MS);
-  }, [fetchVMs]);
+  // 2 s trailing debounce with a 10 s max wait: bursts collapse into one
+  // reload, and a steady INSERT stream still shows new rows every 10 s.
+  const insertReload = useMemo(
+    () => debounceWithMaxWait(() => void fetchVMs(), INSERT_RELOAD_DEBOUNCE_MS, INSERT_RELOAD_MAX_WAIT_MS),
+    [fetchVMs],
+  );
+  const scheduleReload = insertReload.schedule;
 
   const handleStopVM = async (vmId: string) => {
     setActionLoading(vmId);
@@ -578,9 +599,9 @@ export default function VirtualMachines() {
 
     return () => {
       supabase.removeChannel(channel);
-      if (insertReloadTimer.current) clearTimeout(insertReloadTimer.current);
+      insertReload.cancel();
     };
-  }, [fetchVMs, scheduleReload]);
+  }, [fetchVMs, scheduleReload, insertReload]);
 
   // Admin Allocation does not use learner use-provisioning — poll check-vm-status
   // for rows still in provisioning/starting so cloud Running flips Hub to running.
@@ -629,6 +650,11 @@ export default function VirtualMachines() {
     }, POLL_MS);
     return () => window.clearInterval(timer);
   }, [provisioningIdsKey]);
+
+  const needsAdminCount = useMemo(
+    () => vms.filter((vm) => parseStopRetry(vm.ended_reason)?.kind === "needs_admin").length,
+    [vms],
+  );
 
   const filtered = vms.filter((vm) => {
     const q = search.toLowerCase();
@@ -683,6 +709,40 @@ export default function VirtualMachines() {
             <RotateCcw className="h-3.5 w-3.5" /> Refresh
           </Button>
         </div>
+
+        {staleError && (
+          <Alert variant="destructive" data-testid="vms-stale-banner">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Showing an older list — the latest refresh failed</AlertTitle>
+            <AlertDescription className="flex flex-wrap items-center gap-2">
+              <span>
+                {lastLoadedAt ? `Data as of ${formatClock(lastLoadedAt)} IST.` : "No list has loaded yet."} {staleError}
+              </span>
+              <Button variant="outline" size="sm" className="h-7" onClick={fetchVMs}>
+                Retry
+              </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+        {!staleError && usageUnavailable && (
+          <Alert data-testid="vms-usage-banner">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>Available minutes unavailable</AlertTitle>
+            <AlertDescription>Session usage could not be loaded, so Available Mins shows “—” instead of a wrong number.</AlertDescription>
+          </Alert>
+        )}
+        {needsAdminCount > 0 && (
+          <Alert variant="destructive" data-testid="vms-needs-admin-banner">
+            <AlertTriangle className="h-4 w-4" />
+            <AlertTitle>
+              {needsAdminCount} machine{needsAdminCount === 1 ? "" : "s"} need{needsAdminCount === 1 ? "s" : ""} attention — automatic stop failed
+            </AlertTitle>
+            <AlertDescription>
+              Cleanup gave up after repeated cloud stop failures and stopped retrying. Check the instance in the cloud
+              console, then Stop or Delete it here (either clears the flag).
+            </AlertDescription>
+          </Alert>
+        )}
 
         <div className="flex items-start gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground">
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
@@ -902,6 +962,23 @@ export default function VirtualMachines() {
                       </td>
                       <td className="px-5 py-3">
                         <StatusBadge status={vm.status as VMStatus} />
+                        {(() => {
+                          const badge = stopRetryBadge(vm.ended_reason);
+                          if (!badge) return null;
+                          return (
+                            <div
+                              title={badge.title}
+                              className={cn(
+                                "mt-1 inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium",
+                                badge.tone === "destructive"
+                                  ? "bg-destructive/10 text-destructive"
+                                  : "bg-warning/10 text-warning",
+                              )}
+                            >
+                              <AlertTriangle className="h-3 w-3" /> {badge.label}
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td className="px-5 py-3 whitespace-nowrap">
                         {vm.availableMinutes == null ? (
