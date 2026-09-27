@@ -132,11 +132,20 @@ export type GuacConnectResult = {
   };
 };
 
-/** Confirm that Guacamole has a live remote tunnel before revealing its frame. */
-export async function checkGuacSessionReady(sessionId: string): Promise<boolean> {
-  const { data, error } = await supabase.functions.invoke("guacamole-proxy", {
-    body: { action: "connection-health", session_id: sessionId },
-  });
+/**
+ * Confirm that Guacamole has a live remote tunnel before revealing its frame.
+ * sessionId is the DB session id from create-session (never a route param);
+ * when it is not known yet, poll by vm_id only.
+ */
+export async function checkGuacSessionReady(
+  sessionId: string | null | undefined,
+  vmId?: string | null,
+): Promise<boolean> {
+  if (!sessionId && !vmId) return false;
+  const body: Record<string, string> = { action: "connection-health" };
+  if (sessionId) body.session_id = sessionId;
+  if (vmId) body.vm_id = vmId;
+  const { data, error } = await supabase.functions.invoke("guacamole-proxy", { body });
   if (error || data?.error) {
     throw new Error(await readFunctionError(error, data));
   }
@@ -149,7 +158,7 @@ const LEARNER_HOLD =
 export function learnerConnectHoldCopy(raw?: string | null): string {
   if (!raw) return LEARNER_HOLD;
   // Wallet / Start-gate messages are intentional learner copy — keep them.
-  if (/lab minutes used up|date window has ended|start is blocked|minutes are granted/i.test(raw)) {
+  if (/no minute quota available|access period has ended|lab minutes used up|date window has ended|start is blocked|minutes are granted/i.test(raw)) {
     return raw.length > 280 ? raw.slice(0, 277) + "…" : raw;
   }
   // Never surface Guac / Azure / RDP / SSH / provider strings to learners

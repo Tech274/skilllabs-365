@@ -53,10 +53,22 @@ export const REMINT_FAIL_CODE = "REMINT_START_FAILED";
 export const REMINT_CALM_COPY =
   "Your lab machine is still waking up. Nothing was lost — please try Connect again in a moment.";
 
+/** Thrown when the wallet refuses remint; `message` is the learner-facing toast. */
+export class WalletBlockedError extends Error {
+  code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.code = code;
+    this.name = "WalletBlockedError";
+  }
+}
+
 export type RemintOptions = {
   vmId: string;
-  /** Kept for callers; start-vm resolves template/wallet server-side. */
+  /** Required for persistent remint via provision-lab. */
   labTemplateId?: string | null;
+  /** Persistent labs remint through provision-lab (same path as learner Connect). */
+  isPersistent?: boolean;
   /** Skip the start call when the machine is already powering on. */
   alreadyStarting?: boolean;
   timeoutMs?: number;
@@ -72,29 +84,38 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
   const pollMs = opts.pollMs ?? 5_000;
 
-  if (!opts.alreadyStarting) {
+    if (!opts.alreadyStarting) {
     if (!opts.vmId) throw new Error(REMINT_FAIL_CODE);
     opts.onPhase?.("starting");
-    const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
-      body: { action: "start-vm", vm_id: opts.vmId, reason: "learner_start" },
-    });
+    const usePersistentRemint = Boolean(opts.isPersistent && opts.labTemplateId);
+    const { data, error } = usePersistentRemint
+      ? await supabase.functions.invoke("provision-lab", {
+          body: { lab_template_id: opts.labTemplateId, vm_id: opts.vmId },
+        })
+      : await supabase.functions.invoke("cleanup-idle-labs", {
+          body: { action: "start-vm", vm_id: opts.vmId, reason: "learner_start" },
+        });
     if (error || data?.error) {
       const payload = await readFunctionErrorPayload(error, data);
       const msg = await readFunctionError(error, data);
       const code = String(payload?.code ?? data?.code ?? "");
-      console.error("[remint] start-vm failed:", msg, code, payload?.detail, payload?.aws_state);
+      console.error("[remint] start failed:", msg, code, payload?.detail, payload?.aws_state);
       // Surface wallet blocks so the dashboard can show calm copy.
       if (code === "LAB_MINUTES_EXHAUSTED" || code === "LAB_WINDOW_ENDED") {
-        throw new Error(String(payload?.error ?? data?.error ?? msg));
+        throw new WalletBlockedError(code, String(payload?.error ?? data?.error ?? msg));
       }
       // P0b: never swallow into bare REMINT_START_FAILED — toast must show
       // detail / code / aws_state from the edge function body.
       throw new Error(msg || REMINT_FAIL_CODE);
     }
-    // Guard: start-vm must return the SAME vm_id (never a new allocation).
+    // Guard: must return the SAME vm_id (never a new allocation).
+    if (usePersistentRemint && !data?.vm_id) {
+      console.error("[remint] provision-lab returned no vm_id", opts.vmId);
+      throw new Error("REMINT_VM_MISMATCH: no vm_id in response");
+    }
     if (data?.vm_id && String(data.vm_id) !== String(opts.vmId)) {
-      console.error("[remint] start-vm returned different vm_id", data.vm_id, opts.vmId);
-      throw new Error(REMINT_FAIL_CODE);
+      console.error("[remint] start returned different vm_id", data.vm_id, opts.vmId);
+      throw new Error(`REMINT_VM_MISMATCH: requested ${opts.vmId}, got ${data.vm_id}`);
     }
   }
 

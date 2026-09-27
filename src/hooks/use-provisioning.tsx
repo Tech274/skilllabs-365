@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useCallback, useRef } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
-import { readFunctionError } from "@/lib/function-error";
+import { readFunctionError, readFunctionErrorPayload } from "@/lib/function-error";
 import { useNavigate } from "react-router-dom";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 import {
@@ -157,7 +157,12 @@ export function ProvisioningProvider({ children }: { children: React.ReactNode }
         body: { action: "cancel-provisioning", vm_id: state.vmId },
         headers: idempotencyHeaders(`cancel:${state.vmId}`),
       });
-      if (error || data?.error) throw new Error(await readFunctionError(error, data));
+      if (error || data?.error) {
+        const msg = await readFunctionError(error, data);
+        const code = (data as { code?: string } | null)?.code
+          ?? (error ? (await readFunctionErrorPayload(error))?.code : undefined);
+        throw new Error(code && !msg.includes(String(code)) ? `${code}: ${msg}` : msg);
+      }
       const outcome = parseCancelResponse(state.vmId, state.labId, data);
       setLastCancel(outcome);
       toast(cancelToastCopy(outcome));

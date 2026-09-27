@@ -32,9 +32,11 @@ import {
   needsRemint,
   remintAndWaitRunning,
   shouldEndOnCountdown,
+  WalletBlockedError,
   REMINT_CALM_COPY,
   REMINT_FAIL_CODE,
 } from "@/lib/lab-remint";
+import { fetchVmWalletBlock } from "@/lib/lab-wallet";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
 import { LearnerProvisioningPanel } from "@/components/LearnerProvisioningPanel";
@@ -65,9 +67,14 @@ const MAX_GUAC_CHROME_RETRIES = 1;
  * Readiness comes ONLY from the server (guacamole-proxy connection-health):
  * guac.* is cross-origin, so its DOM is opaque and must never be inspected.
  */
+/** 15j.3: Guac tunnels can be short-lived — poll fast from the moment src is set. */
+const GUAC_DESKTOP_FAST_POLL_MS = 500;
+const GUAC_DESKTOP_FAST_WINDOW_MS = 30_000;
 const GUAC_DESKTOP_POLL_MS = 1_000;
-const GUAC_DESKTOP_CLEAN_TICKS = 3;
-const GUAC_DESKTOP_CONFIRM_TIMEOUT_MS = 30_000;
+const GUAC_DESKTOP_CLEAN_TICKS = 2;
+const GUAC_DESKTOP_CONFIRM_TIMEOUT_MS = 90_000;
+/** On confirm timeout: ONE fresh create-session (no end-session), then calm error. */
+const MAX_CONFIRM_TIMEOUT_REMINTS = 1;
 /** Gateway says the lab port is not answering yet — calm Hub wait, then retry. */
 const MAX_PORT_WAIT_RETRIES = 6;
 const PORT_WAIT_RETRY_MS = 10_000;
@@ -162,6 +169,8 @@ export default function LabSession() {
   const guacChromeRetryRef = useRef(0);
   const iframeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const desktopSettleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const startDesktopPollRef = useRef<((url: string, sessionId: string | null) => void) | null>(null);
+  const confirmRemintRef = useRef(0);
   const guacAttemptRef = useRef(0);
   const guacFailureInFlightRef = useRef(false);
   const portWaitRetryRef = useRef(0);
@@ -223,6 +232,8 @@ export default function LabSession() {
       setConnectionState("error");
       setLastError("secure_desktop_frame_timeout");
     }, 20000);
+    // 15j.3: start connection-health on the SAME tick src is set — never wait for onLoad.
+    startDesktopPollRef.current?.(data.iframe_url, data.session_id ?? null);
   }, []);
 
   /**
@@ -359,7 +370,27 @@ export default function LabSession() {
     }
     if (!vmFactsLoaded) return;
     let cancelled = false;
+    const showWalletBlock = (code: string, message: string) => {
+      setReminting(false);
+      setLastError(message);
+      setConnectionState("error");
+      toast({
+        title: code === "LAB_WINDOW_ENDED" ? "Lab access period ended" : "No minutes left",
+        description: message,
+        variant: "destructive",
+      });
+    };
     (async () => {
+      try {
+        const block = await fetchVmWalletBlock(vmId);
+        if (cancelled) return;
+        if (block) {
+          showWalletBlock(block.code, block.message);
+          return;
+        }
+      } catch (e) {
+        console.warn("[wallet] pre-check failed; server gate still enforces", e);
+      }
       if (needsRemint(vmStatus)) {
         setReminting(true);
         setConnectionState("connecting");
@@ -367,11 +398,16 @@ export default function LabSession() {
           await remintAndWaitRunning({
             vmId,
             labTemplateId,
+            isPersistent: isPersistentLab,
             alreadyStarting: vmStatus === "starting",
           });
         } catch (err) {
           console.error("[remint] failed:", err);
           if (cancelled) return;
+          if (err instanceof WalletBlockedError) {
+            showWalletBlock(err.code, err.message);
+            return;
+          }
           setReminting(false);
           const detail = err instanceof Error ? err.message : REMINT_FAIL_CODE;
           setLastError(detail);
@@ -435,7 +471,7 @@ export default function LabSession() {
     return () => {
       cancelled = true;
     };
-  }, [vmId, vmFactsLoaded, vmStatus, labTemplateId, createGuacSession]);
+  }, [vmId, vmFactsLoaded, vmStatus, labTemplateId, isPersistentLab, createGuacSession]);
 
   // Idle activity tracking: detect mouse/keyboard near iframe and update last_activity_at
   useEffect(() => {
@@ -623,14 +659,31 @@ export default function LabSession() {
    * (guacamole-proxy connection-health), which reports ready:true only while a
    * live remote connection exists for this session.
    */
-  const handleIframeLoad = () => {
+  /**
+   * 15j.3 confirm timeout: the tunnel may still be live, so NEVER end-session
+   * here. Blank the frame and mint ONE fresh create-session.
+   */
+  const handleConfirmTimeout = async () => {
     if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
-    if (!isTokenizedGuacUrl(guacamoleUrl) || !/#\/client\//.test(guacamoleUrl)) {
-      void handleGuacChromeFailure();
+    if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
+    iframeRef.current?.removeAttribute("src");
+    setGuacIframeUrl("");
+    setDesktopConfirmed(false);
+    if (vmId && confirmRemintRef.current < MAX_CONFIRM_TIMEOUT_REMINTS) {
+      confirmRemintRef.current += 1;
+      setAwaitingDesktop(true);
+      setConnectionState("connecting");
+      setLastError(null);
+      await createGuacSession(vmId);
       return;
     }
-    setIframeLoadFailed(false);
-    setAwaitingDesktop(true);
+    setAwaitingDesktop(false);
+    setIframeLoadFailed(true);
+    setConnectionState("error");
+    setLastError("secure_desktop_login_wall");
+  };
+
+  const startDesktopPoll = (url: string, sessionId: string | null) => {
     if (desktopSettleRef.current) clearTimeout(desktopSettleRef.current);
     const attempt = guacAttemptRef.current;
     const startedAt = Date.now();
@@ -638,14 +691,13 @@ export default function LabSession() {
 
     const pollDesktop = async () => {
       if (attempt !== guacAttemptRef.current) return;
-      if (!isTokenizedGuacUrl(guacamoleUrl) || !/#\/client\//.test(guacamoleUrl)) {
+      if (!isTokenizedGuacUrl(url) || !/#\/client\//.test(url)) {
         void handleGuacChromeFailure();
         return;
       }
-
       let tunnelReady = false;
       try {
-        tunnelReady = dbSessionIdRef.current ? await checkGuacSessionReady(dbSessionIdRef.current) : false;
+        tunnelReady = await checkGuacSessionReady(sessionId ?? dbSessionIdRef.current, vmId ?? null);
       } catch {
         tunnelReady = false;
       }
@@ -653,20 +705,35 @@ export default function LabSession() {
 
       cleanTicks = tunnelReady ? cleanTicks + 1 : 0;
       if (cleanTicks >= GUAC_DESKTOP_CLEAN_TICKS) {
+        if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
+        setIframeLoadFailed(false);
         setDesktopConfirmed(true);
         setConnectionState("connected");
         setAwaitingDesktop(false);
         guacChromeRetryRef.current = 0;
+        confirmRemintRef.current = 0;
         return;
       }
-      // Never ready within the window == login wall / dead tunnel: remint calmly.
-      if (Date.now() - startedAt >= GUAC_DESKTOP_CONFIRM_TIMEOUT_MS) {
-        void handleGuacChromeFailure();
+      const elapsed = Date.now() - startedAt;
+      if (elapsed >= GUAC_DESKTOP_CONFIRM_TIMEOUT_MS) {
+        void handleConfirmTimeout();
         return;
       }
-      desktopSettleRef.current = setTimeout(() => { void pollDesktop(); }, GUAC_DESKTOP_POLL_MS);
+      const delay = elapsed < GUAC_DESKTOP_FAST_WINDOW_MS ? GUAC_DESKTOP_FAST_POLL_MS : GUAC_DESKTOP_POLL_MS;
+      desktopSettleRef.current = setTimeout(() => { void pollDesktop(); }, delay);
     };
     void pollDesktop();
+  };
+  startDesktopPollRef.current = startDesktopPoll;
+
+  /** onLoad is only a shell signal; the poll is already running from src-set. */
+  const handleIframeLoad = () => {
+    if (iframeTimerRef.current) clearTimeout(iframeTimerRef.current);
+    if (!isTokenizedGuacUrl(guacamoleUrl) || !/#\/client\//.test(guacamoleUrl)) {
+      void handleGuacChromeFailure();
+      return;
+    }
+    setIframeLoadFailed(false);
   };
 
   /**
@@ -683,9 +750,7 @@ export default function LabSession() {
         return;
       }
       try {
-        const tunnelReady = dbSessionIdRef.current
-          ? await checkGuacSessionReady(dbSessionIdRef.current)
-          : false;
+        const tunnelReady = await checkGuacSessionReady(dbSessionIdRef.current, vmId ?? null);
         if (!tunnelReady) void handleGuacChromeFailure();
       } catch {
         void handleGuacChromeFailure();
