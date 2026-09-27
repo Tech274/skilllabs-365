@@ -36,7 +36,8 @@ import {
   REMINT_CALM_COPY,
   REMINT_FAIL_CODE,
 } from "@/lib/lab-remint";
-import { fetchVmWalletBlock } from "@/lib/lab-wallet";
+import { fetchVmWalletBlock, shouldRunClientWalletPrecheck } from "@/lib/lab-wallet";
+import { learnerLeaveNotice } from "@/lib/learner-leave";
 import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 import { ProvisioningTimeline } from "@/components/ProvisioningTimeline";
 import { LearnerProvisioningPanel } from "@/components/LearnerProvisioningPanel";
@@ -382,11 +383,13 @@ export default function LabSession() {
     };
     (async () => {
       try {
-        const block = await fetchVmWalletBlock(vmId);
-        if (cancelled) return;
-        if (block) {
-          showWalletBlock(block.code, block.message);
-          return;
+        if (shouldRunClientWalletPrecheck(isAdmin || isSuperAdmin)) {
+          const block = await fetchVmWalletBlock(vmId);
+          if (cancelled) return;
+          if (block) {
+            showWalletBlock(block.code, block.message);
+            return;
+          }
         }
       } catch (e) {
         console.warn("[wallet] pre-check failed; server gate still enforces", e);
@@ -471,7 +474,7 @@ export default function LabSession() {
     return () => {
       cancelled = true;
     };
-  }, [vmId, vmFactsLoaded, vmStatus, labTemplateId, isPersistentLab, createGuacSession]);
+  }, [vmId, vmFactsLoaded, vmStatus, labTemplateId, isPersistentLab, createGuacSession, isAdmin, isSuperAdmin]);
 
   // Idle activity tracking: detect mouse/keyboard near iframe and update last_activity_at
   useEffect(() => {
@@ -800,27 +803,19 @@ export default function LabSession() {
     setDesktopConfirmed(false);
     setAwaitingDesktop(false);
 
-    let walletNote = "Machine soft-stopped (not deleted). Start resumes the same lab when minutes remain.";
+    let notice = learnerLeaveNotice(null);
     if (vmId) {
       try {
-        const { data } = await supabase.functions.invoke("cleanup-idle-labs", {
+        const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
           body: { action: "learner-leave", vm_id: vmId, reason: "learner_leave" },
         });
-        const w = data?.wallet as
-          | { allocated_minutes?: number; used_minutes?: number; remaining_minutes?: number }
-          | undefined;
-        if (w && typeof w.remaining_minutes === "number" && typeof w.allocated_minutes === "number") {
-          const used = typeof w.used_minutes === "number" ? w.used_minutes : w.allocated_minutes - w.remaining_minutes;
-          walletNote = `${w.allocated_minutes} − ${used} = ${w.remaining_minutes} minutes remaining. Machine soft-stopped (not deleted).`;
-        }
+        if (error) console.error("Leave soft-stop did not confirm:", error);
+        notice = learnerLeaveNotice(error ? null : data);
       } catch (err) {
-        console.error("Failed to soft-stop lab on Leave:", err);
+        console.error("Leave soft-stop did not confirm:", err);
       }
     }
-    toast({
-      title: "Left the lab",
-      description: walletNote,
-    });
+    toast(notice);
     navigate("/labs");
   };
 

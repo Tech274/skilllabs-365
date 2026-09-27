@@ -28,7 +28,7 @@ import {
 } from "../_shared/azure-public-ip.ts";
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
 import { findResumableVm, LIVE_VM_STATUSES, RESUMABLE_VM_STATUSES, resolveRemintProvider, startCloudVm, waitForRunningAndIps } from "../_shared/cloud-providers/vm-resume.ts";
-import { buildWalletSnapshot, walletBlockMessage } from "../_shared/lab-wallet.ts";
+import { adminPersistentRemintSkipsOwnerWallet, buildWalletSnapshot, persistentStartClearsExpiresAt, walletBlockMessage } from "../_shared/lab-wallet.ts";
 
 const SOURCE = "provision-lab";
 
@@ -561,12 +561,18 @@ Deno.serve(async (req) => {
         : null;
 
     // --- Lab wallet Start gate --------------------------------------------
-    // Exhausted minutes (or ended date window) block Start/Launch with a clear
-    // message. Do NOT delete the VM — soft-stop / Leave already held it.
-    // Platform admin skips the wallet gate only for a fresh launch (no remint).
-    // Remint, including Admin Start, uses the VM owner's minutes.
+    // Exhausted minutes (or ended date window) block learner Start/Launch.
+    // Do NOT delete the VM — soft-stop / Leave already held it.
+    // Admin Start of an existing persistent VM is an override: allowed, audited,
+    // and the owner's wallet is not deducted. Learner remint stays enforced.
+    // A platform admin fresh Launch (no existing VM) still skips the gate.
     {
-      const skipWalletGate = isAdminCaller && !existingVmForGate;
+      const adminRemintOverride = adminPersistentRemintSkipsOwnerWallet(
+        isAdminCaller,
+        Boolean(template.is_persistent),
+        !!existingVmForGate,
+      );
+      const skipWalletGate = (isAdminCaller && !existingVmForGate) || adminRemintOverride;
       if (!skipWalletGate) {
         const { data: usage } = await supabase
           .from("sessions")
@@ -605,6 +611,47 @@ Deno.serve(async (req) => {
           idem = null;
           return new Response(JSON.stringify(failure), { status: 403, headers: traceHeaders });
         }
+      } else if (adminRemintOverride && existingVmForGate) {
+        const { data: usage } = await supabase
+          .from("sessions")
+          .select("started_at, ended_at")
+          .eq("user_id", walletOwnerId)
+          .eq("lab_template_id", template.id)
+          .limit(500);
+        const snap = buildWalletSnapshot({
+          duration: template.duration,
+          endDate: template.end_date,
+          isPersistent: template.is_persistent,
+          sessions: usage ?? [],
+        });
+        const blocked = walletBlockMessage(snap);
+        if (blocked) {
+          await recordAudit(supabase, {
+            actorId: userId,
+            actorType: "user",
+            action: "vm.admin_start_override",
+            entityType: "virtual_machine",
+            entityId: existingVmForGate.id,
+            outcome: "success",
+            correlationId,
+            changes: {
+              code: blocked.code,
+              wallet_deducted: false,
+              owner_user_id: walletOwnerId,
+              allocated_minutes: snap.allocatedMinutes,
+              used_minutes: snap.usedMinutes,
+              remaining_minutes: snap.remainingMinutes,
+            },
+            message: "Admin Start allowed despite the owner's wallet. Minutes were not deducted.",
+          });
+        }
+        await trace.skipped(SOURCE, "wallet-gate", "Admin persistent Start override — owner wallet not deducted", {
+          user_id: userId,
+          owner_user_id: walletOwnerId,
+          vm_id: existingVmForGate.id,
+          blocked: blocked?.code ?? null,
+          wallet_deducted: false,
+        });
       } else {
         await trace.skipped(SOURCE, "wallet-gate", "Platform admin fresh Launch skips wallet gate", {
           user_id: userId,
@@ -685,6 +732,8 @@ Deno.serve(async (req) => {
             ended_at: null,
             ended_by: null,
             ended_reason: null,
+            // #54: persistent Start clears a stale expires_at (admin path included).
+            ...persistentStartClearsExpiresAt(Boolean(template.is_persistent)),
           };
           if (resolvedProvider === "aws") baseUpdate.public_ip = null;
           await supabase.from("virtual_machines").update(baseUpdate).eq("id", existingVm.id);
@@ -701,6 +750,7 @@ Deno.serve(async (req) => {
                 ended_at: null,
                 ended_by: null,
                 ended_reason: null,
+                ...persistentStartClearsExpiresAt(Boolean(template.is_persistent)),
               }).eq("id", existingVm.id);
               finalStatus = "running";
             } else if (resolvedProvider === "aws") {

@@ -28,7 +28,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { readFunctionError } from "@/lib/function-error";
 import { remintAndWaitRunning, WalletBlockedError, REMINT_CALM_COPY, REMINT_FAIL_CODE } from "@/lib/lab-remint";
-import { fetchVmWalletBlock } from "@/lib/lab-wallet";
+import { fetchVmWalletBlock, shouldRunClientWalletPrecheck } from "@/lib/lab-wallet";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -453,8 +453,12 @@ export default function VirtualMachines() {
     setActionLoading(vm.id);
     try {
       if (vm.templateIsPersistent && vm.lab_template_id) {
-        const block = await fetchVmWalletBlock(vm.id);
-        if (block) throw new WalletBlockedError(block.code, block.message);
+        // Admin Start is an override: shouldRunClientWalletPrecheck(true) is false,
+        // so the owner's wallet does not block this path.
+        if (shouldRunClientWalletPrecheck(true)) {
+          const block = await fetchVmWalletBlock(vm.id);
+          if (block) throw new WalletBlockedError(block.code, block.message);
+        }
         await remintAndWaitRunning({
           vmId: vm.id,
           labTemplateId: vm.lab_template_id,

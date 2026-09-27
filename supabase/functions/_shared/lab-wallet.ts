@@ -88,3 +88,22 @@ export function walletBlockMessage(snapshot: WalletSnapshot): { code: string; er
   }
   return null;
 }
+
+/**
+ * Admin Start of an existing persistent VM skips the owner's wallet gate.
+ * Learner remint does not. Fresh admin Launch is a separate skip (no override audit).
+ */
+export function adminPersistentRemintSkipsOwnerWallet(
+  isAdmin: boolean,
+  isPersistent: boolean,
+  hasExistingVm: boolean,
+): boolean {
+  return isAdmin && isPersistent && hasExistingVm;
+}
+
+/** #54: a persistent Start must clear a stale expires_at so the next cron tick cannot undo it. */
+export function persistentStartClearsExpiresAt(
+  isPersistent: boolean,
+): { expires_at: null } | Record<string, never> {
+  return isPersistent ? { expires_at: null } : {};
+}

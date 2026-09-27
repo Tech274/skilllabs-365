@@ -119,6 +119,14 @@ export function startBlockedMessage(wallet: LabWallet): string {
   return "";
 }
 
+/**
+ * Admin Start is an override. The client wallet pre-check must not block it.
+ * Learners (adminOverride false) still get the pre-check; the server enforces too.
+ */
+export function shouldRunClientWalletPrecheck(adminOverride: boolean): boolean {
+  return !adminOverride;
+}
+
 export type VmWalletBlock = { code: "LAB_MINUTES_EXHAUSTED" | "LAB_WINDOW_ENDED"; message: string };
 
 /**

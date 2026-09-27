@@ -151,9 +151,12 @@ npm run functions:test    # deno test supabase/functions/
   entries are reported in `held_vm_warnings`. Put **both** the full Hub id and
   the cloud id of each held VM in the secret, e.g.
   `CLEANUP_HELD_VM_IDS=<full Hub UUID of the smoke VM>,<its i-… instance id or Azure VM name>`.
-  Explicit Start on a named VM still works. Stop, cancel, leave, and delete
-  return 423 `VM_PROTECTED` when the VM matches either list. There is no admin
-  bypass on delete: remove the VM from the held or protected list first.
+  Explicit Start on a named VM still works. Stop, cancel, and delete return
+  423 `VM_PROTECTED` when the VM matches either list. Learner leave on a guarded
+  VM returns 200 `{ success: true, kept_running: true, reason: "VM_PROTECTED" }`
+  after closing the session. There is no admin bypass on delete: remove the VM
+  from the held or protected list first. Admin Start of a persistent VM whose
+  owner is out of minutes is allowed, audited, and does not deduct that wallet.
 * VMs stuck in `provisioning` > 10 min → mark failed and delete the Azure resource
 * orphaned Guacamole users/connections with no live session → removed
 
@@ -236,7 +239,8 @@ Admin-authenticated POST to `cleanup-idle-labs`:
 | --- | --- |
 | `{}` | full auto-cleanup pass |
 | `{"action":"expiry-preview"}` | **dry run** — list VMs the soft-expiry sweep would deallocate now, with reason/trigger (no cloud calls, no writes) |
-| `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM after the cloud stop is confirmed (423 if guarded; 502 pending if the cloud state is not final) |
+| `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM after the cloud stop is confirmed (423 if guarded, and the session is not closed; 502 pending if the cloud state is not final). Azure `stopped` is not final |
+| `{"action":"learner-leave","vm_id":"…"}` | soft-stop. On a guarded VM: **200** `{ success: true, kept_running: true, reason: "VM_PROTECTED" }` — session closed, VM kept running |
 | `{"action":"delete-vm","vm_id":"…"}` | delete one VM. **423 `VM_PROTECTED`** if it matches `VM_PROTECTED_IDS`, `CLEANUP_HELD_VM_IDS`, or built-in `bba27e8f` (no admin bypass; remove it from the list first) |
 | `{"action":"purge-failed"}` | **410 TERMINATE_DISABLED** — stop-only, no row delete and no cloud terminate |
 | `{"action":"clear-guacamole"}` | drop all gateway connections |
