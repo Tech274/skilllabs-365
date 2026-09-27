@@ -155,31 +155,84 @@ export function resolveRemintProvider(args: {
   return { provider, source, mismatch };
 }
 
+/** Edge wall-clock headroom: the remint poll must return before the function limit. */
+export const AWS_REMINT_WAIT_CAP_MS = 110_000;
+
+export type WaitForRunningResult = {
+  running: boolean;
+  state: string;
+  publicIp: string | null;
+  privateIp: string | null;
+  elapsedMs: number;
+  /** True when the 110s cap was hit. Callers must not write running or IPs. */
+  capped?: boolean;
+};
+
 /**
  * After a successful Start, poll the cloud until Running and return the FRESH
  * IPs. Never reuse a deallocated-era public_ip.
+ *
+ * AWS waits at most 110s. Hitting the cap returns `starting` with null IPs
+ * (no running/IP write) and logs the elapsed time.
  */
 export async function waitForRunningAndIps(
   supabase: SupabaseLike,
   provider: string,
   vm: ResumableVm,
-  maxMs = 120_000,
-): Promise<{ running: boolean; state: string; publicIp: string | null; privateIp: string | null }> {
+  maxMs = AWS_REMINT_WAIT_CAP_MS,
+  deps: {
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+    describe?: (instanceId: string) => Promise<{ state: string; publicIp: string | null; privateIp: string | null }>;
+  } = {},
+): Promise<WaitForRunningResult> {
+  const now = deps.now ?? Date.now;
+  const sleepFn = deps.sleep ?? sleep;
+  const started = now();
+  const capMs = Math.min(AWS_REMINT_WAIT_CAP_MS, Math.max(0, maxMs));
+  const finish = (
+    result: Omit<WaitForRunningResult, "elapsedMs">,
+  ): WaitForRunningResult => {
+    const elapsedMs = now() - started;
+    const payload = {
+      event: result.capped ? "aws_remint_wait_capped" : "aws_remint_wait",
+      elapsed_ms: elapsedMs,
+      cap_ms: capMs,
+      state: result.state,
+      running: result.running,
+    };
+    if (result.capped) console.warn(JSON.stringify(payload));
+    else console.log(JSON.stringify(payload));
+    return { ...result, elapsedMs };
+  };
+
   if (provider !== "aws" || !vm.azure_vm_id) {
-    return { running: false, state: "starting", publicIp: null, privateIp: null };
+    return finish({ running: false, state: "starting", publicIp: null, privateIp: null });
   }
-  const rt = await resolveAwsRuntime(supabase, vm.provider_account_id);
-  if (vm.region) rt.defaultRegion = String(vm.region);
-  const deadline = Date.now() + maxMs;
-  let last = { state: "pending" as string, publicIp: null as string | null, privateIp: null as string | null };
-  while (Date.now() < deadline) {
-    const d = await describeAwsInstance(rt, String(vm.azure_vm_id));
-    last = { state: d.state, publicIp: d.publicIp, privateIp: d.privateIp };
-    if (d.state === "running" && d.publicIp) return { running: true, ...last };
-    if (d.state === "terminated" || d.state === "shutting-down" || d.state === "not-found") break;
-    await sleep(4_000);
+
+  const describe = deps.describe ?? (async (instanceId: string) => {
+    const rt = await resolveAwsRuntime(supabase, vm.provider_account_id);
+    if (vm.region) rt.defaultRegion = String(vm.region);
+    const d = await describeAwsInstance(rt, instanceId);
+    return { state: d.state, publicIp: d.publicIp, privateIp: d.privateIp };
+  });
+
+  const deadline = started + capMs;
+  while (now() < deadline) {
+    const d = await describe(String(vm.azure_vm_id));
+    // A describe that finishes after the cap is not a successful promotion.
+    if (now() >= deadline) break;
+    if (d.state === "running" && d.publicIp) {
+      return finish({ running: true, state: d.state, publicIp: d.publicIp, privateIp: d.privateIp });
+    }
+    if (d.state === "terminated" || d.state === "shutting-down" || d.state === "not-found") {
+      return finish({ running: false, state: d.state, publicIp: d.publicIp, privateIp: d.privateIp });
+    }
+    const remaining = deadline - now();
+    if (remaining <= 0) break;
+    await sleepFn(Math.min(4_000, remaining));
   }
-  return { running: false, ...last };
+  return finish({ running: false, state: "starting", publicIp: null, privateIp: null, capped: true });
 }
 
 /**

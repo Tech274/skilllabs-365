@@ -383,3 +383,33 @@ export function isVmGuarded(
   const resolved = lists ?? loadVmGuardLists();
   return isHeldVm(vm, resolved.heldEntries) || isHeldVm(vm, resolved.protectedEntries);
 }
+
+/**
+ * Explicit `delete-vm` refusal. There is no admin bypass: a VM matched by
+ * either list must be removed from the held/protected list before it can be
+ * deleted. Returns null when the delete may proceed.
+ */
+export function guardedDeleteBlock(
+  vm: { id?: string | null; azure_vm_id?: string | null },
+  lists?: VmGuardLists,
+): { error: "VM_PROTECTED"; code: "VM_PROTECTED"; vm_id: string | null } | null {
+  if (!isVmGuarded(vm, lists)) return null;
+  return { error: "VM_PROTECTED", code: "VM_PROTECTED", vm_id: vm.id ?? null };
+}
+
+/** 423 body for learner-leave on a guarded VM. The session row is already closed. */
+export function guardedLearnerLeaveBody(): {
+  error: "VM_PROTECTED";
+  code: "VM_PROTECTED";
+  session_closed: true;
+  vm_kept_running: true;
+  message: string;
+} {
+  return {
+    error: "VM_PROTECTED",
+    code: "VM_PROTECTED",
+    session_closed: true,
+    vm_kept_running: true,
+    message: "Session closed; VM kept running because it is protected.",
+  };
+}

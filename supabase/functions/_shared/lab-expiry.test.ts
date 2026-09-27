@@ -2,6 +2,8 @@ import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   decideSoftExpiry,
   expiresAtSkippedReason,
+  guardedDeleteBlock,
+  guardedLearnerLeaveBody,
   isHeldVm,
   isVmGuarded,
   isSoftExpiryStatus,
@@ -306,6 +308,64 @@ Deno.test("union guard: built-in smoke prefix bba27e8f stays protected with empt
     true,
   );
   assertEquals(isVmGuarded({ id: "cafe0000-1111-2222-3333-444455556666" }, lists), false);
+});
+
+Deno.test("delete-vm: a VM guarded by either list is 423, with no admin bypass", () => {
+  const empty = { protectedEntries: [] as string[], heldEntries: parseHeldVmList(undefined) };
+  const builtin = guardedDeleteBlock(
+    { id: "bba27e8f-1111-2222-3333-444455556666", azure_vm_id: "i-0other" },
+    empty,
+  );
+  assertEquals(builtin?.error, "VM_PROTECTED");
+  assertEquals(builtin?.code, "VM_PROTECTED");
+  assertEquals(builtin?.vm_id, "bba27e8f-1111-2222-3333-444455556666");
+
+  const fromProtected = {
+    protectedEntries: ["abc12345", "i-0123456789abcdef0", "lab-3f2a1b9c"],
+    heldEntries: ["bba27e8f"],
+  };
+  assertEquals(
+    guardedDeleteBlock({ id: "abc12345-1111-2222-3333-444455556666" }, fromProtected)?.code,
+    "VM_PROTECTED",
+  );
+  assertEquals(
+    guardedDeleteBlock({ id: "other", azure_vm_id: "i-0123456789abcdef0" }, fromProtected)?.code,
+    "VM_PROTECTED",
+  );
+  assertEquals(
+    guardedDeleteBlock({ id: "other", azure_vm_id: ARM }, fromProtected)?.code,
+    "VM_PROTECTED",
+  );
+
+  const fromHeld = {
+    protectedEntries: [] as string[],
+    heldEntries: ["bba27e8f", "def98765", "i-0held", "lab-heldname"],
+  };
+  assertEquals(
+    guardedDeleteBlock({ id: "def98765-0000-0000-0000-000000000000" }, fromHeld)?.code,
+    "VM_PROTECTED",
+  );
+  assertEquals(guardedDeleteBlock({ id: "x", azure_vm_id: "i-0held" }, fromHeld)?.code, "VM_PROTECTED");
+  assertEquals(
+    guardedDeleteBlock({
+      id: "x",
+      azure_vm_id: "/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/virtualMachines/lab-heldname",
+    }, fromHeld)?.code,
+    "VM_PROTECTED",
+  );
+
+  // The helper has no admin flag. An unguarded VM is the only delete that proceeds.
+  assertEquals(guardedDeleteBlock({ id: "cafe0000-1111-2222-3333-444455556666" }, empty), null);
+});
+
+Deno.test("learner-leave 423 says the session closed and the protected VM kept running", () => {
+  assertEquals(guardedLearnerLeaveBody(), {
+    error: "VM_PROTECTED",
+    code: "VM_PROTECTED",
+    session_closed: true,
+    vm_kept_running: true,
+    message: "Session closed; VM kept running because it is protected.",
+  });
 });
 
 Deno.test("SOFT_EXPIRY_MODE=dry-run never authorises a cloud stop", () => {

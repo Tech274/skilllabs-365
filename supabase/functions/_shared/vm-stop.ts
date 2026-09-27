@@ -152,7 +152,7 @@ export interface SweepAudit {
   actorType: "cron" | "watchdog" | "user" | "system";
   source: string;
   vm: SweepVm;
-  action: "vm.stop" | "vm.stop_skipped" | "vm.terminate_blocked";
+  action: "vm.stop" | "vm.stop_skipped" | "vm.delete_skipped" | "vm.terminate_blocked";
   result: "stopped" | "skipped" | "failed" | "blocked" | "pending";
   reason: string;
   priorStatus?: string | null;

@@ -14,6 +14,12 @@ Deno.test("held VMs are skipped by every automatic pass and purge", () => {
   const hits = src.split("isHeldVm(").length - 1;
   assert(hits >= 6, `expected >= 6 held checks, got ${hits}`);
   assert(src.includes("isVmGuarded("));
+  assert(src.includes("guardedDeleteBlock("));
+  assert(src.includes("guardedLearnerLeaveBody()"));
+  const deleteGuard = src.indexOf("guardedDeleteBlock(");
+  const adminDelete = src.indexOf('event: "vm_admin_delete"');
+  assert(deleteGuard > 0 && adminDelete > deleteGuard, "delete-vm must 423 before the cloud delete");
+  assert(src.slice(deleteGuard, adminDelete).includes("status: 423"));
   // purge-failed is stop-only: 410, no row delete
   assert(src.includes("TERMINATE_DISABLED"));
   assert(src.includes("status: 410"));

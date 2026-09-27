@@ -704,7 +704,13 @@ Deno.serve(async (req) => {
               }).eq("id", existingVm.id);
               finalStatus = "running";
             } else if (resolvedProvider === "aws") {
-              console.warn("remint: not Running within timeout", w.state);
+              // Cap path: status stays the `starting` write above. No running/IP write.
+              console.warn(JSON.stringify({
+                event: "aws_remint_not_running",
+                state: w.state,
+                elapsed_ms: w.elapsedMs,
+                capped: w.capped === true,
+              }));
             }
           } catch (e) {
             console.error("remint: post-start poll failed (status stays starting)", e);

@@ -18,6 +18,8 @@ import { buildWalletSnapshot, walletBlockMessage, type WalletSessionRow } from "
 import {
   decideSoftExpiry,
   expiresAtSkippedReason,
+  guardedDeleteBlock,
+  guardedLearnerLeaveBody,
   isHeldVm,
   isVmGuarded,
   parseHeldVmConfig,
@@ -554,7 +556,9 @@ Deno.serve(async (req) => {
     const azureFor = makeAzureResolver(supabase);
     const stopBudget = newStopPollBudget();
     // Held VMs (smoke VM, Guac hosts, Ops holds) are never touched by automatic
-    // passes or purge. Explicit admin/learner actions on a named VM still work.
+    // passes or purge. Stop, cancel, leave, and delete on a guarded VM return
+    // 423. There is no admin bypass on delete; remove the VM from the list first.
+    // Start on a named VM still works.
     const heldConfig = parseHeldVmConfig(Deno.env.get("CLEANUP_HELD_VM_IDS"));
     const heldVms = heldConfig.entries;
     for (const w of heldConfig.warnings) console.warn(JSON.stringify({ event: "held_vm_entry_warning", detail: w }));
@@ -880,7 +884,7 @@ Deno.serve(async (req) => {
         deleted: false,
         cloud_stop_ok: stopped,
         stop_detail: stopDetail,
-        ...(leaveGuarded ? { code: "VM_PROTECTED", error: "VM_PROTECTED" } : {}),
+        ...(leaveGuarded ? guardedLearnerLeaveBody() : {}),
         wallet,
         correlation_id: correlationId,
       }, leaveGuarded ? 423 : 200);
@@ -1184,6 +1188,28 @@ Deno.serve(async (req) => {
         });
       }
 
+      // Guarded delete returns 423 before any session close or cloud delete.
+      // There is no admin bypass; remove the VM from the held/protected list first.
+      if (action === "delete-vm") {
+        const blocked = guardedDeleteBlock(vm);
+        if (blocked) {
+          await auditSweep(supabase, {
+            actorId: auth.userId,
+            actorType: "user",
+            source: SOURCE,
+            vm: vm as SweepVm,
+            action: "vm.delete_skipped",
+            result: "skipped",
+            reason: "protected",
+            priorStatus: vm.status,
+            correlationId,
+          });
+          return new Response(JSON.stringify(blocked), {
+            status: 423, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+
       await supabase
         .from("sessions")
         .update({ ended_at: new Date().toISOString(), status: "completed" })
@@ -1435,7 +1461,7 @@ Deno.serve(async (req) => {
     }
 
     // purge-failed is stop-only: no cloud terminate and no row delete.
-    // Held/protected rows are not enumerated. Explicit admin delete-vm is unchanged.
+    // Held/protected rows are not enumerated. delete-vm on a guarded VM is 423.
     if (action === "purge-failed") {
       await auditSweep(supabase, {
         actorId: auth.userId,
