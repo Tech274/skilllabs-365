@@ -10,6 +10,7 @@ import {
   LineChart, Line, AreaChart, Area,
 } from "recharts";
 import { AiInsightCard } from "@/components/AiInsightCard";
+import { UsageSummaryPanel } from "@/components/UsageSummaryPanel";
 
 interface Report {
   id: string;
@@ -57,18 +58,22 @@ const DailyReports = () => {
     <DashboardLayout>
       <div className="space-y-6">
         <div>
-          <h1 className="text-2xl font-semibold text-foreground">Daily Reports</h1>
-          <p className="text-sm text-muted-foreground mt-1">Historical VM usage, quota status, and cleanup summary</p>
+          <h1 className="text-2xl font-semibold text-foreground">Usage Reports</h1>
+          <p className="text-sm text-muted-foreground mt-1">Live lab usage, plus daily snapshots when the daily-report job has run</p>
         </div>
+
+        <UsageSummaryPanel />
+
+        <h2 className="text-lg font-semibold text-foreground pt-2">Daily snapshots</h2>
 
         {loading ? (
           <div className="flex items-center justify-center py-20 text-muted-foreground">
-            <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading reports...
+            <Loader2 className="h-5 w-5 animate-spin mr-2" /> Loading snapshots...
           </div>
         ) : reports.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-20 text-muted-foreground">
+          <div className="flex flex-col items-center justify-center py-10 text-muted-foreground">
             <FileText className="h-10 w-10 mb-3 opacity-40" />
-            <p className="text-sm">No reports yet. Reports are generated daily at midnight.</p>
+            <p className="text-sm">No daily snapshots yet. They appear once the daily-report job is scheduled; live usage above does not depend on it.</p>
           </div>
         ) : (
           <>

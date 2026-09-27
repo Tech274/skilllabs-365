@@ -40,7 +40,7 @@ const cloudAndCostItems = [
   { title: "Cloud Quotas", url: "/admin/cloud-quotas", icon: Gauge },
   { title: "Cloud Reports", url: "/admin/cloud-reports", icon: FileText },
   { title: "Resource Providers", url: "/admin/resource-providers", icon: Cloud },
-  { title: "Daily Reports", url: "/reports", icon: FileText },
+  { title: "Usage Reports", url: "/reports", icon: FileText },
 ];
 
 const provisioningRoutes = [
