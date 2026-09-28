@@ -118,3 +118,40 @@ export function startBlockedMessage(wallet: LabWallet): string {
   }
   return "";
 }
+
+/**
+ * Admin Start is an override. The client wallet pre-check must not block it.
+ * Learners (adminOverride false) still get the pre-check; the server enforces too.
+ */
+export function shouldRunClientWalletPrecheck(adminOverride: boolean): boolean {
+  return !adminOverride;
+}
+
+export type VmWalletBlock = { code: "LAB_MINUTES_EXHAUSTED" | "LAB_WINDOW_ENDED"; message: string };
+
+/**
+ * Wallet gate for a specific VM, computed against the VM owner's usage
+ * (Admin Start / barge-in sees the learner's minutes). Null when remint is allowed.
+ * Date window is checked before minutes. Copy matches startBlockedMessage.
+ */
+export async function fetchVmWalletBlock(vmId: string): Promise<VmWalletBlock | null> {
+  const { supabase } = await import("@/integrations/supabase/client");
+  const { data: vm } = await supabase
+    .from("virtual_machines")
+    .select("user_id, lab_template_id, lab_templates(id, duration, is_persistent, start_date, end_date)")
+    .eq("id", vmId)
+    .maybeSingle();
+  if (!vm?.lab_template_id) return null;
+  const tpl = (Array.isArray(vm.lab_templates) ? vm.lab_templates[0] : vm.lab_templates) as WalletTemplate | null;
+  if (!tpl) return null;
+  const { data: sessions } = await supabase
+    .from("sessions")
+    .select("lab_template_id, started_at, ended_at")
+    .eq("user_id", vm.user_id)
+    .eq("lab_template_id", vm.lab_template_id)
+    .limit(500);
+  const wallet = buildLabWallet({ ...tpl, id: vm.lab_template_id }, (sessions ?? []) as WalletSession[]);
+  if (wallet.windowEnded) return { code: "LAB_WINDOW_ENDED", message: startBlockedMessage(wallet) };
+  if (wallet.exhausted) return { code: "LAB_MINUTES_EXHAUSTED", message: startBlockedMessage(wallet) };
+  return null;
+}

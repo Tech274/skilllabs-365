@@ -16,13 +16,23 @@ import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts
 import {
   resolveAwsRuntime,
   describeAwsInstance,
-  stopAwsInstance,
   terminateAwsInstance,
 } from "../_shared/cloud-providers/aws-runtime.ts";
 import {
   reconcileProvisioningAgainstAzure,
   applyPromoteToRunning,
 } from "../_shared/azure-reconcile.ts";
+import { isVmGuarded } from "../_shared/lab-expiry.ts";
+import {
+  auditSweep,
+  describeCloudState,
+  isSweepExempt,
+  markStopPending,
+  newStopPollBudget,
+  stopAuditResult,
+  stopVmHonest,
+} from "../_shared/vm-stop.ts";
+import { reconcileVms, reconcileWritesEnabled, type ReconcileVm } from "../_shared/vm-reconcile.ts";
 
 const SOURCE = "labs-watchdog";
 const WATCHDOG_USER = "00000000-0000-0000-0000-000000000000";
@@ -48,23 +58,6 @@ async function getAzureToken(tenantId: string, clientId: string, clientSecret: s
   });
   if (!res.ok) throw new Error(`Azure auth failed: ${await res.text()}`);
   return (await res.json()).access_token;
-}
-
-async function deallocateAzureVM(
-  token: string,
-  subscriptionId: string,
-  resourceGroup: string,
-  vmName: string,
-): Promise<boolean> {
-  const res = await fetch(
-    `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Compute/virtualMachines/${vmName}/deallocate?api-version=2024-03-01`,
-    { method: "POST", headers: { Authorization: `Bearer ${token}` } },
-  );
-  if (!res.ok) {
-    console.error(`watchdog: deallocate VM ${vmName} failed: ${await res.text()}`);
-    return false;
-  }
-  return true;
 }
 
 async function deleteAzureVM(
@@ -184,6 +177,8 @@ Deno.serve(async (req) => {
   const actions: string[] = [];
   const skipped: string[] = [];
   const hardDeleteAllowed = allowAutoTerminate();
+  const stopBudget = newStopPollBudget();
+  const reconcileApply = reconcileWritesEnabled();
 
   try {
     // 0. Pre-expiry warning (T-15m) — cheap, before soft-expiry cleanup.
@@ -242,8 +237,26 @@ Deno.serve(async (req) => {
         return entry;
       };
 
-      for (const vm of provisioningVms ?? []) {
+      if (reconcileApply) {
         try {
+          const rows = (provisioningVms ?? []).filter((vm) => !isVmGuarded(vm));
+          const recon = await reconcileVms(supabase, rows as ReconcileVm[], { source: SOURCE, dryRun: false });
+          for (const r of recon) {
+            if (r.changed) actions.push(`vm ${r.vm_id.slice(0, 8)}: reconciled ${r.before.status}→${r.after.status} (${r.cloud_state})`);
+            else if (r.code) skipped.push(`vm ${r.vm_id.slice(0, 8)}: ${r.code}`);
+          }
+        } catch (e) {
+          console.error("watchdog reconcile apply failed:", e);
+          skipped.push("reconcile-error");
+        }
+      }
+
+      for (const vm of reconcileApply ? [] : (provisioningVms ?? [])) {
+        try {
+          if (isVmGuarded(vm)) {
+            skipped.push(`vm ${vm.id.slice(0, 8)}: protected`);
+            continue;
+          }
           const provider = await providerOf(supabase, vm.provider_account_id);
           if (provider === "aws") {
             const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
@@ -301,6 +314,24 @@ Deno.serve(async (req) => {
         } catch (e) {
           console.error(`watchdog reconcile ${vm.id}:`, e);
           skipped.push(`vm ${vm.id.slice(0, 8)}: reconcile-error`);
+        }
+      }
+
+      // P2a report-only pass. Dry-run writes nothing (promotions included).
+      // The loop above keeps main's live promotion writes when apply is off.
+      if (!reconcileApply) {
+        try {
+          const recon = await reconcileVms(supabase, (provisioningVms ?? []) as ReconcileVm[], {
+            source: SOURCE,
+            dryRun: true,
+          });
+          for (const r of recon) {
+            if (r.code && r.code !== "VM_RECONCILE_DRY_RUN") {
+              skipped.push(`vm ${r.vm_id.slice(0, 8)}: ${r.code}`);
+            }
+          }
+        } catch (e) {
+          console.error("watchdog reconcile report failed:", e);
         }
       }
     }
@@ -365,7 +396,20 @@ Deno.serve(async (req) => {
     }
 
     // Close expired sessions first so the UI stops showing them as live.
+    // A guarded VM keeps its session row: no write and it is not added as a target.
     for (const s of expiredSessions ?? []) {
+      if (s.vm_id) {
+        const { data: guardVm } = await supabase
+          .from("virtual_machines")
+          .select("id, azure_vm_id")
+          .eq("id", s.vm_id)
+          .maybeSingle();
+        const candidate = guardVm ?? { id: s.vm_id, azure_vm_id: null };
+        if (isVmGuarded(candidate)) {
+          skipped.push(`session ${String(s.id).slice(0, 8)}: protected — session left open`);
+          continue;
+        }
+      }
       await supabase
         .from("sessions")
         .update({ status: "completed", ended_at: nowIso })
@@ -409,6 +453,21 @@ Deno.serve(async (req) => {
     for (const vm of targets.values()) {
       // Deterministic key: one cleanup per VM per expiry window, ever.
       const endedReason = reasons.get(vm.id) || "lab_window_expired";
+      // Protected / held (either list, prefix + cloud id + Azure name) and
+      // persistent-in-window labs are skipped before any claim or cloud call.
+      if (isVmGuarded(vm)) {
+        skipped.push(`vm ${vm.id.slice(0, 8)}: protected`);
+        continue;
+      }
+      const exempt = await isSweepExempt(supabase, vm, now.getTime());
+      if (exempt.reason === "protected") {
+        skipped.push(`vm ${vm.id.slice(0, 8)}: protected`);
+        continue;
+      }
+      if (exempt.reason === "persistent_in_window" && endedReason === "lab_window_expired") {
+        skipped.push(`vm ${vm.id.slice(0, 8)}: persistent_in_window`);
+        continue;
+      }
       const key = `watchdog:${vm.id}:${vm.expires_at ?? "stuck"}:soft`;
       const userId = vm.user_id ?? WATCHDOG_USER;
       const claim = await claimIdempotency(supabase, {
@@ -436,6 +495,14 @@ Deno.serve(async (req) => {
           ended_reason: endedReason,
           allow_auto_terminate: hardDeleteAllowed,
         });
+
+        // A protected VM must not lose its session on the way to a refused stop
+        // or auto-terminate. Re-check after the claim in case the outer skip moved.
+        if (isVmGuarded(vm)) {
+          await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
+          skipped.push(`vm ${vm.id.slice(0, 8)}: protected`);
+          continue;
+        }
 
         await supabase
           .from("sessions")
@@ -528,43 +595,93 @@ Deno.serve(async (req) => {
           }
         }
 
-        if (!promotedRunning && vm.azure_vm_id) {
+        let stopConfirmed = !vm.azure_vm_id;
+        if (!promotedRunning && vm.azure_vm_id && !hardDeleteAllowed) {
+          // Stop-confirm: write deallocated only when the cloud reports a FINAL
+          // state. Transitional / budget exhaustion is pending, not success.
+          try {
+            const observed = await describeCloudState(supabase, azureFor, vm);
+            await timeline.start(SOURCE, "watchdog-cleanup", `Cloud state before stop: ${observed}`, {
+              cloud_state: observed,
+            });
+          } catch (e) {
+            console.error("watchdog describeCloudState:", e instanceof Error ? e.message : e);
+          }
+          const res = await stopVmHonest(supabase, azureFor, vm, {
+            finalStatus: "deallocated",
+            reason: endedReason,
+            endedBy: SOURCE,
+          }, stopBudget);
+          if (res.code === "VM_PROTECTED") {
+            await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
+            actions.push(`vm ${vm.id.slice(0, 8)}: protected — stop refused`);
+            continue;
+          }
+          await auditSweep(supabase, {
+            actorType: "watchdog",
+            source: SOURCE,
+            vm,
+            action: "vm.stop",
+            result: stopAuditResult(res),
+            reason: endedReason,
+            priorStatus: vm.status,
+            cloudState: res.cloudState,
+            error: res.error ?? null,
+            correlationId,
+          });
+          if (res.pending) await markStopPending(supabase, vm.id, { reason: endedReason, by: SOURCE });
+          if (!res.ok) {
+            await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
+            await timeline.failed(
+              SOURCE,
+              "watchdog-cleanup",
+              `Stop not confirmed (${res.cloudState ?? "unknown"}): ${res.error ?? ""}`,
+            );
+            actions.push(`vm ${vm.id.slice(0, 8)}: stop pending/failed — status left as ${vm.status}`);
+            continue;
+          }
+          stopConfirmed = true;
+          azureDeallocated = true;
+          nextStatus = "deallocated";
+        } else if (!promotedRunning && vm.azure_vm_id && hardDeleteAllowed) {
+          // ALLOW_AUTO_TERMINATE stays default off. Ordering below is unchanged
+          // for an unguarded VM. A guarded VM never reaches the delete.
+          if (isVmGuarded(vm)) {
+            await releaseIdempotency(supabase, { key, userId, action: "watchdog-cleanup" });
+            actions.push(`vm ${vm.id.slice(0, 8)}: protected — auto-terminate skipped`);
+            continue;
+          }
+          // stopConfirmed becomes true only after terminate/delete succeeds.
+          // A thrown or false delete leaves the Hub row in place.
           try {
             if (cloudProvider === "aws") {
               const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
               if (vm.region) aws.defaultRegion = String(vm.region);
-              if (hardDeleteAllowed) {
-                await terminateAwsInstance(aws, vm.azure_vm_id);
-                azureDeleted = true;
-              } else {
-                await stopAwsInstance(aws, vm.azure_vm_id);
-                azureDeallocated = true;
-              }
+              await terminateAwsInstance(aws, vm.azure_vm_id);
+              azureDeleted = true;
+              stopConfirmed = true;
             } else {
               const az = await azureFor(vm.provider_account_id);
               const vmName = extractVmName(vm.azure_vm_id);
-              if (hardDeleteAllowed) {
-                // Explicit opt-in only — never the default expiry path.
-                azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
-              } else {
-                azureDeallocated = await deallocateAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
-              }
+              azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+              if (azureDeleted) stopConfirmed = true;
             }
           } catch (e) {
             await timeline.failed(
               SOURCE,
-              hardDeleteAllowed
-                ? (cloudProvider === "aws" ? "aws-terminate" : "azure-delete")
-                : (cloudProvider === "aws" ? "aws-stop" : "azure-deallocate"),
+              cloudProvider === "aws" ? "aws-terminate" : "azure-delete",
               e instanceof Error ? e.message : "Cloud action failed",
             );
           }
         }
 
-        // Soft path: always deallocated (even if Azure call failed / no azure_vm_id)
-        // so we never leave status running and never mark terminated without an explicit delete.
-        // Hard path (ALLOW_AUTO_TERMINATE): terminated only when delete was attempted.
-        // (Skipped when we already promoted stuck→running above.)
+        if (!stopConfirmed && vm.azure_vm_id) {
+          continue;
+        }
+
+        // Soft path writes deallocated only after a confirmed stop (or when
+        // there is no cloud id). Hard path (ALLOW_AUTO_TERMINATE, default off)
+        // records terminated only after terminate/delete returns success.
         await markVmEnded(supabase, vm.id, {
           status: nextStatus,
           ended_by: SOURCE,

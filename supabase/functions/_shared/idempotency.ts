@@ -18,17 +18,23 @@ export function idempotencyKeyFrom(req: Request, body: Record<string, unknown>):
   return crypto.randomUUID();
 }
 
+/** A killed edge run must not wedge the key forever. About five minutes. */
+export const IDEMPOTENCY_IN_PROGRESS_TTL_MS = 5 * 60 * 1000;
+
 export async function claimIdempotency(
   supabase: SupabaseClient,
-  args: { key: string; userId: string; action: string; correlationId: string },
+  args: { key: string; userId: string; action: string; correlationId: string; now?: Date },
 ): Promise<ClaimResult> {
-  const { error } = await supabase.from("provisioning_idempotency").insert({
+  const now = args.now ?? new Date();
+  const insertRow = {
     idempotency_key: args.key,
     user_id: args.userId,
     action: args.action,
     correlation_id: args.correlationId,
-    status: "in_progress",
-  });
+    status: "in_progress" as const,
+    created_at: now.toISOString(),
+  };
+  const { error } = await supabase.from("provisioning_idempotency").insert(insertRow);
 
   if (!error) return { outcome: "new", key: args.key };
 
@@ -37,7 +43,7 @@ export async function claimIdempotency(
 
   const { data: existing } = await supabase
     .from("provisioning_idempotency")
-    .select("status, response, correlation_id")
+    .select("status, response, correlation_id, created_at")
     .eq("user_id", args.userId)
     .eq("action", args.action)
     .eq("idempotency_key", args.key)
@@ -50,6 +56,38 @@ export async function claimIdempotency(
       response: (existing.response as Record<string, unknown>) ?? {},
       correlationId: existing.correlation_id ?? null,
     };
+  }
+
+  // Compare and filter with the timestamptz string exactly as read. A Date
+  // round-trip (toISOString) drops microseconds and rewrites the offset, so
+  // the .eq("created_at") filter would miss the row and the claim would stick.
+  const createdAt = typeof existing?.created_at === "string" && existing.created_at.length > 0
+    ? existing.created_at
+    : null;
+  const createdMs = createdAt ? Date.parse(createdAt) : NaN;
+  const stale = existing?.status === "in_progress"
+    && createdAt !== null
+    && Number.isFinite(createdMs)
+    && now.getTime() - createdMs >= IDEMPOTENCY_IN_PROGRESS_TTL_MS;
+  if (stale && createdAt) {
+    // Pin the delete to this exact stale row. A delete on status alone can
+    // remove the row a concurrent retry just inserted, so both would get "new".
+    const { data: removed, error: delErr } = await supabase
+      .from("provisioning_idempotency")
+      .delete()
+      .eq("user_id", args.userId)
+      .eq("action", args.action)
+      .eq("idempotency_key", args.key)
+      .eq("status", "in_progress")
+      .eq("created_at", createdAt)
+      .select("idempotency_key");
+    if (delErr) throw new Error(`Idempotency reclaim failed: ${delErr.message}`);
+    if (!removed || removed.length !== 1) {
+      return { outcome: "in_progress", key: args.key, correlationId: existing.correlation_id ?? null };
+    }
+    const { error: reclaimed } = await supabase.from("provisioning_idempotency").insert(insertRow);
+    if (!reclaimed) return { outcome: "new", key: args.key };
+    if (reclaimed.code !== "23505") throw new Error(`Idempotency reclaim failed: ${reclaimed.message}`);
   }
 
   return { outcome: "in_progress", key: args.key, correlationId: existing?.correlation_id ?? null };

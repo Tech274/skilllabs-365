@@ -27,8 +27,9 @@ import {
   readNicPublicIpRef,
 } from "../_shared/azure-public-ip.ts";
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
-import { findResumableVm, RESUMABLE_VM_STATUSES, startCloudVm } from "../_shared/cloud-providers/vm-resume.ts";
-import { buildWalletSnapshot, walletBlockMessage } from "../_shared/lab-wallet.ts";
+import { createRemintClock, findResumableVm, LIVE_VM_STATUSES, RESUMABLE_VM_STATUSES, resolveRemintProvider, startCloudVm, waitForRunningAndIps } from "../_shared/cloud-providers/vm-resume.ts";
+import { adminPersistentRemintSkipsOwnerWallet, buildWalletSnapshot, persistentStartClearsExpiresAt, walletBlockMessage } from "../_shared/lab-wallet.ts";
+import { isVmGuarded } from "../_shared/lab-expiry.ts";
 
 const SOURCE = "provision-lab";
 
@@ -300,13 +301,18 @@ Deno.serve(async (req) => {
 
     // Policy v1: any active manual_access_grants row unlocks published labs.
     // Cert-scoped matching (SKU / certification_slug) comes later.
+    // Platform admins (Admin Start / barge-in) skip the learner grant check.
+    // The VM owner's wallet is still enforced on remint below.
+    const { data: earlyAdminFlag } = await supabase.rpc("is_platform_admin", { _user_id: userId });
     await trace.start(SOURCE, "manual-grant-check", "Verifying active Lab Grant for this user");
-    const { data: activeGrants, error: grantError } = await supabase
-      .from("manual_access_grants")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("active", true)
-      .limit(1);
+    const { data: activeGrants, error: grantError } = earlyAdminFlag === true
+      ? { data: [{ id: "platform-admin" }], error: null }
+      : await supabase
+        .from("manual_access_grants")
+        .select("id")
+        .eq("user_id", userId)
+        .eq("active", true)
+        .limit(1);
     if (grantError) {
       console.error("provision-lab manual grant check failed:", grantError);
       await trace.failed(SOURCE, "manual-grant-check", grantError.message);
@@ -343,6 +349,8 @@ Deno.serve(async (req) => {
 
     const body = await req.json();
     const { lab_template_id } = body;
+    const requestedVmId: string | null =
+      typeof body.vm_id === "string" && body.vm_id.trim() ? body.vm_id.trim() : null;
     if (!lab_template_id) throw new Error("lab_template_id is required");
     trace.attach({ labTemplateId: lab_template_id });
 
@@ -379,7 +387,10 @@ Deno.serve(async (req) => {
 
     // 2. Key-independent guard: one in-flight VM per user per lab template, so
     //    a double click with two different keys still cannot create two VMs.
-    const inFlight = await findInFlightVm(supabase, { userId, labTemplateId: lab_template_id });
+    //    Skipped when vm_id is set — never return a different VM than requested.
+    const inFlight = requestedVmId
+      ? null
+      : await findInFlightVm(supabase, { userId, labTemplateId: lab_template_id });
     if (inFlight) {
       const reuse = {
         vm_id: inFlight.id,
@@ -496,19 +507,100 @@ Deno.serve(async (req) => {
       throw new Error(`Lab template not found: ${templateError?.message || lab_template_id}`);
     }
 
+    // --- Resolve wallet owner + pinned allocation (vm_id) -----------------
+    // Admin Start may pass vm_id to remint a learner's EXISTING VM.
+    // The wallet is always the VM owner's. Admin skip applies only to a fresh
+    // launch (no existing allocation), not to remint.
+    const { data: adminFlag } = await supabase.rpc("is_platform_admin", { _user_id: userId });
+    const isAdminCaller = adminFlag === true;
+    let walletOwnerId = userId;
+    let pinnedVm: (Awaited<ReturnType<typeof findResumableVm>> & { user_id?: string }) | null = null;
+    if (requestedVmId) {
+      const { data: tvm } = await supabase
+        .from("virtual_machines")
+        .select("id, user_id, lab_template_id, status, azure_vm_id, private_ip, provider_account_id, expires_at, region")
+        .eq("id", requestedVmId)
+        .maybeSingle();
+      if (!tvm) {
+        return new Response(
+          JSON.stringify({ error: "VM not found.", code: "VM_NOT_FOUND", vm_id: requestedVmId, correlation_id: correlationId }),
+          { status: 404, headers: traceHeaders },
+        );
+      }
+      if (tvm.lab_template_id !== template.id) {
+        return new Response(
+          JSON.stringify({ error: "VM does not belong to this lab template.", code: "REMINT_VM_TEMPLATE_MISMATCH", vm_id: requestedVmId, correlation_id: correlationId }),
+          { status: 400, headers: traceHeaders },
+        );
+      }
+      if (!isAdminCaller && tvm.user_id !== userId) {
+        return new Response(
+          JSON.stringify({ error: "You do not own this VM.", code: "FORBIDDEN", correlation_id: correlationId }),
+          { status: 403, headers: traceHeaders },
+        );
+      }
+      if (!template.is_persistent) {
+        return new Response(
+          JSON.stringify({ error: "Start is only available for persistent labs.", code: "NOT_PERSISTENT", correlation_id: correlationId }),
+          { status: 400, headers: traceHeaders },
+        );
+      }
+      const st = String(tvm.status ?? "").toLowerCase();
+      if (![...LIVE_VM_STATUSES, ...RESUMABLE_VM_STATUSES].includes(st as never)) {
+        return new Response(
+          JSON.stringify({ error: "This VM is not in a resumable state (no new VM is created by Start).", code: "NOT_RESUMABLE", vm_id: requestedVmId, status: st, correlation_id: correlationId }),
+          { status: 409, headers: traceHeaders },
+        );
+      }
+      walletOwnerId = tvm.user_id;
+      pinnedVm = tvm as never;
+    }
+    const existingVmForGate = requestedVmId
+      ? pinnedVm
+      : template.is_persistent
+        ? await findResumableVm(supabase, { userId: walletOwnerId, labTemplateId: lab_template_id })
+        : null;
+
+    // Smoke and other guarded VMs are controlled manually. The admin wallet
+    // override must not start one, and neither may a learner remint.
+    if (existingVmForGate && isVmGuarded(existingVmForGate)) {
+      const failure = {
+        error: "VM_PROTECTED",
+        code: "VM_PROTECTED",
+        vm_id: existingVmForGate.id,
+        correlation_id: correlationId,
+      };
+      await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
+      idem = null;
+      return new Response(JSON.stringify(failure), { status: 423, headers: traceHeaders });
+    }
+
     // --- Lab wallet Start gate --------------------------------------------
-    // Exhausted minutes (or ended date window) block Start/Launch with a clear
-    // message. Do NOT delete the VM — soft-stop / Leave already held it.
-    // Platform admin / service-role skips the wallet gate (same as start-vm).
-    // Learners still need prepaid template duration − session usage > 0.
+    // Exhausted minutes (or ended date window) block learner Start/Launch.
+    // Do NOT delete the VM — soft-stop / Leave already held it.
+    // Admin Start of an existing persistent VM is an override: allowed, audited,
+    // and the owner's wallet is not deducted. Learner remint stays enforced.
+    // A platform admin fresh Launch (no existing VM) still skips the gate.
+    // The override audit is recorded only after the restart result is known.
+    let adminOverrideAudit: {
+      vmId: string;
+      code: string;
+      allocated: number;
+      used: number;
+      remaining: number;
+    } | null = null;
     {
-      const { data: adminFlag } = await supabase.rpc("is_platform_admin", { _user_id: userId });
-      const skipWalletGate = adminFlag === true;
+      const adminRemintOverride = adminPersistentRemintSkipsOwnerWallet(
+        isAdminCaller,
+        Boolean(template.is_persistent),
+        !!existingVmForGate,
+      );
+      const skipWalletGate = (isAdminCaller && !existingVmForGate) || adminRemintOverride;
       if (!skipWalletGate) {
         const { data: usage } = await supabase
           .from("sessions")
           .select("started_at, ended_at")
-          .eq("user_id", userId)
+          .eq("user_id", walletOwnerId)
           .eq("lab_template_id", template.id)
           .limit(500);
         const snap = buildWalletSnapshot({
@@ -542,109 +634,272 @@ Deno.serve(async (req) => {
           idem = null;
           return new Response(JSON.stringify(failure), { status: 403, headers: traceHeaders });
         }
+      } else if (adminRemintOverride && existingVmForGate) {
+        const { data: usage } = await supabase
+          .from("sessions")
+          .select("started_at, ended_at")
+          .eq("user_id", walletOwnerId)
+          .eq("lab_template_id", template.id)
+          .limit(500);
+        const snap = buildWalletSnapshot({
+          duration: template.duration,
+          endDate: template.end_date,
+          isPersistent: template.is_persistent,
+          sessions: usage ?? [],
+        });
+        const blocked = walletBlockMessage(snap);
+        if (blocked) {
+          adminOverrideAudit = {
+            vmId: existingVmForGate.id,
+            code: blocked.code,
+            allocated: snap.allocatedMinutes,
+            used: snap.usedMinutes,
+            remaining: snap.remainingMinutes,
+          };
+        }
+        await trace.skipped(SOURCE, "wallet-gate", "Admin persistent Start override — owner wallet not deducted", {
+          user_id: userId,
+          owner_user_id: walletOwnerId,
+          vm_id: existingVmForGate.id,
+          blocked: blocked?.code ?? null,
+          wallet_deducted: false,
+        });
       } else {
-        await trace.skipped(SOURCE, "wallet-gate", "Platform admin Launch skips wallet gate (mirrors start-vm)", {
+        await trace.skipped(SOURCE, "wallet-gate", "Platform admin fresh Launch skips wallet gate", {
           user_id: userId,
           lab_template_id: template.id,
         });
       }
     }
 
+    const adminRestartOutcome = (
+      didStart: boolean,
+      status: string,
+    ): "already_running" | "start_accepted" | "running" => {
+      const normalized = String(status || "").toLowerCase();
+      const live = normalized === "running" || normalized === "idle";
+      if (!didStart) return live ? "already_running" : "start_accepted";
+      return live ? "running" : "start_accepted";
+    };
+
+    const writeAdminStartOverrideAudit = async (
+      restartOutcome: "already_running" | "start_accepted" | "running" | "failed",
+      errorCode?: string,
+    ) => {
+      if (!adminOverrideAudit) return;
+      const audit = adminOverrideAudit;
+      adminOverrideAudit = null;
+      const message = restartOutcome === "failed"
+        ? `Admin Start did not power the VM on${errorCode ? ` (${errorCode})` : ""}. Minutes were not deducted.`
+        : restartOutcome === "already_running"
+          ? "Admin Start found the VM already running. Minutes were not deducted."
+          : restartOutcome === "running"
+            ? "Admin Start powered the VM on. Minutes were not deducted."
+            : "Admin Start was accepted; the VM is still starting. Minutes were not deducted.";
+      await recordAudit(supabase, {
+        actorId: userId,
+        actorType: "user",
+        action: "vm.admin_start_override",
+        entityType: "virtual_machine",
+        entityId: audit.vmId,
+        outcome: restartOutcome,
+        correlationId,
+        changes: {
+          code: audit.code,
+          wallet_deducted: false,
+          owner_user_id: walletOwnerId,
+          allocated_minutes: audit.allocated,
+          used_minutes: audit.used,
+          remaining_minutes: audit.remaining,
+          restart_outcome: restartOutcome,
+          ...(errorCode ? { error_code: errorCode } : {}),
+        },
+        message,
+      });
+    };
+
     // --- Persistent lab REMINT --------------------------------------------
     // Leave / soft-stop deallocates compute but keeps the allocation. Inside the
     // grant/template window a Start after Leave must hand back the SAME VM.
     // Soft-expiry (end_date EOD IST) or exhausted minutes still deallocate + notify;
     // Start is blocked above when the wallet is empty — never delete here.
-    if (template.is_persistent) {
-      const existingVm = await findResumableVm(supabase, { userId, labTemplateId: lab_template_id });
-      if (existingVm) {
-        trace.attach({ vmId: existingVm.id });
-        const needsStart = (RESUMABLE_VM_STATUSES as readonly string[]).includes(existingVm.status);
-        let started = false;
-        let remintDetail: string | null = null;
-        let remintAwsState: string | null = null;
-        let remintGhost = false;
-        if (needsStart) {
-          await trace.start(SOURCE, "remint", "Resuming your existing persistent lab VM (no new machine)");
-          try {
-            // Prefer the VM's provider account (same as Admin start-vm) so remint
-            // never hits Azure Start against an AWS i-* allocation.
-            let remintProvider = (template.provider || "azure") as string;
-            if (existingVm.provider_account_id) {
-              const { data: acct } = await supabase
-                .from("cloud_provider_accounts")
-                .select("provider")
-                .eq("id", existingVm.provider_account_id)
-                .maybeSingle();
-              if (acct?.provider) remintProvider = String(acct.provider);
+    if (template.is_persistent && existingVmForGate) {
+      const existingVm = existingVmForGate;
+      trace.attach({ vmId: existingVm.id });
+      const needsStart = (RESUMABLE_VM_STATUSES as readonly string[]).includes(existingVm.status);
+      let started = false;
+      let remintDetail: string | null = null;
+      let remintAwsState: string | null = null;
+      let remintGhost = false;
+      let remintMismatch = false;
+      let remintRetryable = false;
+      let resolvedProvider: "aws" | "azure" = "azure";
+      let finalStatus: string = existingVm.status;
+      let freshPublicIp: string | null = null;
+      let freshPrivateIp: string | null = existingVm.private_ip;
+      if (needsStart) {
+        await trace.start(SOURCE, "remint", "Resuming your existing persistent lab VM (no new machine)");
+        // One clock for wait-until-stopped and wait-until-running (100s total).
+        const remintClock = createRemintClock();
+        try {
+          // Account → template → cloud id. Never a lone vm.provider stamp.
+          let accountProvider: string | null = null;
+          if (existingVm.provider_account_id) {
+            const { data: acct } = await supabase
+              .from("cloud_provider_accounts")
+              .select("provider")
+              .eq("id", existingVm.provider_account_id)
+              .maybeSingle();
+            accountProvider = acct?.provider ? String(acct.provider) : null;
+          }
+          const resolved = resolveRemintProvider({
+            accountProvider,
+            templateProvider: template.provider ?? null,
+            cloudId: existingVm.azure_vm_id,
+          });
+          resolvedProvider = resolved.provider;
+          console.log(JSON.stringify({ event: "remint_provider_resolved", vm_id: existingVm.id, ...resolved }));
+          const startResult = resolved.mismatch
+            ? {
+              ok: false as const,
+              mismatch: true,
+              detail: `REMINT_PROVIDER_MISMATCH: ${existingVm.azure_vm_id} is EC2 but resolved ${resolved.provider} via ${resolved.source}`,
             }
-            const startResult = await startCloudVm(supabase, remintProvider, existingVm);
-            started = startResult.ok;
-            remintDetail = startResult.detail ?? null;
-            remintAwsState = startResult.awsState ?? null;
-            remintGhost = startResult.ghost === true || startResult.awsState === "not-found";
-            if (!started) {
-              console.error("persistent remint start rejected", remintDetail, remintAwsState, remintGhost);
-              // Ghost Hub: mark failed so Admin Start never retries StartInstances.
-              if (remintGhost) {
-                await supabase.from("virtual_machines").update({
-                  status: "failed",
-                  ended_at: new Date().toISOString(),
-                  ended_by: userId,
-                  ended_reason: "ghost_instance_not_found",
-                }).eq("id", existingVm.id);
-              }
+            : await startCloudVm(supabase, resolvedProvider, existingVm, { clock: remintClock });
+          started = startResult.ok;
+          remintDetail = startResult.detail ?? null;
+          remintAwsState = (startResult as { awsState?: string }).awsState ?? null;
+          remintMismatch = (startResult as { mismatch?: boolean }).mismatch === true;
+          remintGhost = (startResult as { ghost?: boolean }).ghost === true || remintAwsState === "not-found";
+          remintRetryable = (startResult as { code?: string }).code === "REMINT_START_FAILED";
+          if (!started) {
+            console.error("persistent remint start rejected", remintDetail, remintAwsState, remintGhost);
+            if (remintGhost) {
+              await supabase.from("virtual_machines").update({
+                status: "failed",
+                ended_at: new Date().toISOString(),
+                ended_by: userId,
+                ended_reason: "ghost_instance_not_found",
+              }).eq("id", existingVm.id);
+            }
+          }
+        } catch (e) {
+          console.error("persistent remint start failed", e);
+          remintDetail = e instanceof Error ? e.message : String(e);
+        }
+        // ok:false (including REMINT_START_FAILED when the cap hits before
+        // StartInstances) skips this write. Status, ended_*, and expires_at
+        // stay as they were. Only a start that was actually sent may clear them.
+        if (started) {
+          const baseUpdate: Record<string, unknown> = {
+            status: "starting",
+            provider: resolvedProvider,
+            ended_at: null,
+            ended_by: null,
+            ended_reason: null,
+            // #54: persistent Start clears a stale expires_at (admin path included).
+            ...persistentStartClearsExpiresAt(Boolean(template.is_persistent)),
+          };
+          if (resolvedProvider === "aws") baseUpdate.public_ip = null;
+          await supabase.from("virtual_machines").update(baseUpdate).eq("id", existingVm.id);
+          finalStatus = "starting";
+          try {
+            const w = await waitForRunningAndIps(supabase, resolvedProvider, existingVm, remintClock.capMs, {
+              now: remintClock.now,
+              sleep: remintClock.sleep,
+              startedAt: remintClock.startedAt,
+            });
+            if (w.running) {
+              freshPublicIp = w.publicIp;
+              if (w.privateIp) freshPrivateIp = w.privateIp;
+              await supabase.from("virtual_machines").update({
+                status: "running",
+                public_ip: w.publicIp,
+                ...(w.privateIp ? { private_ip: w.privateIp } : {}),
+                ended_at: null,
+                ended_by: null,
+                ended_reason: null,
+                ...persistentStartClearsExpiresAt(Boolean(template.is_persistent)),
+              }).eq("id", existingVm.id);
+              finalStatus = "running";
+            } else if (resolvedProvider === "aws") {
+              // Cap path: status stays the `starting` write above. No running/IP write.
+              console.warn(JSON.stringify({
+                event: "aws_remint_not_running",
+                state: w.state,
+                elapsed_ms: w.elapsedMs,
+                capped: w.capped === true,
+              }));
             }
           } catch (e) {
-            console.error("persistent remint start failed", e);
-            remintDetail = e instanceof Error ? e.message : String(e);
-          }
-          if (started) {
-            await supabase
-              .from("virtual_machines")
-              .update({ status: "starting", ended_at: null, ended_by: null, ended_reason: null })
-              .eq("id", existingVm.id);
-          }
-          if (!started) {
-            await trace.failed(SOURCE, "remint", "Could not power the existing lab VM back on");
-            const failure = {
-              error: remintGhost
-                ? "Cloud instance no longer exists (ghost Hub row reconciled to failed). It was NOT terminated by this Start."
-                : "Your persistent lab machine could not be powered back on. It has NOT been deleted — please retry in a minute or contact support.",
-              code: remintGhost ? "GHOST_INSTANCE" : "REMINT_START_FAILED",
-              vm_id: existingVm.id,
-              detail: remintDetail,
-              aws_state: remintAwsState,
-              correlation_id: correlationId,
-              stage: "remint",
-            };
-            await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
-            idem = null;
-            return new Response(JSON.stringify(failure), { status: 503, headers: traceHeaders });
+            console.error("remint: post-start poll failed (status stays starting)", e);
           }
         }
-        const resumed = {
-          vm_id: existingVm.id,
-          azure_vm_id: existingVm.azure_vm_id,
-          private_ip: existingVm.private_ip,
-          status: needsStart ? "starting" : existingVm.status,
-          reused_existing: true,
-          reminted: needsStart,
-          persistent: true,
+        if (!started) {
+          await trace.failed(SOURCE, "remint", "Could not power the existing lab VM back on");
+          const failureCode = remintGhost
+            ? "GHOST_INSTANCE"
+            : remintMismatch
+              ? "REMINT_PROVIDER_MISMATCH"
+              : "REMINT_START_FAILED";
+          await writeAdminStartOverrideAudit("failed", failureCode);
+          const failure = {
+            error: remintGhost
+              ? "Cloud instance no longer exists (ghost Hub row reconciled to failed). It was NOT terminated by this Start."
+              : remintMismatch
+                ? "This lab machine is registered to the wrong cloud provider, so it was not started. It has NOT been deleted — please contact support."
+                : "Your persistent lab machine could not be powered back on. It has NOT been deleted — please retry in a minute or contact support.",
+            code: failureCode,
+            ...(remintRetryable ? { retryable: true } : {}),
+            vm_id: existingVm.id,
+            detail: remintDetail,
+            aws_state: remintAwsState,
+            correlation_id: correlationId,
+            stage: "remint",
+          };
+          await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
+          idem = null;
+          return new Response(JSON.stringify(failure), { status: 503, headers: traceHeaders });
+        }
+      }
+      const resumed = {
+        vm_id: existingVm.id,
+        azure_vm_id: existingVm.azure_vm_id,
+        private_ip: freshPrivateIp,
+        public_ip: needsStart ? freshPublicIp : undefined,
+        provider: needsStart ? resolvedProvider : undefined,
+        status: needsStart ? finalStatus : existingVm.status,
+        reused_existing: true,
+        reminted: needsStart,
+        persistent: true,
+        correlation_id: correlationId,
+      };
+      await trace.success(
+        SOURCE,
+        "remint",
+        needsStart
+          ? "Existing persistent lab VM is starting again — same allocation, nothing destroyed"
+          : "Existing persistent lab VM is still allocated — reconnecting to it",
+        { vm_id: existingVm.id, status: resumed.status },
+      );
+      await writeAdminStartOverrideAudit(
+        adminRestartOutcome(needsStart, needsStart ? finalStatus : String(existingVm.status)),
+      );
+      if (requestedVmId && String(resumed.vm_id) !== requestedVmId) {
+        const mismatch = {
+          error: "Start targeted a different machine — refused.",
+          code: "REMINT_VM_MISMATCH",
+          requested_vm_id: requestedVmId,
+          vm_id: resumed.vm_id,
           correlation_id: correlationId,
         };
-        await trace.success(
-          SOURCE,
-          "remint",
-          needsStart
-            ? "Existing persistent lab VM is starting again — same allocation, nothing destroyed"
-            : "Existing persistent lab VM is still allocated — reconnecting to it",
-          { vm_id: existingVm.id, status: resumed.status },
-        );
-        await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: resumed });
+        await releaseIdempotency(supabase, { key: idemKey, userId, action: "provision-lab" }).catch(() => {});
         idem = null;
-        return new Response(JSON.stringify(resumed), { status: 200, headers: traceHeaders });
+        return new Response(JSON.stringify(mismatch), { status: 500, headers: traceHeaders });
       }
+      await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: resumed });
+      idem = null;
+      return new Response(JSON.stringify(resumed), { status: 200, headers: traceHeaders });
     }
 
     // --- Resource Provider ------------------------------------------------

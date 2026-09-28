@@ -135,9 +135,11 @@ npm run functions:test    # deno test supabase/functions/
     like persistent: `expires_at` alone never stops it; it is counted in
     `template_unknown_skipped` and listed by `expiry-preview` (`template_unknown`).
     Such VMs are still covered by the idle / orphan passes.
-  * `labs-watchdog` has its own `expires_at` sweep that does **not** read
-    `SOFT_EXPIRY_MODE` or `CLEANUP_HELD_VM_IDS`. If it is scheduled, pause it
-    while rolling out the cleanup changes.
+  * `labs-watchdog` (cron job 4) has its own `expires_at` sweep. It now skips
+    VMs on `VM_PROTECTED_IDS` or `CLEANUP_HELD_VM_IDS` (same matching rules,
+    including the built-in smoke prefix `bba27e8f`) and confirms a cloud stop
+    before writing `deallocated`. It does **not** read `SOFT_EXPIRY_MODE`.
+    `ALLOW_AUTO_TERMINATE` still defaults off.
 * **Held VMs** — `CLEANUP_HELD_VM_IDS` secret, comma separated, case-insensitive,
   plus the built-in smoke VM `bba27e8f` (Hub short id), are never stopped,
   deallocated or purged by any automatic pass. An entry matches the **full Hub
@@ -149,15 +151,45 @@ npm run functions:test    # deno test supabase/functions/
   entries are reported in `held_vm_warnings`. Put **both** the full Hub id and
   the cloud id of each held VM in the secret, e.g.
   `CLEANUP_HELD_VM_IDS=<full Hub UUID of the smoke VM>,<its i-… instance id or Azure VM name>`.
-  Explicit admin actions on a named VM still work.
+  Stop, cancel, delete, and start return 423 `VM_PROTECTED` when the VM matches
+  either list, before any session or VM-row write and before any cloud call.
+  Learner leave on a guarded VM returns 200
+  `{ success: true, kept_running: true, reason: "VM_PROTECTED" }`, closes only
+  the caller's own session (`user_id`, plus `session_id` when the request
+  includes one), and does not write the VM row or call the cloud
+  (the VM is left running). There is no admin bypass on
+  delete: remove the VM from the held or protected list first. Admin Start of
+  a persistent VM whose owner is out of minutes is allowed, audited, and does
+  not deduct that wallet. If that VM is itself guarded, `provision-lab` returns
+  423 `VM_PROTECTED` and does not start it (the smoke VM is controlled manually).
+  The T-15m pre-expiry warning skips guarded rows.
 * VMs stuck in `provisioning` > 10 min → mark failed and delete the Azure resource
 * orphaned Guacamole users/connections with no live session → removed
 
-Schedule it every 5 minutes with `pg_cron` + `pg_net`:
+### Live cron jobs
+
+Read-only `SELECT` on `cron.job` at **05:14 IST, 28 Sep 2026**. The SQL blocks
+below are documentation of those rows. **Do not run them against production
+while those jobs exist.** They are not a migration. No secret values are in
+this file.
+
+| jobid | jobname | schedule | active |
+| --- | --- | --- | --- |
+| 1 | `cleanup-idle-labs-every-5min` | `*/5 * * * *` | false |
+| 4 | `labs-watchdog-every-5-min` | `*/5 * * * *` | true |
+| 9 | `vm-reconcile-dryrun-every-5min` | `2-59/5 * * * *` | true |
+
+Job 1 is inactive. Jobs 4 and 9 are active. Job 9's function defaults to
+dry-run and writes nothing (promotions included) unless
+`VM_RECONCILE_MODE=apply` or `VM_RECONCILE_DRY_RUN=false`. The documented body
+also sends `dry_run: true`. Jobs 4 and 9 authenticate with `x-cron-secret`
+(Vault name `cron_shared_secret`) and `Authorization`.
+
+Documentation only — do not execute while jobid 1 exists:
 
 ```sql
 select cron.schedule(
-  'cleanup-idle-labs',
+  'cleanup-idle-labs-every-5min',
   '*/5 * * * *',
   $$select net.http_post(
       url := 'https://<project-ref>.supabase.co/functions/v1/cleanup-idle-labs',
@@ -167,7 +199,43 @@ select cron.schedule(
 );
 ```
 
-Verify: `select * from cron.job_run_details order by start_time desc limit 10;` and check the function logs for `Cleanup completed: N actions taken`.
+Verify runs (read-only): `select * from cron.job_run_details order by start_time desc limit 10;` and check the function logs for `Cleanup completed: N actions taken`.
+
+Documentation only — do not execute while jobid 4 exists:
+
+```sql
+select cron.schedule(
+  'labs-watchdog-every-5-min',
+  '*/5 * * * *',
+  $$select net.http_post(
+      url := 'https://<project-ref>.supabase.co/functions/v1/labs-watchdog',
+      headers := jsonb_build_object(
+        'Content-Type', 'application/json',
+        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
+      ),
+      body := '{}'::jsonb
+  ) as request_id;$$
+);
+```
+
+Documentation only — do not execute while jobid 9 exists:
+
+```sql
+select cron.schedule(
+  'vm-reconcile-dryrun-every-5min',
+  '2-59/5 * * * *',
+  $$select net.http_post(
+      url := 'https://<project-ref>.supabase.co/functions/v1/vm-reconcile',
+      headers := jsonb_build_object(
+        'Content-Type', 'application/json',
+        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
+      ),
+      body := '{"scope":"fleet","dry_run":true}'::jsonb
+  ) as request_id;$$
+);
+```
 
 ### Manual emergency cleanup
 
@@ -177,14 +245,15 @@ Admin-authenticated POST to `cleanup-idle-labs`:
 | --- | --- |
 | `{}` | full auto-cleanup pass |
 | `{"action":"expiry-preview"}` | **dry run** — list VMs the soft-expiry sweep would deallocate now, with reason/trigger (no cloud calls, no writes) |
-| `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM |
-| `{"action":"delete-vm","vm_id":"…"}` | delete one VM |
-| `{"action":"purge-failed"}` | purge failed VM records |
+| `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM after the cloud stop is confirmed (423 if guarded, and the session is not closed; 502 pending if the cloud state is not final). Azure `stopped` is not final |
+| `{"action":"learner-leave","vm_id":"…"}` | soft-stop. On a guarded VM: **200** `{ success: true, kept_running: true, reason: "VM_PROTECTED", message }` — only the caller's session is closed (`user_id`, and `session_id` when sent), no VM write, no cloud call, VM left running |
+| `{"action":"delete-vm","vm_id":"…"}` | delete one VM. **423 `VM_PROTECTED`** if it matches `VM_PROTECTED_IDS`, `CLEANUP_HELD_VM_IDS`, or built-in `bba27e8f` (no admin bypass; remove it from the list first) |
+| `{"action":"purge-failed"}` | **410 TERMINATE_DISABLED** — stop-only, no row delete and no cloud terminate |
 | `{"action":"clear-guacamole"}` | drop all gateway connections |
 
 Students may only send `{"action":"cancel-provisioning","vm_id":"<their own VM>"}`.
 
-Nuclear option for runaway cost: delete every VM in the resource group from the Azure portal, then run `purge-failed`.
+Nuclear option for runaway cost: delete the cloud resources in the provider portal. `purge-failed` does not remove Hub rows. `delete-vm` deletes one VM only when it is not on the held or protected list.
 
 ## 6. Rollback
 

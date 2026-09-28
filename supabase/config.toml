@@ -38,3 +38,6 @@ verify_jwt = false
 
 [functions.network-health]
 verify_jwt = false
+
+[functions.vm-reconcile]
+verify_jwt = false

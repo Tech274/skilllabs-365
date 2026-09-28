@@ -1,6 +1,8 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
+  adminPersistentRemintSkipsOwnerWallet,
   buildWalletSnapshot,
+  persistentStartClearsExpiresAt,
   usedMinutesFromSessions,
   walletBlockMessage,
   LAB_MINUTES_EXHAUSTED,
@@ -45,4 +47,16 @@ Deno.test("exhausted minutes block Start without implying delete", () => {
   if (!blocked?.error.includes("not deleted")) {
     throw new Error(`expected not-deleted copy, got: ${blocked?.error}`);
   }
+});
+
+Deno.test("admin persistent remint skips the owner wallet; learner remint does not", () => {
+  assertEquals(adminPersistentRemintSkipsOwnerWallet(true, true, true), true);
+  assertEquals(adminPersistentRemintSkipsOwnerWallet(false, true, true), false);
+  assertEquals(adminPersistentRemintSkipsOwnerWallet(true, false, true), false);
+  assertEquals(adminPersistentRemintSkipsOwnerWallet(true, true, false), false);
+});
+
+Deno.test("persistent Start clears expires_at; non-persistent does not", () => {
+  assertEquals(persistentStartClearsExpiresAt(true), { expires_at: null });
+  assertEquals(persistentStartClearsExpiresAt(false), {});
 });

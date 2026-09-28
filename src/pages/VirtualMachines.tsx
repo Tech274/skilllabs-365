@@ -26,7 +26,8 @@ import type { VMStatus } from "@/lib/types";
 import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
-import { readFunctionError } from "@/lib/function-error";
+import { adminStartVm, AlreadyStartingError, WalletBlockedError, REMINT_CALM_COPY, REMINT_FAIL_CODE } from "@/lib/lab-remint";
+import { fetchVmWalletBlock, shouldRunClientWalletPrecheck } from "@/lib/lab-wallet";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import {
@@ -450,17 +451,38 @@ export default function VirtualMachines() {
   const handleStartVM = async (vm: VMRow) => {
     setActionLoading(vm.id);
     try {
-      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
-        body: { action: "start-vm", vm_id: vm.id, reason: "admin_start" },
-      });
-      // Non-2xx hides JSON in FunctionsHttpError.context — unwrap like LabManagement/remint.
-      if (error || data?.error) {
-        // P0a: ghost reconcile may have marked Hub failed — reflect in UI.
-        const msg = await readFunctionError(error, data);
+      if (vm.templateIsPersistent && vm.lab_template_id) {
+        // Admin Start is an override: shouldRunClientWalletPrecheck(true) is false,
+        // so the owner's wallet does not block this path.
+        if (shouldRunClientWalletPrecheck(true)) {
+          const block = await fetchVmWalletBlock(vm.id);
+          if (block) throw new WalletBlockedError(block.code, block.message);
+        }
+        await adminStartVm({
+          vmId: vm.id,
+          labTemplateId: vm.lab_template_id,
+          isPersistent: true,
+          onPhase: (phase) => {
+            if (phase !== "waiting-running") return;
+            toast({
+              title: "VM Starting",
+              description: `Machine ${vm.instanceName || vm.id.slice(0, 8)}… is powering on (same allocation).`,
+            });
+            setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "starting" } : row)));
+          },
+        });
+        setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "running" } : row)));
+        toast({ title: "VM Running", description: "Same machine is back on. Connect is available." });
+        return;
+      }
+      try {
+        await adminStartVm({ vmId: vm.id });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "";
         if (/GHOST_INSTANCE|ghost|not-found|InvalidInstanceID/i.test(msg)) {
           setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "failed" } : row)));
         }
-        throw new Error(msg);
+        throw err;
       }
       toast({
         title: "VM Starting",
@@ -468,10 +490,23 @@ export default function VirtualMachines() {
       });
       setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "starting" } : row)));
     } catch (err: unknown) {
+      if (err instanceof WalletBlockedError) {
+        toast({
+          title: err.code === "LAB_WINDOW_ENDED" ? "Lab access period ended" : "No minutes left",
+          description: err.message,
+          variant: "destructive",
+        });
+        return;
+      }
+      if (err instanceof AlreadyStartingError) {
+        toast({ title: "Already starting", description: err.message });
+        return;
+      }
+      const msg = err instanceof Error ? err.message : "Unknown error";
       // P0b: always show detail/code/aws_state from unwrapped edge body.
       toast({
         title: "Failed to start VM",
-        description: err instanceof Error ? err.message : "Unknown error",
+        description: msg.startsWith(REMINT_FAIL_CODE) ? `${REMINT_CALM_COPY} (${msg})` : msg,
         variant: "destructive",
       });
     } finally {

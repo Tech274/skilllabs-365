@@ -1,6 +1,6 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { CANCEL_PENDING_STOP_REASON, decideLearnerCancel } from "../_shared/lab-cancel-policy.ts";
-import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse, type AuthCtx } from "../_shared/auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
@@ -18,7 +18,10 @@ import { buildWalletSnapshot, walletBlockMessage, type WalletSessionRow } from "
 import {
   decideSoftExpiry,
   expiresAtSkippedReason,
+  guardedDeleteBlock,
+  guardedLearnerLeaveBody,
   isHeldVm,
+  isVmGuarded,
   parseHeldVmConfig,
   resolveSoftExpiryMode,
   softExpiryEnforced,
@@ -35,6 +38,17 @@ import {
   nextStopRetryAfterFailure,
   type StopRetryState,
 } from "../_shared/stop-retry.ts";
+import {
+  auditSweep,
+  isFinalStopState,
+  markStopPending,
+  newStopPollBudget,
+  stopAuditResult,
+  stopVmHonest,
+  type SweepVm,
+} from "../_shared/vm-stop.ts";
+
+const TERMINATE_DISABLED = { code: "TERMINATE_DISABLED", error: "VM delete is disabled (stop-only). Use Stop." };
 
 /**
  * Azure credentials always come from the Resource Providers registry — one VM
@@ -163,6 +177,7 @@ async function stopCloudVm(
   azureFor: (accountId?: string | null) => Promise<AzureCtx>,
   vm: { azure_vm_id: string; provider_account_id?: string | null; region?: string | null },
 ): Promise<boolean> {
+  noteCloud("stopCloudVm");
   const provider = await providerOf(supabase, vm.provider_account_id);
   if (provider === "aws") {
     const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
@@ -176,8 +191,9 @@ async function stopCloudVm(
 
 /**
  * After a failed StopInstances/deallocate, describe the cloud VM.
- * If it is already soft-stopped (AWS stopped / Azure stopped|deallocated),
+ * If it is already soft-stopped (AWS stopped / Azure deallocated only),
  * callers may mark Hub deallocated with cloud_stop_ok via reconcile.
+ * Azure stopped is still allocated and does not count.
  */
 async function isCloudAlreadySoftStopped(
   // deno-lint-ignore no-explicit-any
@@ -190,15 +206,14 @@ async function isCloudAlreadySoftStopped(
     const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
     if (vm.region) aws.defaultRegion = String(vm.region);
     const desc = await describeAwsInstance(aws, vm.azure_vm_id);
-    // Only terminal soft-stop states — "stopping" is still transitional.
-    const softStopped = desc.state === "stopped";
+    const softStopped = isFinalStopState("aws", desc.state);
     return { softStopped, detail: `aws state=${desc.state}` };
   }
   const az = await azureFor(vm.provider_account_id);
   const statuses = await fetchInstanceViewStatuses(az, extractVmName(vm.azure_vm_id));
   if (!statuses) return { softStopped: false, detail: "azure instanceView unavailable" };
   const mapped = azureStatusToVmStatus(statuses);
-  const softStopped = mapped === "deallocated" || mapped === "stopped";
+  const softStopped = isFinalStopState("azure", mapped);
   return { softStopped, detail: `azure mapped=${mapped ?? "null"}` };
 }
 
@@ -209,6 +224,7 @@ async function deleteCloudVm(
   azureFor: (accountId?: string | null) => Promise<AzureCtx>,
   vm: { azure_vm_id: string; provider_account_id?: string | null; region?: string | null },
 ): Promise<boolean> {
+  noteCloud("deleteCloudVm");
   const provider = await providerOf(supabase, vm.provider_account_id);
   if (provider === "aws") {
     const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
@@ -250,6 +266,7 @@ async function softStopLearnerVm(
   vm: any,
   opts: { actorId: string; endedReason: string; nowIso: string; logEvent: string },
 ): Promise<{ stopped: boolean; stopDetail: string | null; reconciled: boolean; hubStatus: string; priorStatus: string; live: boolean }> {
+  noteCloud("softStopLearnerVm");
   const targetVmId = vm.id as string;
   const priorStatus = String(vm.status || "running");
   const live = ["running", "provisioning", "starting", "idle"].includes(priorStatus.toLowerCase());
@@ -502,7 +519,32 @@ async function recordStopFailure(
 /** Control-flow marker: SOFT_EXPIRY_MODE=off skips the soft-expiry sweep. */
 class SkipSweep extends Error {}
 
-Deno.serve(async (req) => {
+let cleanupCloudListener: ((name: string) => void) | null = null;
+function noteCloud(name: string) {
+  cleanupCloudListener?.(name);
+}
+
+export type CleanupHandlerDeps = {
+  // deno-lint-ignore no-explicit-any -- test double or service client
+  supabase?: any;
+  auth?: AuthCtx;
+  /** Invoked immediately before a cloud call. Tests assert this stays empty. */
+  onCloud?: (name: string) => void;
+  /** Test seam. Production uses startCloudVm. */
+  startCloudVm?: typeof startCloudVm;
+};
+
+export async function handleCleanupRequest(req: Request, deps?: CleanupHandlerDeps): Promise<Response> {
+  const prev = cleanupCloudListener;
+  cleanupCloudListener = deps?.onCloud ?? null;
+  try {
+    return await handleCleanupRequestInner(req, deps);
+  } finally {
+    cleanupCloudListener = prev;
+  }
+}
+
+async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps): Promise<Response> {
   const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -529,20 +571,25 @@ Deno.serve(async (req) => {
     //   learner-leave       — Leave / soft-stop: end session (wallet deduct) + deallocate, never delete
     //   start-vm            — Start-from-deallocated: resume SAME allocation (owner + wallet gate)
     // Everything else stays admin / service-role only.
-    const auth = (action === "cancel-provisioning" || action === "learner-leave" || action === "start-vm")
-      ? await requireUser(req)
-      : await requireAdmin(req);
+    const auth = deps?.auth
+      ?? ((action === "cancel-provisioning" || action === "learner-leave" || action === "start-vm")
+        ? await requireUser(req)
+        : await requireAdmin(req));
     if (auth instanceof Response) return auth;
 
-    const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-
-    const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-      auth: { autoRefreshToken: false, persistSession: false },
-    });
+    const supabase = deps?.supabase ?? createClient(
+      Deno.env.get("SUPABASE_URL")!,
+      Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
+      { auth: { autoRefreshToken: false, persistSession: false } },
+    );
     const azureFor = makeAzureResolver(supabase);
+    const stopBudget = newStopPollBudget();
     // Held VMs (smoke VM, Guac hosts, Ops holds) are never touched by automatic
-    // passes or purge. Explicit admin/learner actions on a named VM still work.
+    // passes or purge. Stop, cancel, delete, and start on a guarded VM return
+    // 423 before any session or VM-row write and before any cloud call.
+    // Learner leave on a guarded VM returns 200 kept_running, closes only the
+    // caller's session, and does not write the VM row or call the cloud.
+    // There is no admin bypass on delete; remove the VM from the list first.
     const heldConfig = parseHeldVmConfig(Deno.env.get("CLEANUP_HELD_VM_IDS"));
     const heldVms = heldConfig.entries;
     for (const w of heldConfig.warnings) console.warn(JSON.stringify({ event: "held_vm_entry_warning", detail: w }));
@@ -569,6 +616,10 @@ Deno.serve(async (req) => {
 
       const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
       if (forbidden) return forbidden;
+
+      if (isHeldVm(vm, heldVms) || isVmGuarded(vm)) {
+        return jsonResponse({ error: "VM_PROTECTED", code: "VM_PROTECTED", vm_id: vm.id }, 423);
+      }
 
       const timeline = new ProvisioningTimeline(supabase, {
         correlationId,
@@ -751,6 +802,50 @@ Deno.serve(async (req) => {
 
       const nowIso = new Date().toISOString();
       const nowMs = Date.now();
+      const leaveGuarded = isHeldVm(vm, heldVms) || isVmGuarded(vm);
+      let stopped = false;
+      let stopDetail: string | null = leaveGuarded ? "protected VM — stop blocked" : null;
+      let reconciled = false;
+      let hubStatus = String(vm.status || "running");
+      const priorStatus = hubStatus;
+
+      // Guarded leave: close only the learner session (the caller's user_id,
+      // and the session id when the request includes one). Same fields as a
+      // normal Leave, so the wallet stops. No audit write, no VM-row write, no cloud call.
+      if (leaveGuarded) {
+        const requestedSessionId = typeof rawBody.session_id === "string" ? rawBody.session_id.trim() : "";
+        let sessionClose = supabase
+          .from("sessions")
+          .update({
+            ended_at: nowIso,
+            status: "completed",
+            disconnect_reason: "learner_leave",
+          })
+          .eq("vm_id", targetVmId)
+          .eq("status", "active")
+          .eq("user_id", auth.userId);
+        if (requestedSessionId) sessionClose = sessionClose.eq("id", requestedSessionId);
+        await sessionClose;
+        console.log(JSON.stringify({
+          event: "learner_leave",
+          vm_id: targetVmId,
+          actor: auth.userId,
+          stopped: false,
+          kept_running: true,
+          reason: "VM_PROTECTED",
+          session_closed: true,
+          hub_status: hubStatus,
+          prior_status: priorStatus,
+        }));
+        return jsonResponse({
+          ...guardedLearnerLeaveBody(),
+          action: "learner-leave",
+          vm_id: targetVmId,
+          status: hubStatus,
+          deleted: false,
+          correlation_id: correlationId,
+        }, 200);
+      }
 
       // Close Guac/session rows first so wallet usage includes this Leave interval.
       await supabase
@@ -763,9 +858,15 @@ Deno.serve(async (req) => {
         .eq("vm_id", targetVmId)
         .eq("status", "active");
 
-      const { stopped, stopDetail, reconciled, hubStatus, priorStatus } = await softStopLearnerVm(
-        supabase, azureFor, vm, { actorId: auth.userId, endedReason: "learner_leave", nowIso, logEvent: "learner_leave" },
-      );
+      {
+        const soft = await softStopLearnerVm(
+          supabase, azureFor, vm, { actorId: auth.userId, endedReason: "learner_leave", nowIso, logEvent: "learner_leave" },
+        );
+        stopped = soft.stopped;
+        stopDetail = soft.stopDetail;
+        reconciled = soft.reconciled;
+        hubStatus = soft.hubStatus;
+      }
 
       let wallet = {
         allocated_minutes: 0,
@@ -830,7 +931,7 @@ Deno.serve(async (req) => {
         stop_detail: stopDetail,
         wallet,
         correlation_id: correlationId,
-      });
+      }, 200);
     }
 
     // Handle targeted stop/delete actions
@@ -852,6 +953,16 @@ Deno.serve(async (req) => {
       if (action === "start-vm") {
         const forbidden = await requireOwnerOrAdmin(auth, (vm as { user_id?: string | null }).user_id);
         if (forbidden) return forbidden;
+
+        // Guarded VMs are not started and are not ghost-reconciled. No cloud
+        // call and no virtual_machines write (including ghost_instance_not_found).
+        if (isHeldVm(vm, heldVms) || isVmGuarded(vm)) {
+          return new Response(JSON.stringify({
+            error: "Protected VM — start blocked",
+            code: "VM_PROTECTED",
+            vm_id: targetVmId,
+          }), { status: 423, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
 
         const status = String(vm.status || "").toLowerCase();
         // Riley #58: Start from the learner's "Pausing…" card (a Cancel whose cloud
@@ -998,7 +1109,9 @@ Deno.serve(async (req) => {
         }
 
         const provider = await providerOf(supabase, vm.provider_account_id);
-        const started = await startCloudVm(supabase, provider, {
+        noteCloud("startCloudVm");
+        const startFn = deps?.startCloudVm ?? startCloudVm;
+        const started = await startFn(supabase, provider, {
           id: vm.id,
           status: vm.status,
           azure_vm_id: vm.azure_vm_id,
@@ -1008,6 +1121,22 @@ Deno.serve(async (req) => {
           region: vm.region ?? null,
         });
         if (!started.ok) {
+          // 90s default clock (no shared remint clock on this path). A cap
+          // before StartInstances is retryable and must not touch the row.
+          if (started.code === "REMINT_START_FAILED") {
+            return new Response(JSON.stringify({
+              error: "Your lab machine was still stopping, so it was not started. Nothing was changed — please retry in a minute.",
+              code: "REMINT_START_FAILED",
+              retryable: true,
+              vm_id: targetVmId,
+              detail: started.detail ?? "remint wait cap hit before StartInstances",
+              aws_state: started.awsState ?? null,
+              provider,
+              region: vm.region ?? null,
+            }), {
+              status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
           console.error(JSON.stringify({
             event: "vm_start_rejected",
             vm_id: targetVmId,
@@ -1069,6 +1198,7 @@ Deno.serve(async (req) => {
           try {
             const awsRt = await resolveAwsRuntime(supabase, vm.provider_account_id);
             if (vm.region) awsRt.defaultRegion = String(vm.region);
+            noteCloud("describeAwsInstance");
             const desc = await describeAwsInstance(awsRt, vm.azure_vm_id);
             // If describe races into NotFound after Start accepted, reconcile ghost —
             // never leave Hub as "starting" on a missing EC2.
@@ -1131,34 +1261,94 @@ Deno.serve(async (req) => {
         });
       }
 
-      await supabase
-        .from("sessions")
-        .update({ ended_at: new Date().toISOString(), status: "completed" })
-        .eq("vm_id", targetVmId)
-        .eq("status", "active");
+      // Guarded delete and stop return 423 before any session close or cloud call.
+      // There is no admin bypass on delete; remove the VM from the list first.
+      if (action === "delete-vm") {
+        const blocked = guardedDeleteBlock(vm);
+        if (blocked) {
+          return new Response(JSON.stringify(blocked), {
+            status: 423, headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+      }
+      if (action === "stop-vm" && (isHeldVm(vm, heldVms) || isVmGuarded(vm))) {
+        return new Response(JSON.stringify({
+          error: "Protected VM — stop blocked",
+          code: "VM_PROTECTED",
+          vm_id: targetVmId,
+        }), { status: 423, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+      }
 
       if (action === "stop-vm") {
-        if (vm.azure_vm_id) {
-          await stopCloudVm(supabase, azureFor, vm);
+        const stopReason = actionReason || "admin_stop";
+        noteCloud("stopVmHonest");
+        const res = await stopVmHonest(supabase, azureFor, vm as SweepVm, {
+          finalStatus: "deallocated",
+          reason: stopReason,
+          endedBy: auth.userId,
+        }, stopBudget);
+        if (res.code === "VM_PROTECTED") {
+          return new Response(JSON.stringify({
+            error: "Protected VM — stop blocked",
+            code: "VM_PROTECTED",
+            vm_id: targetVmId,
+          }), { status: 423, headers: { ...corsHeaders, "Content-Type": "application/json" } });
         }
-        await markVmEnded(supabase, targetVmId, {
-          status: "deallocated",
-          ended_by: auth.userId,
-          ended_reason: actionReason || "admin_stop",
+        await supabase
+          .from("sessions")
+          .update({ ended_at: new Date().toISOString(), status: "completed" })
+          .eq("vm_id", targetVmId)
+          .eq("status", "active");
+        if (res.pending) await markStopPending(supabase, targetVmId, { reason: stopReason, by: auth.userId });
+        await auditSweep(supabase, {
+          actorId: auth.userId,
+          actorType: "user",
+          source: SOURCE,
+          vm: vm as SweepVm,
+          action: "vm.stop",
+          result: stopAuditResult(res),
+          reason: stopReason,
+          priorStatus: vm.status,
+          cloudState: res.cloudState,
+          error: res.error ?? null,
+          correlationId,
         });
         console.log(JSON.stringify({
           event: "vm_stop",
           vm_id: targetVmId,
           actor: auth.userId,
-          reason: actionReason || "admin_stop",
+          reason: stopReason,
+          ok: res.ok,
+          pending: res.pending === true,
+          cloud_state: res.cloudState,
         }));
-        return new Response(JSON.stringify({ success: true, action: "stopped", vm_id: targetVmId }), {
+        if (!res.ok) {
+          return new Response(JSON.stringify({
+            error: "Cloud stop not confirmed",
+            code: "VM_STOP_FAILED",
+            vm_id: targetVmId,
+            detail: res.error ?? `cloud state=${res.cloudState}`,
+            cloud_state: res.cloudState,
+            pending: res.pending === true,
+          }), { status: 502, headers: { ...corsHeaders, "Content-Type": "application/json" } });
+        }
+        await supabase
+          .from("sessions")
+          .update({ ended_at: new Date().toISOString(), status: "completed" })
+          .eq("vm_id", targetVmId)
+          .eq("status", "active");
+        return new Response(JSON.stringify({ success: true, action: "stopped", vm_id: targetVmId, cloud_state: res.cloudState }), {
           status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
       if (action === "delete-vm") {
         const deleteReason = actionReason || "admin_delete";
+        await supabase
+          .from("sessions")
+          .update({ ended_at: new Date().toISOString(), status: "completed" })
+          .eq("vm_id", targetVmId)
+          .eq("status", "active");
         if (vm.azure_vm_id) {
           await deleteCloudVm(supabase, azureFor, vm);
         }
@@ -1300,7 +1490,7 @@ Deno.serve(async (req) => {
           }
           continue;
         }
-        const held = isHeldVm(vm, heldVms);
+        const held = isHeldVm(vm, heldVms) || isVmGuarded(vm);
         due.push({
           vm_id: vm.id,
           held,
@@ -1333,33 +1523,21 @@ Deno.serve(async (req) => {
       });
     }
 
-    // Handle purge: delete all failed/terminated VM records from database
+    // purge-failed is stop-only: no cloud terminate and no row delete.
+    // Held/protected rows are not enumerated. delete-vm on a guarded VM is 423.
     if (action === "purge-failed") {
-      // First clean up any Azure resources that might still exist
-      const { data: purgeVMs } = await supabase
-        .from("virtual_machines")
-        .select("id, azure_vm_id, status, provider_account_id")
-        .in("status", ["failed", "terminated"]);
-
-      let purged = 0;
-      if (purgeVMs?.length) {
-        for (const vm of purgeVMs) {
-          if (isHeldVm(vm, heldVms)) continue;
-          if (vm.azure_vm_id) {
-            try {
-              await deleteCloudVm(supabase, azureFor, vm);
-            } catch (e) {
-              console.error("purge-failed: cloud delete skipped", e);
-            }
-          }
-          // Delete the DB record entirely
-          await supabase.from("virtual_machines").delete().eq("id", vm.id);
-          purged++;
-        }
-      }
-
-      return new Response(JSON.stringify({ success: true, action: "purged", count: purged }), {
-        status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      await auditSweep(supabase, {
+        actorId: auth.userId,
+        actorType: "user",
+        source: SOURCE,
+        vm: { id: "00000000-0000-0000-0000-000000000000", azure_vm_id: null },
+        action: "vm.terminate_blocked",
+        result: "blocked",
+        reason: "purge_failed",
+        correlationId,
+      });
+      return new Response(JSON.stringify(TERMINATE_DISABLED), {
+        status: 410, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
 
@@ -1408,13 +1586,34 @@ Deno.serve(async (req) => {
       .is("ended_at", null);
 
     if (activeSessions) {
-      activeSessions.forEach((s) => { if (s.vm_id) activeSessionVmIds.add(s.vm_id); });
+      activeSessions.forEach((s: { vm_id?: string | null }) => { if (s.vm_id) activeSessionVmIds.add(s.vm_id); });
     }
 
     // Process idle sessions: end session + deallocate VM
     if (idleSessions?.length) {
       for (const session of idleSessions) {
-        // End the session
+        let vm: {
+          azure_vm_id?: string | null;
+          provider_account_id?: string | null;
+          region?: string | null;
+          ended_reason?: string | null;
+          ended_at?: string | null;
+        } | null = null;
+        if (session.vm_id) {
+          const { data } = await supabase
+            .from("virtual_machines")
+            .select("azure_vm_id, provider_account_id, region, ended_reason, ended_at")
+            .eq("id", session.vm_id)
+            .maybeSingle();
+          vm = data;
+          const guardVm = { id: session.vm_id, azure_vm_id: vm?.azure_vm_id ?? null };
+          if (isHeldVm(guardVm, heldVms) || isVmGuarded(guardVm)) {
+            results.push(`Idle session ${session.id}: VM ${session.vm_id.slice(0, 8)} is held — session left open, not deallocated`);
+            continue;
+          }
+        }
+
+        // End the session only after the guard. A protected VM keeps its row.
         await supabase
           .from("sessions")
           .update({ ended_at: now.toISOString(), status: "completed", disconnect_reason: "idle_timeout" })
@@ -1425,28 +1624,24 @@ Deno.serve(async (req) => {
           event_data: { reason: "idle_timeout", ended_by: "cleanup-idle-labs" },
         });
 
+        if (session.vm_id && vm) {
+          const idleRetry = effectiveStopRetry(vm.ended_reason, vm.ended_at, nowMsForRetry);
 
-        if (session.vm_id) {
-          // Get VM details
-          const { data: vm } = await supabase
-            .from("virtual_machines")
-            .select("azure_vm_id, provider_account_id, region, ended_reason, ended_at")
-            .eq("id", session.vm_id)
-            .maybeSingle();
-          const idleRetry = vm ? effectiveStopRetry(vm.ended_reason, vm.ended_at, nowMsForRetry) : null;
-
-          if (vm?.azure_vm_id && isHeldVm({ id: session.vm_id, azure_vm_id: vm.azure_vm_id }, heldVms)) {
-            results.push(`Idle session ${session.id}: VM ${session.vm_id.slice(0, 8)} is held — not deallocated`);
-          } else if (vm?.azure_vm_id && idleRetry?.kind === "needs_admin") {
+          if (vm?.azure_vm_id && idleRetry?.kind === "needs_admin") {
             // Automatic stops already gave up on this VM; an admin was notified.
             stopRetrySummary.needs_admin_skipped += 1;
             results.push(`Idle session ${session.id}: VM ${session.vm_id.slice(0, 8)} needs admin (stop failed) — not retried`);
-          } else if (vm?.azure_vm_id) {
+          } else if (vm.azure_vm_id) {
+            const cloudVm = {
+              azure_vm_id: vm.azure_vm_id,
+              provider_account_id: vm.provider_account_id,
+              region: vm.region,
+            };
             // One cloud error must never abort the whole run (soft-expiry below).
             let deallocated = false;
             let stopDetail: string | null = null;
             try {
-              deallocated = await stopCloudVm(supabase, azureFor, vm);
+              deallocated = await stopCloudVm(supabase, azureFor, cloudVm);
               if (!deallocated) stopDetail = "cloud soft-stop returned false";
             } catch (e) {
               stopDetail = e instanceof Error ? e.message : String(e);
@@ -1484,7 +1679,7 @@ Deno.serve(async (req) => {
       for (const vm of orphanVMs) {
         if (activeSessionVmIds.has(vm.id)) continue; // VM still has active session
         if (!vm.azure_vm_id) continue;
-        if (isHeldVm(vm, heldVms)) continue;
+        if (isHeldVm(vm, heldVms) || isVmGuarded(vm)) continue;
 
         const retry = effectiveStopRetry(vm.ended_reason, vm.ended_at, nowMsForRetry);
         if (retry?.kind === "needs_admin") {
@@ -1603,7 +1798,7 @@ Deno.serve(async (req) => {
           continue;
         }
         expirySummary.due += 1;
-        if (isHeldVm(vm, heldVms)) {
+        if (isHeldVm(vm, heldVms) || isVmGuarded(vm)) {
           expirySummary.held_skipped += 1;
           continue;
         }
@@ -1708,6 +1903,7 @@ Deno.serve(async (req) => {
         .limit(100);
 
       for (const vm of soonExpiring ?? []) {
+        if (isHeldVm(vm, heldVms) || isVmGuarded(vm)) continue;
         const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
         await notifyLearnerAndAdmins(supabase, {
           userId: vm.user_id,
@@ -1735,7 +1931,7 @@ Deno.serve(async (req) => {
 
     if (stuckVMs?.length) {
       for (const vm of stuckVMs) {
-        if (isHeldVm(vm, heldVms)) continue;
+        if (isHeldVm(vm, heldVms) || isVmGuarded(vm)) continue;
         let promoted = false;
         if (vm.azure_vm_id) {
           try {
@@ -1982,4 +2178,10 @@ Deno.serve(async (req) => {
       { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
     );
   }
-});
+}
+
+// Skip the listener only when a test sets both flags. CLEANUP_SKIP_SERVE alone
+// must not stop a production or `supabase functions serve` process.
+if (Deno.env.get("DENO_TESTING") !== "1" || Deno.env.get("CLEANUP_SKIP_SERVE") !== "1") {
+  Deno.serve((req) => handleCleanupRequest(req));
+}

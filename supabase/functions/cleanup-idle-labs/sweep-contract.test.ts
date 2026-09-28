@@ -10,9 +10,37 @@ Deno.test("idle / orphan cloud errors are isolated per VM (run never aborts)", (
 
 Deno.test("held VMs are skipped by every automatic pass and purge", () => {
   assert(src.includes('parseHeldVmConfig(Deno.env.get("CLEANUP_HELD_VM_IDS"))'));
-  // purge, idle, orphan, soft-expiry, stuck-provisioning, preview
+  // preview, idle, orphan, soft-expiry, stuck-provisioning, plus explicit 423 paths
   const hits = src.split("isHeldVm(").length - 1;
   assert(hits >= 6, `expected >= 6 held checks, got ${hits}`);
+  assert(src.includes("isVmGuarded("));
+  assert(src.includes("guardedDeleteBlock("));
+  assert(src.includes("guardedLearnerLeaveBody()"));
+  const leaveGuard = src.indexOf("Guarded leave: close only the learner session");
+  const leaveClose = src.indexOf('disconnect_reason: "learner_leave"');
+  const leaveReturn = src.indexOf("kept_running: true", leaveGuard);
+  const softStop = src.indexOf("softStopLearnerVm(", leaveGuard);
+  assert(leaveGuard > 0 && leaveClose > leaveGuard && leaveReturn > leaveClose && softStop > leaveReturn, "guarded leave closes the session and returns before any cloud stop");
+  const warn = src.indexOf("Pre-expiry warning");
+  const warnGuard = src.indexOf("isVmGuarded(vm)", warn);
+  const warnedAt = src.indexOf("expiry_warned_at: now.toISOString()", warn);
+  assert(warn > 0 && warnGuard > warn && warnedAt > warnGuard, "pre-expiry warning must skip guarded VMs");
+  const idle = src.indexOf("Process idle sessions");
+  const idleGuard = src.indexOf("session left open, not deallocated", idle);
+  const idleClose = src.indexOf('disconnect_reason: "idle_timeout"', idle);
+  assert(idle > 0 && idleGuard > idle && idleClose > idleGuard, "idle pass must guard before the session close");
+  const stopBeforeClose = src.indexOf('action === "stop-vm" &&');
+  const sharedClose = src.indexOf("Guarded delete and stop return 423 before any session close");
+  const closeCall = src.indexOf('.update({ ended_at: new Date().toISOString(), status: "completed" })', sharedClose);
+  assert(sharedClose > 0 && stopBeforeClose > sharedClose && closeCall > stopBeforeClose);
+  const deleteGuard = src.indexOf("guardedDeleteBlock(");
+  const adminDelete = src.indexOf('event: "vm_admin_delete"');
+  assert(deleteGuard > 0 && adminDelete > deleteGuard, "delete-vm must 423 before the cloud delete");
+  assert(src.slice(deleteGuard, adminDelete).includes("status: 423"));
+  // purge-failed is stop-only: 410, no row delete
+  assert(src.includes("TERMINATE_DISABLED"));
+  assert(src.includes("status: 410"));
+  assert(!src.includes('.from("virtual_machines").delete()'));
 });
 
 Deno.test("soft-expiry sweep honours SOFT_EXPIRY_MODE", () => {

@@ -320,3 +320,98 @@ export function isHeldVm(
   }
   return false;
 }
+
+/**
+ * Parse a comma-separated id list with the SAME matching rules as
+ * `CLEANUP_HELD_VM_IDS` (full Hub UUID, 8+ hex Hub prefix, cloud id, Azure VM
+ * name). Does not add the built-in smoke id — that lives on the held list.
+ */
+export function parseVmIdList(raw: string | null | undefined, label = "VM id list"): HeldVmList {
+  const extra = String(raw ?? "")
+    .split(",")
+    .map(normaliseHeldEntry)
+    .filter(Boolean);
+  const entries = [...new Set(extra)];
+  const warnings: string[] = [];
+  for (const e of extra) {
+    if (/^[0-9a-f-]{1,7}$/.test(e)) {
+      warnings.push(
+        `${label} entry "${e}" is shorter than 8 characters: it is not used as a Hub id prefix and only matches an exact cloud VM name`,
+      );
+    }
+  }
+  return { entries, warnings };
+}
+
+export interface VmGuardLists {
+  protectedEntries: readonly string[];
+  /** Held entries, including the built-in smoke prefix `bba27e8f`. */
+  heldEntries: readonly string[];
+}
+
+export interface VmGuardListOptions {
+  /** Pass `null` for an empty list. Omit to read `VM_PROTECTED_IDS`. */
+  protectedRaw?: string | null;
+  /** Pass `null` for an empty extra list (built-in smoke id still applies). Omit to read `CLEANUP_HELD_VM_IDS`. */
+  heldRaw?: string | null;
+}
+
+/**
+ * Union of `VM_PROTECTED_IDS` and `CLEANUP_HELD_VM_IDS` (plus built-in
+ * `bba27e8f`). A VM matched by either list is guarded. Both lists use prefix,
+ * cloud-id and Azure-name matching.
+ */
+export function loadVmGuardLists(opts?: VmGuardListOptions): VmGuardLists & { warnings: string[] } {
+  const held = parseHeldVmConfig(
+    opts && "heldRaw" in opts ? opts.heldRaw : Deno.env.get("CLEANUP_HELD_VM_IDS"),
+  );
+  const prot = parseVmIdList(
+    opts && "protectedRaw" in opts ? opts.protectedRaw : Deno.env.get("VM_PROTECTED_IDS"),
+    "VM_PROTECTED_IDS",
+  );
+  return {
+    protectedEntries: prot.entries,
+    heldEntries: held.entries,
+    warnings: [...held.warnings, ...prot.warnings],
+  };
+}
+
+export function isVmGuarded(
+  vm: { id?: string | null; azure_vm_id?: string | null },
+  lists?: VmGuardLists,
+): boolean {
+  const resolved = lists ?? loadVmGuardLists();
+  return isHeldVm(vm, resolved.heldEntries) || isHeldVm(vm, resolved.protectedEntries);
+}
+
+/**
+ * Explicit `delete-vm` refusal. There is no admin bypass: a VM matched by
+ * either list must be removed from the held/protected list before it can be
+ * deleted. Returns null when the delete may proceed.
+ */
+export function guardedDeleteBlock(
+  vm: { id?: string | null; azure_vm_id?: string | null },
+  lists?: VmGuardLists,
+): { error: "VM_PROTECTED"; code: "VM_PROTECTED"; vm_id: string | null } | null {
+  if (!isVmGuarded(vm, lists)) return null;
+  return { error: "VM_PROTECTED", code: "VM_PROTECTED", vm_id: vm.id ?? null };
+}
+
+/**
+ * Learner leave on a guarded VM. HTTP 200 so the SPA does not show "Leave failed".
+ * The handler closes only the learner's session (wallet stops). No cloud stop
+ * and no VM-row write. The machine stays running.
+ */
+export function guardedLearnerLeaveBody(): {
+  success: true;
+  kept_running: true;
+  reason: "VM_PROTECTED";
+  message: string;
+} {
+  return {
+    success: true,
+    kept_running: true,
+    reason: "VM_PROTECTED",
+    message: "This VM is protected and was left running.",
+  };
+}
