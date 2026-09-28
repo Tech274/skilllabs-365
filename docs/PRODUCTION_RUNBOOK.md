@@ -185,7 +185,8 @@ Job 1 is inactive. Jobs 4 and 9 are active. Job 9's function defaults to
 dry-run and writes nothing (promotions included) unless
 `VM_RECONCILE_MODE=apply` or `VM_RECONCILE_DRY_RUN=false`. The documented body
 also sends `dry_run: true`. Jobs 4 and 9 authenticate with `x-cron-secret`
-(Vault name `cron_shared_secret`) and `Authorization`.
+(Vault name `cron_shared_secret`) and `Authorization: Bearer <anon-key>`.
+The bearer is the anon key, not the service-role key.
 
 `cleanup-idle-labs`, `labs-watchdog`, and `vm-reconcile` share
 `cronSecretMatches` (`supabase/functions/_shared/cron-auth.ts`). The compare is
@@ -220,7 +221,7 @@ select cron.schedule(
       url := 'https://<project-ref>.supabase.co/functions/v1/cleanup-idle-labs',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
-        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'Authorization', 'Bearer <anon-key>',
         'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
       ),
       body := '{}'::jsonb
@@ -240,7 +241,7 @@ select cron.schedule(
       url := 'https://<project-ref>.supabase.co/functions/v1/labs-watchdog',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
-        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'Authorization', 'Bearer <anon-key>',
         'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
       ),
       body := '{}'::jsonb
@@ -258,7 +259,7 @@ select cron.schedule(
       url := 'https://<project-ref>.supabase.co/functions/v1/vm-reconcile',
       headers := jsonb_build_object(
         'Content-Type', 'application/json',
-        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'Authorization', 'Bearer <anon-key>',
         'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
       ),
       body := '{"scope":"fleet","dry_run":true}'::jsonb
