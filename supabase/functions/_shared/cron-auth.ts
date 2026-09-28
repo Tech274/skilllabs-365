@@ -1,10 +1,9 @@
 // Shared cron credential check.
 //
-// Jobs 4 (labs-watchdog) and 9 (vm-reconcile) authenticate a scheduled caller
-// when the `x-cron-secret` header equals the `CRON_SHARED_SECRET` env var and
-// that env var is non-empty. This helper is the same rule with a constant-time
-// compare. Those two functions keep their inline checks; cleanup-idle-labs
-// uses this helper.
+// Scheduled callers (cleanup-idle-labs, labs-watchdog, vm-reconcile) are
+// accepted when the `x-cron-secret` header equals the `CRON_SHARED_SECRET`
+// env var and that env var is non-empty. Comparison is constant-time. Neither
+// the header nor the env value is trimmed.
 
 export const CRON_SECRET_HEADER = "x-cron-secret";
 
@@ -35,28 +34,4 @@ export function cronSecretMatches(header: string | null): boolean {
   if (secret.length === 0) return false;
   if (header == null || header.length === 0) return false;
   return timingSafeEqualString(header, secret);
-}
-
-// Serializes test overrides of CRON_SHARED_SECRET. Deno runs test files in
-// parallel and they share this module and the process env.
-let cronEnvTail: Promise<void> = Promise.resolve();
-
-export function withCronSecretEnv<T>(value: string | null, fn: () => Promise<T> | T): Promise<T> {
-  const prev = cronEnvTail;
-  let release!: () => void;
-  cronEnvTail = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return prev.then(async () => {
-    const saved = Deno.env.get("CRON_SHARED_SECRET");
-    try {
-      if (value === null) Deno.env.delete("CRON_SHARED_SECRET");
-      else Deno.env.set("CRON_SHARED_SECRET", value);
-      return await fn();
-    } finally {
-      if (saved === undefined) Deno.env.delete("CRON_SHARED_SECRET");
-      else Deno.env.set("CRON_SHARED_SECRET", saved);
-      release();
-    }
-  });
 }

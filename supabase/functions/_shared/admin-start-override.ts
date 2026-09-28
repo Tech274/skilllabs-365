@@ -25,7 +25,6 @@ export function adminRestartOutcome(
   if (!didStart) {
     if (live) return "already_running";
     if (normalized === "starting" || normalized === "provisioning") return "already_starting";
-    return "start_accepted";
   }
   return live ? "running" : "start_accepted";
 }

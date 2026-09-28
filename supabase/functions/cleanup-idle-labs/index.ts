@@ -520,6 +520,24 @@ async function recordStopFailure(
 /** Control-flow marker: SOFT_EXPIRY_MODE=off skips the soft-expiry sweep. */
 class SkipSweep extends Error {}
 
+/**
+ * `soft_expiry_mode_invalid` is logged once per cold start. Later requests in
+ * the same isolate still fail safe (the response carries `mode_warning`) and
+ * do not repeat the log line.
+ */
+let softExpiryModeInvalidLogged = false;
+
+export function logSoftExpiryModeInvalidOnce(warning: string | null): boolean {
+  if (!warning || softExpiryModeInvalidLogged) return false;
+  softExpiryModeInvalidLogged = true;
+  console.warn(JSON.stringify({ event: "soft_expiry_mode_invalid", detail: warning }));
+  return true;
+}
+
+export function resetSoftExpiryModeInvalidLogForTests(): void {
+  softExpiryModeInvalidLogged = false;
+}
+
 let cleanupCloudListener: ((name: string) => void) | null = null;
 function noteCloud(name: string) {
   cleanupCloudListener?.(name);
@@ -577,9 +595,10 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
     //   start-vm            — Start-from-deallocated: resume SAME allocation (owner + wallet gate)
     // Everything else stays admin / service-role only.
     //
-    // Scheduled cron (job 1) may instead send `x-cron-secret`, checked against
-    // `CRON_SHARED_SECRET` the same way jobs 4 and 9 do. That credential is
-    // accepted only for the scheduled cleanup and the read-only expiry-preview.
+    // Scheduled cron (job 1) may instead send `x-cron-secret`. cronSecretMatches
+    // checks it against `CRON_SHARED_SECRET` (not trimmed), the same helper jobs
+    // 4 and 9 use. That credential is accepted only for the scheduled cleanup
+    // and the read-only expiry-preview.
     // It does not authorize stop, delete, cancel, start, or any other mutation,
     // and it is not an admin override. Service-role and admin JWTs are unchanged
     // when the header is absent or does not match.
@@ -627,7 +646,7 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
     const softExpiryModeConfig = resolveSoftExpiryMode(Deno.env.get("SOFT_EXPIRY_MODE"));
     const softExpiryMode = softExpiryModeConfig.mode;
     if (softExpiryModeConfig.warning) {
-      console.warn(JSON.stringify({ event: "soft_expiry_mode_invalid", detail: softExpiryModeConfig.warning }));
+      logSoftExpiryModeInvalidOnce(softExpiryModeConfig.warning);
     }
 
     // Student-owned cancellation of a provisioning / running VM
