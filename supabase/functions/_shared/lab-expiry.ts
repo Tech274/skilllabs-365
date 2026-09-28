@@ -175,16 +175,15 @@ export function softExpiryNotice(
  * retries) and the stuck-provisioning pass run in EVERY mode, including `off`.
  * That is a product decision — do not wire them to this switch.
  *
- *   - unset / empty → "legacy": enforce only what the pre-SCRUM-28 sweep already
- *     enforced (expires_at on running/provisioning/starting; end date / minutes on
- *     running/provisioning/starting/idle). Newly covered cases (OS-stopped VMs,
- *     idle past expires_at) are reported as dry-run until Ops opts in. Kept for
- *     backward compatibility with deployments that never set the secret.
+ *   - "legacy"  → enforce only what the pre-SCRUM-28 sweep already enforced
+ *     (expires_at on running/provisioning/starting; end date / minutes on
+ *     running/provisioning/starting/idle). OS-stopped VMs and idle-past-expires_at
+ *     are reported as dry-run. Must be set explicitly.
  *   - "enforce" → full SCRUM-28 scope.
  *   - "dry-run" → report only, never stop anything.
  *   - "off"     → skip the soft-expiry sweep entirely.
- *   - anything else (typo such as `dry_run`, `disabled`, `false`) → fail SAFE to
- *     "dry-run", log a warning and report it in the run response
+ *   - unset, empty, or anything else (typo such as `dry_run`, `disabled`, `false`)
+ *     → fail SAFE to "dry-run", log a warning and report it in the run response
  *     (`soft_expiry.mode = "dry-run"`, `mode_configured`, `mode_warning`).
  */
 export type SoftExpiryMode = "legacy" | "enforce" | "dry-run" | "off";
@@ -193,13 +192,22 @@ export interface SoftExpiryModeConfig {
   mode: SoftExpiryMode;
   /** Raw secret value (trimmed) or null when unset/empty. */
   configured: string | null;
-  /** Set when the configured value was not recognised. */
+  /** Set when the mode fell back to dry-run (unset, empty, or unrecognised). */
   warning: string | null;
 }
 
+const SOFT_EXPIRY_FAIL_SAFE =
+  "failing safe to dry-run (no soft-expiry stops). Valid values: legacy, enforce, dry-run, off.";
+
 export function resolveSoftExpiryMode(raw: string | null | undefined): SoftExpiryModeConfig {
   const configured = String(raw ?? "").trim();
-  if (!configured) return { mode: "legacy", configured: null, warning: null };
+  if (!configured) {
+    return {
+      mode: "dry-run",
+      configured: null,
+      warning: `SOFT_EXPIRY_MODE is unset or empty — ${SOFT_EXPIRY_FAIL_SAFE}`,
+    };
+  }
   const v = configured.toLowerCase();
   if (v === "legacy" || v === "enforce" || v === "dry-run" || v === "off") {
     return { mode: v, configured, warning: null };
@@ -207,9 +215,7 @@ export function resolveSoftExpiryMode(raw: string | null | undefined): SoftExpir
   return {
     mode: "dry-run",
     configured,
-    warning:
-      `Unknown SOFT_EXPIRY_MODE "${configured}" — failing safe to dry-run (no soft-expiry stops). ` +
-      `Valid values: legacy, enforce, dry-run, off.`,
+    warning: `Unknown SOFT_EXPIRY_MODE "${configured}" — ${SOFT_EXPIRY_FAIL_SAFE}`,
   };
 }
 

@@ -139,31 +139,57 @@ Deno.test("persistent lab: stale expires_at never deallocates a freshly started 
   );
 });
 
-Deno.test("SOFT_EXPIRY_MODE parsing defaults to legacy", () => {
-  assertEquals(parseSoftExpiryMode(undefined), "legacy");
-  assertEquals(parseSoftExpiryMode(""), "legacy");
-  assertEquals(parseSoftExpiryMode("ENFORCE"), "enforce");
-  assertEquals(parseSoftExpiryMode("dry-run"), "dry-run");
-  assertEquals(parseSoftExpiryMode("off"), "off");
-  assertEquals(parseSoftExpiryMode(" legacy "), "legacy");
-  assertEquals(parseSoftExpiryMode("   "), "legacy");
-});
-
-Deno.test("unknown / typo SOFT_EXPIRY_MODE fails SAFE to dry-run with a warning (Riley #54)", () => {
-  for (const typo of ["dry_run", "dryrun", "disabled", "false", "yes", "Enforced"]) {
-    const cfg = resolveSoftExpiryMode(typo);
-    assertEquals(cfg.mode, "dry-run", typo);
-    assertEquals(cfg.configured, typo);
-    assertEquals(typeof cfg.warning === "string" && cfg.warning.includes(typo), true);
-    // dry-run never enforces anything.
+Deno.test("unset SOFT_EXPIRY_MODE falls back to dry-run", () => {
+  for (const raw of [undefined, null]) {
+    const cfg = resolveSoftExpiryMode(raw);
+    assertEquals(cfg.mode, "dry-run");
+    assertEquals(cfg.configured, null);
+    assertEquals(typeof cfg.warning, "string");
+    assertEquals(cfg.warning!.includes("unset or empty"), true);
+    assertEquals(parseSoftExpiryMode(raw), "dry-run");
     assertEquals(
       softExpiryEnforced(cfg.mode, "running", { reason: "lab_window_expired", trigger: "expires_at" }),
       false,
     );
   }
-  // Unset keeps legacy (backward compatible) with no warning.
-  assertEquals(resolveSoftExpiryMode(undefined), { mode: "legacy", configured: null, warning: null });
-  assertEquals(resolveSoftExpiryMode("ENFORCE").warning, null);
+});
+
+Deno.test("empty SOFT_EXPIRY_MODE falls back to dry-run", () => {
+  for (const raw of ["", "   "]) {
+    const cfg = resolveSoftExpiryMode(raw);
+    assertEquals(cfg.mode, "dry-run");
+    assertEquals(cfg.configured, null);
+    assertEquals(typeof cfg.warning, "string");
+    assertEquals(cfg.warning!.includes("unset or empty"), true);
+    assertEquals(parseSoftExpiryMode(raw), "dry-run");
+  }
+});
+
+Deno.test("unrecognised SOFT_EXPIRY_MODE falls back to dry-run with a warning", () => {
+  for (const typo of ["dry_run", "dryrun", "disabled", "false", "yes", "Enforced", "not-a-mode"]) {
+    const cfg = resolveSoftExpiryMode(typo);
+    assertEquals(cfg.mode, "dry-run", typo);
+    assertEquals(cfg.configured, typo);
+    assertEquals(typeof cfg.warning === "string" && cfg.warning.includes(typo), true);
+    assertEquals(
+      softExpiryEnforced(cfg.mode, "running", { reason: "lab_window_expired", trigger: "expires_at" }),
+      false,
+    );
+  }
+});
+
+Deno.test("explicit SOFT_EXPIRY_MODE values are honoured", () => {
+  for (const mode of ["legacy", "enforce", "dry-run", "off"] as const) {
+    const cfg = resolveSoftExpiryMode(mode);
+    assertEquals(cfg.mode, mode);
+    assertEquals(cfg.configured, mode);
+    assertEquals(cfg.warning, null);
+    assertEquals(parseSoftExpiryMode(mode), mode);
+  }
+  assertEquals(parseSoftExpiryMode("ENFORCE"), "enforce");
+  assertEquals(parseSoftExpiryMode(" legacy "), "legacy");
+  assertEquals(resolveSoftExpiryMode("dry-run").warning, null);
+  assertEquals(resolveSoftExpiryMode("off").warning, null);
 });
 
 Deno.test("legacy mode enforces only the pre-SCRUM-28 scope", () => {
