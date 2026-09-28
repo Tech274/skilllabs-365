@@ -26,7 +26,7 @@ import { HUB_WHATSAPP_UPSELL, readStoredHandoff } from "@/lib/skilltrack-handoff
 import { MessageCircle } from "lucide-react";
 import { LabWalletPanel } from "@/components/LabWalletPanel";
 import { buildLabWallet, isStartBlocked, startBlockedMessage } from "@/lib/lab-wallet";
-import { isResumableStatus, remintAndWaitRunning } from "@/lib/lab-remint";
+import { AlreadyStartingError, isResumableStatus, remintAndWaitRunning } from "@/lib/lab-remint";
 import { cardStatusAfterCancel, PAUSING_CARD_STATUS } from "@/lib/cancel-outcome";
 import { isPendingCancelStop } from "@/lib/stop-retry";
 
@@ -195,6 +195,10 @@ export default function StudentDashboard() {
         toast({ title: "Lab starting", description: "Your lab is getting ready…" });
       }
     } catch (err: unknown) {
+      if (err instanceof AlreadyStartingError) {
+        toast({ title: "Already starting", description: err.message });
+        return;
+      }
       resetIdempotency(`provision:${lab.id}`);
       const raw = err instanceof Error ? err.message : "Failed to provision VM. Please try again.";
       // The cron paused the machine between the card render and this Start:

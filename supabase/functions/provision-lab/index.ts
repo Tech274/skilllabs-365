@@ -672,17 +672,37 @@ Deno.serve(async (req) => {
       }
     }
 
-    const writeAdminStartOverrideAudit = async (outcome: "success" | "failed") => {
+    const adminRestartOutcome = (
+      didStart: boolean,
+      status: string,
+    ): "already_running" | "start_accepted" | "running" => {
+      const normalized = String(status || "").toLowerCase();
+      const live = normalized === "running" || normalized === "idle";
+      if (!didStart) return live ? "already_running" : "start_accepted";
+      return live ? "running" : "start_accepted";
+    };
+
+    const writeAdminStartOverrideAudit = async (
+      restartOutcome: "already_running" | "start_accepted" | "running" | "failed",
+      errorCode?: string,
+    ) => {
       if (!adminOverrideAudit) return;
       const audit = adminOverrideAudit;
       adminOverrideAudit = null;
+      const message = restartOutcome === "failed"
+        ? `Admin Start did not power the VM on${errorCode ? ` (${errorCode})` : ""}. Minutes were not deducted.`
+        : restartOutcome === "already_running"
+          ? "Admin Start found the VM already running. Minutes were not deducted."
+          : restartOutcome === "running"
+            ? "Admin Start powered the VM on. Minutes were not deducted."
+            : "Admin Start was accepted; the VM is still starting. Minutes were not deducted.";
       await recordAudit(supabase, {
         actorId: userId,
         actorType: "user",
         action: "vm.admin_start_override",
         entityType: "virtual_machine",
         entityId: audit.vmId,
-        outcome,
+        outcome: restartOutcome,
         correlationId,
         changes: {
           code: audit.code,
@@ -691,11 +711,10 @@ Deno.serve(async (req) => {
           allocated_minutes: audit.allocated,
           used_minutes: audit.used,
           remaining_minutes: audit.remaining,
-          restart_outcome: outcome,
+          restart_outcome: restartOutcome,
+          ...(errorCode ? { error_code: errorCode } : {}),
         },
-        message: outcome === "success"
-          ? "Admin Start allowed despite the owner's wallet. Minutes were not deducted."
-          : "Admin Start did not power the VM on. Minutes were not deducted.",
+        message,
       });
     };
 
@@ -818,14 +837,19 @@ Deno.serve(async (req) => {
         }
         if (!started) {
           await trace.failed(SOURCE, "remint", "Could not power the existing lab VM back on");
-          await writeAdminStartOverrideAudit("failed");
+          const failureCode = remintGhost
+            ? "GHOST_INSTANCE"
+            : remintMismatch
+              ? "REMINT_PROVIDER_MISMATCH"
+              : "REMINT_START_FAILED";
+          await writeAdminStartOverrideAudit("failed", failureCode);
           const failure = {
             error: remintGhost
               ? "Cloud instance no longer exists (ghost Hub row reconciled to failed). It was NOT terminated by this Start."
               : remintMismatch
                 ? "This lab machine is registered to the wrong cloud provider, so it was not started. It has NOT been deleted — please contact support."
                 : "Your persistent lab machine could not be powered back on. It has NOT been deleted — please retry in a minute or contact support.",
-            code: remintGhost ? "GHOST_INSTANCE" : remintMismatch ? "REMINT_PROVIDER_MISMATCH" : "REMINT_START_FAILED",
+            code: failureCode,
             ...(remintRetryable ? { retryable: true } : {}),
             vm_id: existingVm.id,
             detail: remintDetail,
@@ -858,7 +882,9 @@ Deno.serve(async (req) => {
           : "Existing persistent lab VM is still allocated — reconnecting to it",
         { vm_id: existingVm.id, status: resumed.status },
       );
-      await writeAdminStartOverrideAudit("success");
+      await writeAdminStartOverrideAudit(
+        adminRestartOutcome(needsStart, needsStart ? finalStatus : String(existingVm.status)),
+      );
       if (requestedVmId && String(resumed.vm_id) !== requestedVmId) {
         const mismatch = {
           error: "Start targeted a different machine — refused.",

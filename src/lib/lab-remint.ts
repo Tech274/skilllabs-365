@@ -7,9 +7,11 @@
  *
  * Persistent labs remint through provision-lab with the pinned vm_id. That
  * path resumes the existing machine; it does not create a new one. Other labs
- * resume through cleanup-idle-labs `start-vm`. Both calls send a stable
- * Idempotency-Key, the same way Launch does. A failed start drops the key so
- * the next click is a real retry, not a replay of the stored 503.
+ * resume through cleanup-idle-labs `start-vm`. Each click sends a fresh
+ * Idempotency-Key. The key is dropped on success and on failure, so Leave then
+ * Start is a new request and not a replay of the stored 200. A 409 while that
+ * key is still in progress keeps the key. Double-clicks are refused by the
+ * in-flight guard (the Start button is also disabled while the call runs).
  *
  * We never open Guacamole — and never claim "Connected" — while the machine is
  * deallocated/stopped/starting.
@@ -17,7 +19,7 @@
 
 import { supabase } from "@/integrations/supabase/client";
 import { readFunctionError, readFunctionErrorPayload } from "@/lib/function-error";
-import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
+import { freshIdempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 /** Machine states where the allocation exists but compute is not live yet. */
 export const REMINT_STATUSES = ["deallocated", "stopped", "starting"] as const;
@@ -67,6 +69,30 @@ export class WalletBlockedError extends Error {
   }
 }
 
+/** A second Start while this VM's remint request is still in flight. */
+export class AlreadyStartingError extends Error {
+  constructor(message = "This lab is already starting.") {
+    super(message);
+    this.name = "AlreadyStartingError";
+  }
+}
+
+const inFlightRemints = new Set<string>();
+
+function isAlreadyStartingResponse(
+  error: unknown,
+  data: unknown,
+  payloadError: string,
+  message: string,
+): boolean {
+  const status = (error as { context?: { status?: number } } | null)?.context?.status;
+  if (status === 409) return true;
+  const dataError = data && typeof data === "object" && "error" in data
+    ? String((data as { error?: unknown }).error ?? "")
+    : "";
+  return /already in progress/i.test(payloadError) || /already in progress/i.test(message) || /already in progress/i.test(dataError);
+}
+
 export type RemintOptions = {
   vmId: string;
   /** Required for persistent remint via provision-lab. */
@@ -80,7 +106,7 @@ export type RemintOptions = {
   onPhase?: (phase: "starting" | "waiting-running") => void;
 };
 
-/** Stable key for one VM so a double-click replays instead of starting twice. */
+/** Scope label for the remint key. The key itself is minted fresh per click. */
 export function remintIdempotencyScope(opts: {
   vmId: string;
   labTemplateId?: string | null;
@@ -98,60 +124,82 @@ export function remintIdempotencyScope(opts: {
 export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
   const pollMs = opts.pollMs ?? 5_000;
-
+  if (!opts.vmId) throw new Error(REMINT_FAIL_CODE);
+  if (inFlightRemints.has(opts.vmId)) {
+    throw new AlreadyStartingError();
+  }
+  inFlightRemints.add(opts.vmId);
+  const scope = remintIdempotencyScope(opts);
+  let preserveKey = false;
+  let minted = false;
+  try {
     if (!opts.alreadyStarting) {
-    if (!opts.vmId) throw new Error(REMINT_FAIL_CODE);
-    opts.onPhase?.("starting");
-    const usePersistentRemint = Boolean(opts.isPersistent && opts.labTemplateId);
-    const scope = remintIdempotencyScope(opts);
-    const { data, error } = usePersistentRemint
-      ? await supabase.functions.invoke("provision-lab", {
-          body: { lab_template_id: opts.labTemplateId, vm_id: opts.vmId },
-          headers: idempotencyHeaders(scope),
-        })
-      : await supabase.functions.invoke("cleanup-idle-labs", {
-          body: { action: "start-vm", vm_id: opts.vmId, reason: "learner_start" },
-          headers: idempotencyHeaders(scope),
-        });
-    if (error || data?.error) {
-      resetIdempotency(scope);
-      const payload = await readFunctionErrorPayload(error, data);
-      const msg = await readFunctionError(error, data);
-      const code = String(payload?.code ?? data?.code ?? "");
-      console.error("[remint] start failed:", msg, code, payload?.detail, payload?.aws_state);
-      // Surface wallet blocks so the dashboard can show calm copy.
-      if (code === "LAB_MINUTES_EXHAUSTED" || code === "LAB_WINDOW_ENDED") {
-        throw new WalletBlockedError(code, String(payload?.error ?? data?.error ?? msg));
+      opts.onPhase?.("starting");
+      const usePersistentRemint = Boolean(opts.isPersistent && opts.labTemplateId);
+      const headers = freshIdempotencyHeaders(scope);
+      minted = true;
+      const { data, error } = usePersistentRemint
+        ? await supabase.functions.invoke("provision-lab", {
+            body: { lab_template_id: opts.labTemplateId, vm_id: opts.vmId },
+            headers,
+          })
+        : await supabase.functions.invoke("cleanup-idle-labs", {
+            body: { action: "start-vm", vm_id: opts.vmId, reason: "learner_start" },
+            headers,
+          });
+      if (error || data?.error) {
+        const payload = await readFunctionErrorPayload(error, data);
+        const msg = await readFunctionError(error, data);
+        if (isAlreadyStartingResponse(error, data, String(payload?.error ?? ""), msg)) {
+          // Same key is still in progress on the server. Keep it and do not start again.
+          preserveKey = true;
+          throw new AlreadyStartingError();
+        }
+        const code = String(payload?.code ?? data?.code ?? "");
+        console.error("[remint] start failed:", msg, code, payload?.detail, payload?.aws_state);
+        // Surface wallet blocks so the dashboard can show calm copy.
+        if (code === "LAB_MINUTES_EXHAUSTED" || code === "LAB_WINDOW_ENDED") {
+          throw new WalletBlockedError(code, String(payload?.error ?? data?.error ?? msg));
+        }
+        // P0b: never swallow into bare REMINT_START_FAILED — toast must show
+        // detail / code / aws_state from the edge function body.
+        throw new Error(msg || REMINT_FAIL_CODE);
       }
-      // P0b: never swallow into bare REMINT_START_FAILED — toast must show
-      // detail / code / aws_state from the edge function body.
-      throw new Error(msg || REMINT_FAIL_CODE);
+      // Guard: must return the SAME vm_id (never a new allocation).
+      if (usePersistentRemint && !data?.vm_id) {
+        console.error("[remint] provision-lab returned no vm_id", opts.vmId);
+        throw new Error("REMINT_VM_MISMATCH: no vm_id in response");
+      }
+      if (data?.vm_id && String(data.vm_id) !== String(opts.vmId)) {
+        console.error("[remint] start returned different vm_id", data.vm_id, opts.vmId);
+        throw new Error(`REMINT_VM_MISMATCH: requested ${opts.vmId}, got ${data.vm_id}`);
+      }
+      // Drop the key as soon as the start call succeeds, before the running poll.
+      // The next click (after Leave, or a retry) must not replay this 200.
+      resetIdempotency(scope);
+      minted = false;
     }
-    // Guard: must return the SAME vm_id (never a new allocation).
-    if (usePersistentRemint && !data?.vm_id) {
-      console.error("[remint] provision-lab returned no vm_id", opts.vmId);
-      throw new Error("REMINT_VM_MISMATCH: no vm_id in response");
-    }
-    if (data?.vm_id && String(data.vm_id) !== String(opts.vmId)) {
-      console.error("[remint] start returned different vm_id", data.vm_id, opts.vmId);
-      throw new Error(`REMINT_VM_MISMATCH: requested ${opts.vmId}, got ${data.vm_id}`);
-    }
-  }
 
-  opts.onPhase?.("waiting-running");
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const { data: statusData } = await supabase.functions.invoke("check-vm-status", {
-      body: { vm_id: opts.vmId },
-    });
-    const status = String(statusData?.status ?? "").toLowerCase();
-    if (status === "running" || status === "idle") return;
-    if (status === "failed" || status === "terminated") {
-      throw new Error(
-        `${REMINT_FAIL_CODE}: check-vm-status reported ${status} (code may be GHOST_INSTANCE)`,
-      );
+    opts.onPhase?.("waiting-running");
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      const { data: statusData } = await supabase.functions.invoke("check-vm-status", {
+        body: { vm_id: opts.vmId },
+      });
+      const status = String(statusData?.status ?? "").toLowerCase();
+      if (status === "running" || status === "idle") return;
+      if (status === "failed" || status === "terminated") {
+        throw new Error(
+          `${REMINT_FAIL_CODE}: check-vm-status reported ${status} (code may be GHOST_INSTANCE)`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, pollMs));
     }
-    await new Promise((r) => setTimeout(r, pollMs));
+    throw new Error(`${REMINT_FAIL_CODE}: timed out waiting for running after ${timeoutMs}ms`);
+  } catch (err) {
+    if (minted && !preserveKey) resetIdempotency(scope);
+    throw err;
+  } finally {
+    inFlightRemints.delete(opts.vmId);
   }
-  throw new Error(`${REMINT_FAIL_CODE}: timed out waiting for running after ${timeoutMs}ms`);
 }

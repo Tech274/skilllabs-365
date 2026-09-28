@@ -40,6 +40,21 @@ export function idempotencyHeaders(scope: string): Record<string, string> {
   return { "Idempotency-Key": idempotencyKey(scope) };
 }
 
+/**
+ * A brand-new key for this click. Remint must not reuse the 10-minute window:
+ * a stored completed 200 would replay and skip StartInstances.
+ * The key is still written under the scope so a 409 can leave it in place.
+ */
+export function freshIdempotencyHeaders(scope: string): Record<string, string> {
+  const key = makeKey();
+  try {
+    sessionStorage.setItem(STORAGE_PREFIX + scope, JSON.stringify({ key, at: Date.now() }));
+  } catch {
+    // sessionStorage unavailable — the header is still a fresh key.
+  }
+  return { "Idempotency-Key": key };
+}
+
 /** Drop the stored key so the next attempt starts a brand new operation. */
 export function resetIdempotency(scope: string): void {
   try {

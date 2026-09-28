@@ -155,7 +155,8 @@ npm run functions:test    # deno test supabase/functions/
   either list, before any session or VM-row write and before any cloud call.
   Learner leave on a guarded VM returns 200
   `{ success: true, kept_running: true, reason: "VM_PROTECTED" }`, closes only
-  the learner's session row, and does not write the VM row or call the cloud
+  the caller's own session (`user_id`, plus `session_id` when the request
+  includes one), and does not write the VM row or call the cloud
   (the VM is left running). There is no admin bypass on
   delete: remove the VM from the held or protected list first. Admin Start of
   a persistent VM whose owner is out of minutes is allowed, audited, and does
@@ -245,7 +246,7 @@ Admin-authenticated POST to `cleanup-idle-labs`:
 | `{}` | full auto-cleanup pass |
 | `{"action":"expiry-preview"}` | **dry run** — list VMs the soft-expiry sweep would deallocate now, with reason/trigger (no cloud calls, no writes) |
 | `{"action":"stop-vm","vm_id":"…"}` | deallocate one VM after the cloud stop is confirmed (423 if guarded, and the session is not closed; 502 pending if the cloud state is not final). Azure `stopped` is not final |
-| `{"action":"learner-leave","vm_id":"…"}` | soft-stop. On a guarded VM: **200** `{ success: true, kept_running: true, reason: "VM_PROTECTED", message }` — session closed, no VM write, no cloud call, VM left running |
+| `{"action":"learner-leave","vm_id":"…"}` | soft-stop. On a guarded VM: **200** `{ success: true, kept_running: true, reason: "VM_PROTECTED", message }` — only the caller's session is closed (`user_id`, and `session_id` when sent), no VM write, no cloud call, VM left running |
 | `{"action":"delete-vm","vm_id":"…"}` | delete one VM. **423 `VM_PROTECTED`** if it matches `VM_PROTECTED_IDS`, `CLEANUP_HELD_VM_IDS`, or built-in `bba27e8f` (no admin bypass; remove it from the list first) |
 | `{"action":"purge-failed"}` | **410 TERMINATE_DISABLED** — stop-only, no row delete and no cloud terminate |
 | `{"action":"clear-guacamole"}` | drop all gateway connections |

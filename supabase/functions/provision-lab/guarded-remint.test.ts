@@ -19,12 +19,14 @@ Deno.test("capped remint is 503 retryable with no row clear, and the override au
   const clear = src.indexOf("ended_at: null");
   const startCall = src.indexOf("await startCloudVm(");
   const helper = src.indexOf("const writeAdminStartOverrideAudit");
-  const failedAudit = src.indexOf('writeAdminStartOverrideAudit("failed")');
-  const successAudit = src.indexOf('writeAdminStartOverrideAudit("success")');
+  const failedAudit = src.indexOf('writeAdminStartOverrideAudit("failed"');
+  const resultAudit = src.indexOf("writeAdminStartOverrideAudit(\n        adminRestartOutcome(");
   const retryable = src.indexOf("retryable: true");
   assert(startedWrite > 0 && clear > startedWrite, "ended_* is cleared only after a start was accepted");
   assert(helper > 0 && !src.slice(0, helper).includes('action: "vm.admin_start_override"'), "override audit is not written up front");
   assert(failedAudit > startCall, "failed override audit is after StartInstances returns");
-  assert(successAudit > failedAudit, "success override audit is after a known restart");
-  assert(retryable > failedAudit && retryable < successAudit, "retryable 503 is the cap-before-start failure");
+  assert(resultAudit > failedAudit, "override audit records the real restart outcome");
+  assert(!src.includes('writeAdminStartOverrideAudit("success")'), "override audit must not record a blanket success");
+  assert(src.includes('"already_running"') && src.includes('"start_accepted"') && src.includes("error_code"));
+  assert(retryable > failedAudit && retryable < resultAudit, "retryable 503 is the cap-before-start failure");
 });

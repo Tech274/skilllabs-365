@@ -6,7 +6,7 @@ vi.mock("@/integrations/supabase/client", () => ({
   supabase: { functions: { invoke } },
 }));
 
-import { isResumableStatus, needsRemint, remintAndWaitRunning, remintIdempotencyScope, shouldEndOnCountdown } from "@/lib/lab-remint";
+import { AlreadyStartingError, isResumableStatus, needsRemint, remintAndWaitRunning, remintIdempotencyScope, shouldEndOnCountdown } from "@/lib/lab-remint";
 
 describe("lab-remint helpers", () => {
   it("needsRemint covers powered-off and starting", () => {
@@ -51,7 +51,7 @@ describe("remint idempotency key", () => {
     expect(remintIdempotencyScope({ vmId: "vm-1", labTemplateId: "lab-1" })).toBe("start-vm:vm-1");
   });
 
-  it("sends Idempotency-Key on provision-lab and reuses it for a second click", async () => {
+  it("sends Idempotency-Key on provision-lab and a second click gets a different key", async () => {
     invoke.mockImplementation(async (name: string) => {
       if (name === "check-vm-status") return { data: { status: "running" }, error: null };
       return { data: { vm_id: "vm-1", status: "starting" }, error: null };
@@ -62,8 +62,67 @@ describe("remint idempotency key", () => {
     const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
     expect(starts).toHaveLength(2);
     expect(starts[0][1].headers["Idempotency-Key"]).toEqual(expect.any(String));
-    expect(starts[0][1].headers["Idempotency-Key"]).toBe(starts[1][1].headers["Idempotency-Key"]);
+    expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
     expect(starts[0][1].body).toEqual({ lab_template_id: "lab-1", vm_id: "vm-1" });
+  });
+
+  it("start, then leave, then start again sends a new provision-lab request", async () => {
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-1", status: "starting" }, error: null };
+    });
+    const opts = { vmId: "vm-1", labTemplateId: "lab-1", isPersistent: true as const };
+    await remintAndWaitRunning(opts);
+    // Leave does not remint. The stored key must already be gone so the next
+    // Start cannot replay the completed 200.
+    expect(sessionStorage.getItem("idem:provision:lab-1:vm-1")).toBeNull();
+    await remintAndWaitRunning(opts);
+    const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
+    expect(starts).toHaveLength(2);
+    expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
+    expect(starts[1][1].body).toEqual({ lab_template_id: "lab-1", vm_id: "vm-1" });
+  });
+
+  it("refuses a second click while the first request is in flight", async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "provision-lab") await gate;
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-1", status: "starting" }, error: null };
+    });
+    const opts = { vmId: "vm-1", labTemplateId: "lab-1", isPersistent: true as const };
+    const first = remintAndWaitRunning(opts);
+    const second = remintAndWaitRunning(opts);
+    await expect(second).rejects.toBeInstanceOf(AlreadyStartingError);
+    release();
+    await first;
+    const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
+    expect(starts).toHaveLength(1);
+  });
+
+  it("keeps the key and reports already starting when the server returns 409", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: {
+        message: "Edge Function returned a non-2xx status code",
+        context: {
+          status: 409,
+          error: "A provisioning request with this idempotency key is already in progress.",
+        },
+      },
+    });
+    await expect(remintAndWaitRunning({
+      vmId: "vm-1",
+      labTemplateId: "lab-1",
+      isPersistent: true,
+    })).rejects.toThrow(/already starting/i);
+    const sent = invoke.mock.calls[0][1].headers["Idempotency-Key"] as string;
+    const raw = sessionStorage.getItem("idem:provision:lab-1:vm-1");
+    expect(raw).toBeTruthy();
+    expect(JSON.parse(raw as string).key).toBe(sent);
   });
 
   it("sends Idempotency-Key on cleanup start-vm", async () => {

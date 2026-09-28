@@ -588,7 +588,7 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
     // passes or purge. Stop, cancel, delete, and start on a guarded VM return
     // 423 before any session or VM-row write and before any cloud call.
     // Learner leave on a guarded VM returns 200 kept_running, closes only the
-    // learner session, and does not write the VM row or call the cloud.
+    // caller's session, and does not write the VM row or call the cloud.
     // There is no admin bypass on delete; remove the VM from the list first.
     const heldConfig = parseHeldVmConfig(Deno.env.get("CLEANUP_HELD_VM_IDS"));
     const heldVms = heldConfig.entries;
@@ -809,10 +809,12 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
       let hubStatus = String(vm.status || "running");
       const priorStatus = hubStatus;
 
-      // Guarded leave: close only the learner session (same fields as a normal
-      // Leave, so the wallet stops). No audit write, no VM-row write, no cloud call.
+      // Guarded leave: close only the learner session (the caller's user_id,
+      // and the session id when the request includes one). Same fields as a
+      // normal Leave, so the wallet stops. No audit write, no VM-row write, no cloud call.
       if (leaveGuarded) {
-        await supabase
+        const requestedSessionId = typeof rawBody.session_id === "string" ? rawBody.session_id.trim() : "";
+        let sessionClose = supabase
           .from("sessions")
           .update({
             ended_at: nowIso,
@@ -820,7 +822,10 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
             disconnect_reason: "learner_leave",
           })
           .eq("vm_id", targetVmId)
-          .eq("status", "active");
+          .eq("status", "active")
+          .eq("user_id", auth.userId);
+        if (requestedSessionId) sessionClose = sessionClose.eq("id", requestedSessionId);
+        await sessionClose;
         console.log(JSON.stringify({
           event: "learner_leave",
           vm_id: targetVmId,

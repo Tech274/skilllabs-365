@@ -27,7 +27,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
 import { readFunctionError } from "@/lib/function-error";
-import { remintAndWaitRunning, WalletBlockedError, REMINT_CALM_COPY, REMINT_FAIL_CODE } from "@/lib/lab-remint";
+import { remintAndWaitRunning, AlreadyStartingError, WalletBlockedError, REMINT_CALM_COPY, REMINT_FAIL_CODE } from "@/lib/lab-remint";
 import { fetchVmWalletBlock, shouldRunClientWalletPrecheck } from "@/lib/lab-wallet";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -500,6 +500,10 @@ export default function VirtualMachines() {
           description: err.message,
           variant: "destructive",
         });
+        return;
+      }
+      if (err instanceof AlreadyStartingError) {
+        toast({ title: "Already starting", description: err.message });
         return;
       }
       const msg = err instanceof Error ? err.message : "Unknown error";

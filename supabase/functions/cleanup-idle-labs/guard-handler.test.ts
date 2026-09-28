@@ -129,6 +129,124 @@ Deno.test("guarded leave closes only the learner session and calls no cloud", as
   assertEquals(leave.cloud, []);
 });
 
+Deno.test("guarded leave closes only the caller's session when two are active on the VM", async () => {
+  const caller = "00000000-0000-0000-0000-000000000001";
+  const other = "00000000-0000-0000-0000-000000000099";
+  const sessions = [
+    { id: "sess-caller", vm_id: GUARDED_ID, user_id: caller, status: "active", ended_at: null as string | null, disconnect_reason: null as string | null },
+    { id: "sess-other", vm_id: GUARDED_ID, user_id: other, status: "active", ended_at: null as string | null, disconnect_reason: null as string | null },
+    { id: "sess-caller-2", vm_id: GUARDED_ID, user_id: caller, status: "active", ended_at: null as string | null, disconnect_reason: null as string | null },
+  ];
+  const vmWrites: string[] = [];
+  const vm = {
+    id: GUARDED_ID,
+    azure_vm_id: "i-0123456789abcdef0",
+    status: "running",
+    user_id: "owner",
+    lab_template_id: "tpl",
+    provider_account_id: "acct",
+    region: "us-east-1",
+    private_ip: "10.0.0.5",
+    expires_at: null,
+    ended_reason: null,
+  };
+  const from = (table: string) => {
+    const eqs: { col: string; val: unknown }[] = [];
+    let patch: Record<string, unknown> | null = null;
+    const builder: Record<string, unknown> = {};
+    const chain = () => builder;
+    builder.select = chain;
+    builder.is = chain;
+    builder.in = chain;
+    builder.or = chain;
+    builder.order = chain;
+    builder.limit = chain;
+    builder.filter = chain;
+    builder.gte = chain;
+    builder.neq = chain;
+    builder.not = chain;
+    builder.eq = (col: string, val: unknown) => {
+      eqs.push({ col, val });
+      return builder;
+    };
+    builder.update = (next: Record<string, unknown>) => {
+      patch = next;
+      if (table === "virtual_machines") vmWrites.push("virtual_machines.update");
+      return builder;
+    };
+    builder.insert = () => {
+      if (table === "virtual_machines") vmWrites.push("virtual_machines.insert");
+      return builder;
+    };
+    builder.delete = () => {
+      if (table === "virtual_machines") vmWrites.push("virtual_machines.delete");
+      return builder;
+    };
+    const apply = () => {
+      if (table === "sessions" && patch) {
+        for (const row of sessions) {
+          const match = eqs.every((f) => (row as Record<string, unknown>)[f.col] === f.val);
+          if (match) Object.assign(row, patch);
+        }
+      }
+      if (table === "virtual_machines") return { data: vm, error: null, count: 0 };
+      return { data: null, error: null, count: 0 };
+    };
+    builder.maybeSingle = () => Promise.resolve(apply());
+    builder.single = () => Promise.resolve(apply());
+    builder.then = (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
+      Promise.resolve(apply()).then(resolve, reject);
+    return builder;
+  };
+  const client = {
+    from,
+    rpc: () => Promise.resolve({ data: false, error: null }),
+  };
+  const auth: AuthCtx = {
+    supabase: client as never,
+    userId: caller,
+    email: null,
+    isServiceRole: true,
+  };
+  const cloud: string[] = [];
+  const leave = async (sessionId?: string) => {
+    for (const row of sessions) {
+      row.status = "active";
+      row.ended_at = null;
+      row.disconnect_reason = null;
+    }
+    const res = await handleCleanupRequest(
+      new Request("https://example.test/cleanup-idle-labs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "learner-leave",
+          vm_id: vm.id,
+          ...(sessionId ? { session_id: sessionId } : {}),
+        }),
+      }),
+      { supabase: client, auth, onCloud: (name) => cloud.push(name) },
+    );
+    return { status: res.status, body: await res.json() };
+  };
+
+  const unscoped = await leave();
+  assertEquals(unscoped.status, 200);
+  assertEquals(unscoped.body.kept_running, true);
+  assertEquals(unscoped.body.reason, "VM_PROTECTED");
+  assertEquals(sessions.find((row) => row.id === "sess-caller")?.status, "completed");
+  assertEquals(sessions.find((row) => row.id === "sess-caller-2")?.status, "completed");
+  assertEquals(sessions.find((row) => row.id === "sess-other")?.status, "active");
+
+  const scoped = await leave("sess-caller");
+  assertEquals(scoped.status, 200);
+  assertEquals(sessions.find((row) => row.id === "sess-caller")?.status, "completed");
+  assertEquals(sessions.find((row) => row.id === "sess-caller-2")?.status, "active");
+  assertEquals(sessions.find((row) => row.id === "sess-other")?.status, "active");
+  assertEquals(vmWrites, []);
+  assertEquals(cloud, []);
+});
+
 Deno.test("start-vm capped before StartInstances is 503 retryable and writes nothing", async () => {
   const vm = {
     id: "11111111-2222-4333-8444-555555555555",

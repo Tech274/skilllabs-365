@@ -33,6 +33,7 @@ import {
   remintAndWaitRunning,
   shouldEndOnCountdown,
   WalletBlockedError,
+  AlreadyStartingError,
   REMINT_CALM_COPY,
   REMINT_FAIL_CODE,
 } from "@/lib/lab-remint";
@@ -409,6 +410,14 @@ export default function LabSession() {
           if (cancelled) return;
           if (err instanceof WalletBlockedError) {
             showWalletBlock(err.code, err.message);
+            return;
+          }
+          if (err instanceof AlreadyStartingError) {
+            setReminting(false);
+            toast({
+              title: "Already starting",
+              description: err.message,
+            });
             return;
           }
           setReminting(false);
