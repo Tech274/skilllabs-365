@@ -6,7 +6,7 @@ vi.mock("@/integrations/supabase/client", () => ({
   supabase: { functions: { invoke } },
 }));
 
-import { AlreadyStartingError, isResumableStatus, needsRemint, remintAndWaitRunning, remintIdempotencyScope, shouldEndOnCountdown } from "@/lib/lab-remint";
+import { adminStartVm, AlreadyStartingError, isResumableStatus, needsRemint, remintAndWaitRunning, remintIdempotencyScope, shouldEndOnCountdown } from "@/lib/lab-remint";
 
 describe("lab-remint helpers", () => {
   it("needsRemint covers powered-off and starting", () => {
@@ -97,8 +97,13 @@ describe("remint idempotency key", () => {
     const first = remintAndWaitRunning(opts);
     const second = remintAndWaitRunning(opts);
     await expect(second).rejects.toBeInstanceOf(AlreadyStartingError);
+    const during = sessionStorage.getItem("idem:provision:lab-1:vm-1");
+    expect(during).toBeTruthy();
+    const inFlightKey = JSON.parse(during as string).key as string;
+    expect(invoke.mock.calls.find((call) => call[0] === "provision-lab")?.[1].headers["Idempotency-Key"]).toBe(inFlightKey);
     release();
     await first;
+    expect(sessionStorage.getItem("idem:provision:lab-1:vm-1")).toBeNull();
     const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
     expect(starts).toHaveLength(1);
   });
@@ -153,5 +158,57 @@ describe("remint idempotency key", () => {
     await remintAndWaitRunning({ vmId: "vm-1", labTemplateId: "lab-1", isPersistent: true });
     const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
     expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
+  });
+});
+
+describe("admin /vms Start", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    sessionStorage.clear();
+  });
+
+  it("gives a persistent admin Start a fresh key per click and drops it after success", async () => {
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-9", status: "starting" }, error: null };
+    });
+    const opts = { vmId: "vm-9", labTemplateId: "lab-9", isPersistent: true as const };
+    await adminStartVm(opts);
+    expect(sessionStorage.getItem("idem:provision:lab-9:vm-9")).toBeNull();
+    await adminStartVm(opts);
+    const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
+    expect(starts).toHaveLength(2);
+    expect(starts[0][1].headers["Idempotency-Key"]).toEqual(expect.any(String));
+    expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
+    expect(starts[0][1].body).toEqual({ lab_template_id: "lab-9", vm_id: "vm-9" });
+    expect(starts[1][1].body).toEqual({ lab_template_id: "lab-9", vm_id: "vm-9" });
+  });
+
+  it("gives a non-persistent admin Start a fresh key per click and drops it after success", async () => {
+    invoke.mockResolvedValue({ data: { vm_id: "vm-9", status: "starting" }, error: null });
+    await adminStartVm({ vmId: "vm-9" });
+    expect(sessionStorage.getItem("idem:start-vm:vm-9")).toBeNull();
+    await adminStartVm({ vmId: "vm-9" });
+    const starts = invoke.mock.calls.filter((call) => call[0] === "cleanup-idle-labs");
+    expect(starts).toHaveLength(2);
+    expect(starts[0][1].body).toEqual({ action: "start-vm", vm_id: "vm-9", reason: "admin_start" });
+    expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
+  });
+
+  it("keeps the admin Start key when a second in-flight click is a 409", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: {
+        message: "Edge Function returned a non-2xx status code",
+        context: {
+          status: 409,
+          error: "A provisioning request with this idempotency key is already in progress.",
+        },
+      },
+    });
+    await expect(adminStartVm({ vmId: "vm-9" })).rejects.toThrow(/already starting/i);
+    const sent = invoke.mock.calls[0][1].headers["Idempotency-Key"] as string;
+    const raw = sessionStorage.getItem("idem:start-vm:vm-9");
+    expect(JSON.parse(raw as string).key).toBe(sent);
   });
 });

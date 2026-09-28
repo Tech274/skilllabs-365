@@ -58,11 +58,18 @@ export async function claimIdempotency(
     };
   }
 
-  const createdMs = existing?.created_at ? Date.parse(String(existing.created_at)) : NaN;
+  // Compare and filter with the timestamptz string exactly as read. A Date
+  // round-trip (toISOString) drops microseconds and rewrites the offset, so
+  // the .eq("created_at") filter would miss the row and the claim would stick.
+  const createdAt = typeof existing?.created_at === "string" && existing.created_at.length > 0
+    ? existing.created_at
+    : null;
+  const createdMs = createdAt ? Date.parse(createdAt) : NaN;
   const stale = existing?.status === "in_progress"
+    && createdAt !== null
     && Number.isFinite(createdMs)
     && now.getTime() - createdMs >= IDEMPOTENCY_IN_PROGRESS_TTL_MS;
-  if (stale && existing?.created_at) {
+  if (stale && createdAt) {
     // Pin the delete to this exact stale row. A delete on status alone can
     // remove the row a concurrent retry just inserted, so both would get "new".
     const { data: removed, error: delErr } = await supabase
@@ -72,7 +79,7 @@ export async function claimIdempotency(
       .eq("action", args.action)
       .eq("idempotency_key", args.key)
       .eq("status", "in_progress")
-      .eq("created_at", existing.created_at)
+      .eq("created_at", createdAt)
       .select("idempotency_key");
     if (delErr) throw new Error(`Idempotency reclaim failed: ${delErr.message}`);
     if (!removed || removed.length !== 1) {

@@ -203,3 +203,58 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
     inFlightRemints.delete(opts.vmId);
   }
 }
+
+/**
+ * Admin Start on /vms. Persistent labs use the same fresh-key remint as a
+ * learner. Other labs call cleanup `start-vm` with reason `admin_start` and
+ * do not wait for running. Either way the key is new per click, dropped on
+ * success and on failure, and kept when the server returns 409.
+ */
+export async function adminStartVm(opts: {
+  vmId: string;
+  labTemplateId?: string | null;
+  isPersistent?: boolean;
+  onPhase?: RemintOptions["onPhase"];
+}): Promise<void> {
+  if (opts.isPersistent && opts.labTemplateId) {
+    await remintAndWaitRunning({
+      vmId: opts.vmId,
+      labTemplateId: opts.labTemplateId,
+      isPersistent: true,
+      onPhase: opts.onPhase,
+    });
+    return;
+  }
+  if (!opts.vmId) throw new Error(REMINT_FAIL_CODE);
+  if (inFlightRemints.has(opts.vmId)) throw new AlreadyStartingError();
+  inFlightRemints.add(opts.vmId);
+  const scope = remintIdempotencyScope({ vmId: opts.vmId });
+  let preserveKey = false;
+  let minted = false;
+  try {
+    const headers = freshIdempotencyHeaders(scope);
+    minted = true;
+    const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
+      body: { action: "start-vm", vm_id: opts.vmId, reason: "admin_start" },
+      headers,
+    });
+    if (error || data?.error) {
+      const payload = await readFunctionErrorPayload(error, data);
+      const msg = await readFunctionError(error, data);
+      if (isAlreadyStartingResponse(error, data, String(payload?.error ?? ""), msg)) {
+        preserveKey = true;
+        throw new AlreadyStartingError();
+      }
+      const code = String(payload?.code ?? data?.code ?? "");
+      console.error("[admin-start] start failed:", msg, code, payload?.detail, payload?.aws_state);
+      throw new Error(msg || REMINT_FAIL_CODE);
+    }
+    resetIdempotency(scope);
+    minted = false;
+  } catch (err) {
+    if (minted && !preserveKey) resetIdempotency(scope);
+    throw err;
+  } finally {
+    inFlightRemints.delete(opts.vmId);
+  }
+}

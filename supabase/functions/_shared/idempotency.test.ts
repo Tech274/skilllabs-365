@@ -107,6 +107,27 @@ Deno.test("in_progress idempotency claims expire after about 5 minutes", async (
   assertEquals(stale[0].created_at, now.toISOString());
 });
 
+Deno.test("stale reclaim matches the stored created_at string, not a reformatted timestamp", async () => {
+  const now = new Date("2026-09-28T00:00:00.000Z");
+  // Postgres-style timestamptz: microseconds and a numeric offset. toISOString()
+  // is a different string ("...00.123Z"), so a Date round-trip would miss the row.
+  const stored = "2026-09-27T18:50:00.123456+00:00";
+  assertEquals(new Date(stored).toISOString() === stored, false);
+  const rows: Row[] = [{
+    idempotency_key: base.key,
+    user_id: "u1",
+    action: base.action,
+    status: "in_progress",
+    correlation_id: "killed",
+    created_at: stored,
+  }];
+  const reclaimed = await claimIdempotency(fakeDb(rows), { ...base, correlationId: "retry", now });
+  assertEquals(reclaimed.outcome, "new");
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].correlation_id, "retry");
+  assertEquals(rows[0].created_at, now.toISOString());
+});
+
 Deno.test("two concurrent stale reclaimers: exactly one wins", async () => {
   const now = new Date("2026-09-28T00:00:00.000Z");
   const staleAt = new Date(now.getTime() - IDEMPOTENCY_IN_PROGRESS_TTL_MS - 1_000).toISOString();

@@ -26,8 +26,7 @@ import type { VMStatus } from "@/lib/types";
 import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "@/integrations/supabase/client";
 import { toast } from "@/hooks/use-toast";
-import { readFunctionError } from "@/lib/function-error";
-import { remintAndWaitRunning, AlreadyStartingError, WalletBlockedError, REMINT_CALM_COPY, REMINT_FAIL_CODE } from "@/lib/lab-remint";
+import { adminStartVm, AlreadyStartingError, WalletBlockedError, REMINT_CALM_COPY, REMINT_FAIL_CODE } from "@/lib/lab-remint";
 import { fetchVmWalletBlock, shouldRunClientWalletPrecheck } from "@/lib/lab-wallet";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
@@ -459,7 +458,7 @@ export default function VirtualMachines() {
           const block = await fetchVmWalletBlock(vm.id);
           if (block) throw new WalletBlockedError(block.code, block.message);
         }
-        await remintAndWaitRunning({
+        await adminStartVm({
           vmId: vm.id,
           labTemplateId: vm.lab_template_id,
           isPersistent: true,
@@ -476,17 +475,14 @@ export default function VirtualMachines() {
         toast({ title: "VM Running", description: "Same machine is back on. Connect is available." });
         return;
       }
-      const { data, error } = await supabase.functions.invoke("cleanup-idle-labs", {
-        body: { action: "start-vm", vm_id: vm.id, reason: "admin_start" },
-      });
-      // Non-2xx hides JSON in FunctionsHttpError.context — unwrap like LabManagement/remint.
-      if (error || data?.error) {
-        // P0a: ghost reconcile may have marked Hub failed — reflect in UI.
-        const msg = await readFunctionError(error, data);
+      try {
+        await adminStartVm({ vmId: vm.id });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "";
         if (/GHOST_INSTANCE|ghost|not-found|InvalidInstanceID/i.test(msg)) {
           setVms((prev) => prev.map((row) => (row.id === vm.id ? { ...row, status: "failed" } : row)));
         }
-        throw new Error(msg);
+        throw err;
       }
       toast({
         title: "VM Starting",
