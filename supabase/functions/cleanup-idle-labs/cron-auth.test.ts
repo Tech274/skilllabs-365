@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { withCronSecretEnv } from "../_shared/cron-auth.ts";
+import { withCronSecretEnv } from "../_shared/cron-auth.test-helpers.ts";
 
 Deno.env.set("DENO_TESTING", "1");
 Deno.env.set("CLEANUP_SKIP_SERVE", "1");
@@ -179,8 +179,126 @@ Deno.test("right cron secret cannot call admin-only mutating actions", async () 
     for (const action of actions) {
       const res = await call(action, FIXTURE, client, { vm_id: HELD_ID });
       assertEquals(res.status, 403, action);
+      assertEquals(res.body.error, "Forbidden", action);
+      assertEquals(res.body.success, undefined, action);
+      assertEquals(res.body.soft_expiry, undefined, action);
       assertEquals(writes, []);
       assertEquals(res.cloud, []);
     }
   });
+});
+
+Deno.test("empty x-cron-secret header is 401", async () => {
+  const { client, writes } = emptyClient();
+  await withCronSecretEnv(FIXTURE, async () => {
+    const res = await call("scheduled-cleanup", "", client);
+    assertEquals(res.status, 401);
+    assertEquals(writes, []);
+    assertEquals(res.cloud, []);
+  });
+});
+
+Deno.test("unknown action with a valid cron secret is 403 and is not scheduled cleanup", async () => {
+  const { client, writes } = emptyClient();
+  await withCronSecretEnv(FIXTURE, async () => {
+    const res = await call("not-a-real-action", FIXTURE, client);
+    assertEquals(res.status, 403);
+    assertEquals(res.body.error, "Forbidden");
+    assertEquals(res.body.success, undefined);
+    assertEquals(res.body.soft_expiry, undefined);
+    assertEquals(writes, []);
+    assertEquals(res.cloud, []);
+  });
+});
+
+const EXTRA_HELD_ID = "d1a1d000-1111-4111-8111-111111111111";
+const EXTRA_PROTECTED_ID = "e2b2e000-1111-4111-8111-111111111111";
+
+function dueVmClient(id: string) {
+  return chainClient((table) => {
+    if (table === "virtual_machines") {
+      return [{
+        id,
+        azure_vm_id: "i-0synth00000000001",
+        status: "running",
+        expires_at: "2000-01-01T00:00:00.000Z",
+        user_id: "11111111-1111-4111-8111-111111111111",
+        lab_template_id: "22222222-2222-4222-8222-222222222222",
+        provider_account_id: null,
+        region: null,
+        created_at: "2000-01-01T00:00:00.000Z",
+      }];
+    }
+    if (table === "lab_templates") {
+      return [{
+        id: "22222222-2222-4222-8222-222222222222",
+        name: "Synthetic Lab",
+        duration: 60,
+        is_persistent: false,
+        end_date: null,
+      }];
+    }
+    return [];
+  });
+}
+
+async function withEnv(vars: Record<string, string | null>, fn: () => Promise<void>): Promise<void> {
+  const saved = new Map<string, string | undefined>();
+  for (const key of Object.keys(vars)) saved.set(key, Deno.env.get(key));
+  try {
+    for (const [key, value] of Object.entries(vars)) {
+      if (value === null) Deno.env.delete(key);
+      else Deno.env.set(key, value);
+    }
+    await fn();
+  } finally {
+    for (const [key, prev] of saved) {
+      if (prev === undefined) Deno.env.delete(key);
+      else Deno.env.set(key, prev);
+    }
+  }
+}
+
+Deno.test("cron scheduled cleanup skips a non-built-in CLEANUP_HELD_VM_IDS entry", async () => {
+  assertEquals(EXTRA_HELD_ID.startsWith("bba27e8f"), false);
+  const { client, writes } = dueVmClient(EXTRA_HELD_ID);
+  await withCronSecretEnv(FIXTURE, () =>
+    withEnv({
+      CLEANUP_HELD_VM_IDS: EXTRA_HELD_ID,
+      VM_PROTECTED_IDS: null,
+      SOFT_EXPIRY_MODE: "enforce",
+    }, async () => {
+      const res = await call("scheduled-cleanup", FIXTURE, client);
+      assertEquals(res.status, 200);
+      assertEquals(res.body.success, true);
+      assertEquals(res.body.soft_expiry.due, 1);
+      assertEquals(res.body.soft_expiry.held_skipped, 1);
+      assertEquals(res.body.soft_expiry.deallocated, 0);
+      assertEquals(res.body.soft_expiry.stop_failed, 0);
+      assertEquals(res.cloud, []);
+      assertEquals(writes, []);
+    })
+  );
+});
+
+Deno.test("cron scheduled cleanup skips a VM listed only in VM_PROTECTED_IDS", async () => {
+  assertEquals(EXTRA_PROTECTED_ID.startsWith("bba27e8f"), false);
+  const { client, writes } = dueVmClient(EXTRA_PROTECTED_ID);
+  await withCronSecretEnv(FIXTURE, () =>
+    withEnv({
+      CLEANUP_HELD_VM_IDS: null,
+      VM_PROTECTED_IDS: EXTRA_PROTECTED_ID,
+      SOFT_EXPIRY_MODE: "enforce",
+    }, async () => {
+      const res = await call("scheduled-cleanup", FIXTURE, client);
+      assertEquals(res.status, 200);
+      assertEquals(res.body.success, true);
+      assertEquals(res.body.soft_expiry.due, 1);
+      assertEquals(res.body.soft_expiry.held_skipped, 1);
+      assertEquals(res.body.soft_expiry.deallocated, 0);
+      assertEquals(res.body.soft_expiry.stop_failed, 0);
+      assertEquals(res.cloud, []);
+      assertEquals(writes, []);
+    })
+  );
 });

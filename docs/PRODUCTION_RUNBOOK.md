@@ -187,18 +187,25 @@ dry-run and writes nothing (promotions included) unless
 also sends `dry_run: true`. Jobs 4 and 9 authenticate with `x-cron-secret`
 (Vault name `cron_shared_secret`) and `Authorization`.
 
-`cleanup-idle-labs` accepts that same header for the scheduled cleanup
+`cleanup-idle-labs`, `labs-watchdog`, and `vm-reconcile` share
+`cronSecretMatches` (`supabase/functions/_shared/cron-auth.ts`). The compare is
+constant-time, does not trim the header or the secret, and fails when
+`CRON_SHARED_SECRET` is unset or empty (an empty `x-cron-secret` is also a
+failure). `cleanup-idle-labs` accepts that header for the scheduled cleanup
 (`{}`, which is `auto-cleanup`; `scheduled-cleanup` is the same pass) and for
-`expiry-preview` (read-only: no writes, no cloud calls). The compare is
-constant-time and fails when `CRON_SHARED_SECRET` is unset or empty. A valid
-cron secret does not authorize `stop-vm`, `delete-vm`, `cancel-provisioning`,
-`start-vm` (including the admin wallet override), `purge-failed`, or
-`clear-guacamole`. Service-role and admin callers that do not present a
-matching cron secret are unchanged. `CLEANUP_HELD_VM_IDS` is unchanged: held
-VMs, including the built-in `bba27e8f` prefix, are skipped, and soft-expiry
-`dry-run` does not stop or delete. Unset, empty, or unrecognised
-`SOFT_EXPIRY_MODE` fails safe to `dry-run` and logs a warning. Explicit
-`legacy`, `enforce`, `dry-run`, and `off` still mean what they meant before.
+`expiry-preview` (read-only: no writes, no cloud calls). A valid cron secret
+does not authorize `stop-vm`, `delete-vm`, `cancel-provisioning`, `start-vm`
+(including the admin wallet override), `purge-failed`, `clear-guacamole`, or
+any other action: those return 403 and are not run as the scheduled cleanup.
+Service-role and admin callers that do not present a matching cron secret are
+unchanged. `CLEANUP_HELD_VM_IDS` is unchanged: held VMs, including the built-in
+`bba27e8f` prefix and any extra id in that secret, are skipped
+(`soft_expiry.held_skipped`). A VM listed only in `VM_PROTECTED_IDS` is skipped
+the same way. Soft-expiry `dry-run` does not stop or delete. Unset, empty, or
+unrecognised `SOFT_EXPIRY_MODE` fails safe to `dry-run`. The
+`soft_expiry_mode_invalid` log is emitted once per cold start; every run still
+reports `mode_warning`. Explicit `legacy`, `enforce`, `dry-run`, and `off`
+still mean what they meant before.
 
 Job 1 should send `x-cron-secret` from Vault `cron_shared_secret`, the same
 header jobs 4 and 9 send.

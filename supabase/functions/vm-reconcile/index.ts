@@ -1,7 +1,9 @@
 // P2a — fleet / by-id reconcile of Hub VM rows against provider truth.
 // POST { vm_ids?: uuid[], scope?: "fleet", dry_run?: bool }
-// Auth: platform admin, service role, or x-cron-secret == CRON_SHARED_SECRET.
+// Auth: platform admin, service role, or x-cron-secret checked with cronSecretMatches
+// against CRON_SHARED_SECRET (constant-time, not trimmed).
 import { corsHeadersFor, requireAdmin, jsonResponse, errorResponse } from "../_shared/auth.ts";
+import { cronSecretMatches } from "../_shared/cron-auth.ts";
 import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
 import { effectiveReconcileDryRun, reconcileVms, VM_RECONCILE_COLS, type ReconcileVm } from "../_shared/vm-reconcile.ts";
 
@@ -9,13 +11,17 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX = 100;
 const FLEET_STATUSES = ["provisioning", "starting", "running", "idle", "stopped", "deallocated"];
 
-Deno.serve(async (req) => {
+export type VmReconcileDeps = {
+  // deno-lint-ignore no-explicit-any -- test double or service client
+  supabase?: any;
+};
+
+export async function handleVmReconcile(req: Request, deps?: VmReconcileDeps): Promise<Response> {
   const cors = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   if (req.method !== "POST") return errorResponse("POST only", 405);
 
-  const cronSecret = Deno.env.get("CRON_SHARED_SECRET");
-  const isCron = !!cronSecret && req.headers.get("x-cron-secret") === cronSecret;
+  const isCron = cronSecretMatches(req.headers.get("x-cron-secret"));
   if (!isCron) {
     const auth = await requireAdmin(req); // accepts service role too
     if (auth instanceof Response) return auth;
@@ -33,7 +39,7 @@ Deno.serve(async (req) => {
   }
   if (!vmIds && body.scope !== "fleet") return errorResponse("Provide vm_ids or scope:\"fleet\"", 400);
 
-  const admin = serviceClient();
+  const admin = deps?.supabase ?? serviceClient();
   let q = admin.from("virtual_machines").select(VM_RECONCILE_COLS).not("azure_vm_id", "is", null);
   if (Array.isArray(vmIds)) {
     q = q.in("id", (vmIds as string[]).slice(0, MAX));
@@ -64,4 +70,10 @@ Deno.serve(async (req) => {
     console.error("vm-reconcile failed:", e);
     return errorResponse(e instanceof Error ? e.message : "reconcile failed", 500);
   }
-});
+}
+
+// Skip the listener only when a test sets both flags. VM_RECONCILE_SKIP_SERVE
+// alone must not stop a production or `supabase functions serve` process.
+if (Deno.env.get("DENO_TESTING") !== "1" || Deno.env.get("VM_RECONCILE_SKIP_SERVE") !== "1") {
+  Deno.serve((req) => handleVmReconcile(req));
+}

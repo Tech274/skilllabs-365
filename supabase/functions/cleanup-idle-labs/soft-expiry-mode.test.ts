@@ -3,7 +3,7 @@ import type { AuthCtx } from "../_shared/auth.ts";
 
 Deno.env.set("DENO_TESTING", "1");
 Deno.env.set("CLEANUP_SKIP_SERVE", "1");
-const { handleCleanupRequest } = await import("./index.ts");
+const { handleCleanupRequest, logSoftExpiryModeInvalidOnce, resetSoftExpiryModeInvalidLogForTests } = await import("./index.ts");
 
 function emptyClient() {
   const from = () => {
@@ -66,26 +66,42 @@ function loggedFallback(warnings: string[]): boolean {
   return warnings.some((line) => line.includes("soft_expiry_mode_invalid"));
 }
 
-Deno.test("cleanup expiry-preview falls back to dry-run and logs a warning", async () => {
+Deno.test("soft_expiry_mode_invalid is logged once per cold start", () => {
+  resetSoftExpiryModeInvalidLogForTests();
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map((v) => (typeof v === "string" ? v : JSON.stringify(v))).join(" "));
+  };
+  try {
+    assertEquals(logSoftExpiryModeInvalidOnce("unset or empty"), true);
+    assertEquals(logSoftExpiryModeInvalidOnce("unknown value"), false);
+    assertEquals(logSoftExpiryModeInvalidOnce(null), false);
+    assertEquals(warnings.length, 1);
+    assertEquals(warnings[0].includes("soft_expiry_mode_invalid"), true);
+  } finally {
+    console.warn = original;
+    resetSoftExpiryModeInvalidLogForTests();
+  }
+});
+
+Deno.test("cleanup expiry-preview falls back to dry-run and still reports the warning", async () => {
   const unset = await preview(null);
   assertEquals(unset.status, 200);
   assertEquals(unset.body.mode, "dry-run");
   assertEquals(unset.body.mode_configured, null);
   assertEquals(typeof unset.body.mode_warning, "string");
-  assertEquals(loggedFallback(unset.warnings), true);
   assertEquals(unset.cloud, []);
 
   const empty = await preview("");
   assertEquals(empty.body.mode, "dry-run");
   assertEquals(typeof empty.body.mode_warning, "string");
-  assertEquals(loggedFallback(empty.warnings), true);
   assertEquals(empty.cloud, []);
 
   const garbage = await preview("not-a-mode");
   assertEquals(garbage.body.mode, "dry-run");
   assertEquals(garbage.body.mode_configured, "not-a-mode");
   assertEquals(String(garbage.body.mode_warning).includes("not-a-mode"), true);
-  assertEquals(loggedFallback(garbage.warnings), true);
   assertEquals(garbage.cloud, []);
 });
 

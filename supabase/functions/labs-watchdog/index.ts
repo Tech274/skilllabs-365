@@ -22,6 +22,7 @@ import {
   reconcileProvisioningAgainstAzure,
   applyPromoteToRunning,
 } from "../_shared/azure-reconcile.ts";
+import { cronSecretMatches } from "../_shared/cron-auth.ts";
 import { isVmGuarded } from "../_shared/lab-expiry.ts";
 import {
   auditSweep,
@@ -142,7 +143,18 @@ async function providerOf(
   return (data?.provider as string) || "azure";
 }
 
-Deno.serve(async (req) => {
+function openServiceClient(url: string, key: string) {
+  return createClient(url, key, {
+    auth: { autoRefreshToken: false, persistSession: false },
+  });
+}
+
+export type LabsWatchdogDeps = {
+  // deno-lint-ignore no-explicit-any -- test double or service client
+  supabase?: any;
+};
+
+export async function handleLabsWatchdog(req: Request, deps?: LabsWatchdogDeps): Promise<Response> {
   const cors = corsHeadersFor(req);
   if (req.method === "OPTIONS") return new Response(null, { headers: cors });
 
@@ -154,21 +166,23 @@ Deno.serve(async (req) => {
   const dryRun = body.dry_run === true;
 
   // Scheduled runs authenticate with the cron shared secret; humans must be admins.
-  const cronSecret = Deno.env.get("CRON_SHARED_SECRET");
-  const isCron = !!cronSecret && req.headers.get("x-cron-secret") === cronSecret;
+  // Same header, env var, and constant-time compare as cleanup-idle-labs. No trim.
+  const isCron = cronSecretMatches(req.headers.get("x-cron-secret"));
   if (!isCron) {
     const auth = await requireAdmin(req);
     if (auth instanceof Response) return auth;
   }
 
   const correlationId = correlationIdFrom(req);
-  const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-  const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
-  if (!SUPABASE_URL || !SERVICE_KEY) return errorResponse("Backend not configured", 500);
-
-  const supabase = createClient(SUPABASE_URL, SERVICE_KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  });
+  let supabase: ReturnType<typeof openServiceClient>;
+  if (deps?.supabase) {
+    supabase = deps.supabase as ReturnType<typeof openServiceClient>;
+  } else {
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+    if (!SUPABASE_URL || !SERVICE_KEY) return errorResponse("Backend not configured", 500);
+    supabase = openServiceClient(SUPABASE_URL, SERVICE_KEY);
+  }
 
   const now = new Date();
   const nowIso = now.toISOString();
@@ -760,4 +774,10 @@ Deno.serve(async (req) => {
     console.error("labs-watchdog failed:", e);
     return errorResponse(e instanceof Error ? e.message : "Watchdog run failed", 500);
   }
-});
+}
+
+// Skip the listener only when a test sets both flags. LABS_WATCHDOG_SKIP_SERVE
+// alone must not stop a production or `supabase functions serve` process.
+if (Deno.env.get("DENO_TESTING") !== "1" || Deno.env.get("LABS_WATCHDOG_SKIP_SERVE") !== "1") {
+  Deno.serve((req) => handleLabsWatchdog(req));
+}

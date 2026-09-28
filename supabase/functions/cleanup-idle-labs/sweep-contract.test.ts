@@ -47,6 +47,8 @@ Deno.test("soft-expiry sweep honours SOFT_EXPIRY_MODE", () => {
   assert(src.includes('resolveSoftExpiryMode(Deno.env.get("SOFT_EXPIRY_MODE"))'));
   // Unknown values are reported, not silently enforced.
   assert(src.includes("mode_warning: softExpiryModeConfig.warning"));
+  assert(src.includes("logSoftExpiryModeInvalidOnce(softExpiryModeConfig.warning)"));
+  assert(src.includes("let softExpiryModeInvalidLogged = false;"));
   assert(src.includes("softExpiryEnforced(softExpiryMode, vm.status, decision)"));
   assert(src.includes('if (softExpiryMode === "off") throw new SkipSweep();'));
 });
