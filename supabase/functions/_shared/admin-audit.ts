@@ -10,7 +10,7 @@ export interface AuditEntry {
   entityType: string;
   entityId?: string | null;
   entityLabel?: string | null;
-  outcome?: "success" | "failed" | "blocked" | "already_running" | "start_accepted" | "running";
+  outcome?: "success" | "failed" | "blocked" | "already_running" | "already_starting" | "start_accepted" | "running";
   changes?: Record<string, unknown>;
   message?: string | null;
   correlationId?: string | null;

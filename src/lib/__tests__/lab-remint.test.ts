@@ -8,6 +8,22 @@ vi.mock("@/integrations/supabase/client", () => ({
 
 import { adminStartVm, AlreadyStartingError, isResumableStatus, needsRemint, remintAndWaitRunning, remintIdempotencyScope, shouldEndOnCountdown } from "@/lib/lab-remint";
 
+/** supabase-js FunctionsHttpError: status lives on the Response, code in the JSON body. */
+function functionHttpError(status: number, body: Record<string, unknown>) {
+  const response = {
+    status,
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+    clone() {
+      return this;
+    },
+  };
+  return {
+    message: "Edge Function returned a non-2xx status code",
+    context: response,
+  };
+}
+
 describe("lab-remint helpers", () => {
   it("needsRemint covers powered-off and starting", () => {
     expect(needsRemint("deallocated")).toBe(true);
@@ -108,26 +124,68 @@ describe("remint idempotency key", () => {
     expect(starts).toHaveLength(1);
   });
 
-  it("keeps the key and reports already starting when the server returns 409", async () => {
+  it("keeps the key and reports already starting only for IDEMPOTENCY_IN_PROGRESS", async () => {
     invoke.mockResolvedValueOnce({
       data: null,
-      error: {
-        message: "Edge Function returned a non-2xx status code",
-        context: {
-          status: 409,
-          error: "A provisioning request with this idempotency key is already in progress.",
-        },
-      },
+      error: functionHttpError(409, {
+        error: "A provisioning request with this idempotency key is already in progress.",
+        code: "IDEMPOTENCY_IN_PROGRESS",
+      }),
     });
     await expect(remintAndWaitRunning({
       vmId: "vm-1",
       labTemplateId: "lab-1",
       isPersistent: true,
-    })).rejects.toThrow(/already starting/i);
+    })).rejects.toBeInstanceOf(AlreadyStartingError);
     const sent = invoke.mock.calls[0][1].headers["Idempotency-Key"] as string;
     const raw = sessionStorage.getItem("idem:provision:lab-1:vm-1");
     expect(raw).toBeTruthy();
     expect(JSON.parse(raw as string).key).toBe(sent);
+  });
+
+  it("drops the key and surfaces NOT_RESUMABLE instead of already starting", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: functionHttpError(409, {
+        error: "This VM is not in a resumable state (no new VM is created by Start).",
+        code: "NOT_RESUMABLE",
+      }),
+    });
+    await expect(remintAndWaitRunning({
+      vmId: "vm-1",
+      labTemplateId: "lab-1",
+      isPersistent: true,
+    })).rejects.toThrow(/not in a resumable state \(no new VM is created by Start\)\. \(NOT_RESUMABLE\)/);
+    expect(sessionStorage.getItem("idem:provision:lab-1:vm-1")).toBeNull();
+  });
+
+  it("drops the key and surfaces VM_STATE_CHANGED instead of already starting", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: functionHttpError(409, {
+        error: "Your lab machine was just paused. Press Start again to resume it.",
+        code: "VM_STATE_CHANGED",
+      }),
+    });
+    await expect(remintAndWaitRunning({ vmId: "vm-1" })).rejects.toThrow(
+      /just paused\. Press Start again to resume it\. \(VM_STATE_CHANGED\)/,
+    );
+    expect(sessionStorage.getItem("idem:start-vm:vm-1")).toBeNull();
+  });
+
+  it("does not keep the key for a 409 that only says already in progress", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: functionHttpError(409, {
+        error: "A provisioning request with this idempotency key is already in progress.",
+      }),
+    });
+    await expect(remintAndWaitRunning({
+      vmId: "vm-1",
+      labTemplateId: "lab-1",
+      isPersistent: true,
+    })).rejects.not.toBeInstanceOf(AlreadyStartingError);
+    expect(sessionStorage.getItem("idem:provision:lab-1:vm-1")).toBeNull();
   });
 
   it("sends Idempotency-Key on cleanup start-vm", async () => {
@@ -218,21 +276,46 @@ describe("admin /vms Start", () => {
     expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
   });
 
-  it("keeps the admin Start key when a second in-flight click is a 409", async () => {
+  it("keeps the admin Start key only for IDEMPOTENCY_IN_PROGRESS", async () => {
     invoke.mockResolvedValueOnce({
       data: null,
-      error: {
-        message: "Edge Function returned a non-2xx status code",
-        context: {
-          status: 409,
-          error: "A provisioning request with this idempotency key is already in progress.",
-        },
-      },
+      error: functionHttpError(409, {
+        error: "A provisioning request with this idempotency key is already in progress.",
+        code: "IDEMPOTENCY_IN_PROGRESS",
+      }),
     });
-    await expect(adminStartVm({ vmId: "vm-9" })).rejects.toThrow(/already starting/i);
+    await expect(adminStartVm({ vmId: "vm-9" })).rejects.toBeInstanceOf(AlreadyStartingError);
     const sent = invoke.mock.calls[0][1].headers["Idempotency-Key"] as string;
     const raw = sessionStorage.getItem("idem:start-vm:vm-9");
     expect(JSON.parse(raw as string).key).toBe(sent);
+  });
+
+  it("drops the /vms key and surfaces VM_STATE_CHANGED on a non-idempotency 409", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: functionHttpError(409, {
+        error: "Your lab machine was just paused. Press Start again to resume it.",
+        code: "VM_STATE_CHANGED",
+      }),
+    });
+    await expect(adminStartVm({ vmId: "vm-9" })).rejects.toThrow(/\(VM_STATE_CHANGED\)/);
+    expect(sessionStorage.getItem("idem:start-vm:vm-9")).toBeNull();
+  });
+
+  it("drops the persistent /vms key on NOT_RESUMABLE and does not say already starting", async () => {
+    invoke.mockResolvedValueOnce({
+      data: null,
+      error: functionHttpError(409, {
+        error: "This VM is not in a resumable state (no new VM is created by Start).",
+        code: "NOT_RESUMABLE",
+      }),
+    });
+    await expect(adminStartVm({
+      vmId: "vm-9",
+      labTemplateId: "lab-9",
+      isPersistent: true,
+    })).rejects.toThrow(/NOT_RESUMABLE/);
+    expect(sessionStorage.getItem("idem:provision:lab-9:vm-9")).toBeNull();
   });
 
   it("drops the /vms key when the running wait times out so the next Start is fresh", async () => {

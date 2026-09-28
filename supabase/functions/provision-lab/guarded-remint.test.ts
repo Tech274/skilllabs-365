@@ -1,6 +1,7 @@
 import { assert } from "https://deno.land/std@0.224.0/assert/mod.ts";
 
 const src = await Deno.readTextFile(new URL("./index.ts", import.meta.url));
+const classifier = await Deno.readTextFile(new URL("../_shared/admin-start-override.ts", import.meta.url));
 
 Deno.test("admin persistent Start refuses a guarded VM before the wallet override and before StartInstances", () => {
   const guard = src.indexOf("if (existingVmForGate && isVmGuarded(existingVmForGate))");
@@ -27,6 +28,8 @@ Deno.test("capped remint is 503 retryable with no row clear, and the override au
   assert(failedAudit > startCall, "failed override audit is after StartInstances returns");
   assert(resultAudit > failedAudit, "override audit records the real restart outcome");
   assert(!src.includes('writeAdminStartOverrideAudit("success")'), "override audit must not record a blanket success");
-  assert(src.includes('"already_running"') && src.includes('"start_accepted"') && src.includes("error_code"));
+  assert(src.includes("adminRestartOutcome(") && src.includes("error_code"));
+  assert(src.includes("adminStartOverrideMessage("), "override audit message comes from the outcome classifier");
+  assert(classifier.includes('"already_running"') && classifier.includes('"already_starting"') && classifier.includes('"start_accepted"'));
   assert(retryable > failedAudit && retryable < resultAudit, "retryable 503 is the cap-before-start failure");
 });

@@ -43,7 +43,8 @@ export function idempotencyHeaders(scope: string): Record<string, string> {
 /**
  * A brand-new key for this click. Remint must not reuse the 10-minute window:
  * a stored completed 200 would replay and skip StartInstances.
- * The key is still written under the scope so a 409 can leave it in place.
+ * The key is still written under the scope so an IDEMPOTENCY_IN_PROGRESS
+ * response can leave it in place. Other failures, including other 409s, drop it.
  */
 export function freshIdempotencyHeaders(scope: string): Record<string, string> {
   const key = makeKey();
