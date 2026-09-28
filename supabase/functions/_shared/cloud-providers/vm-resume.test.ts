@@ -1,9 +1,12 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import {
   AWS_REMINT_WAIT_CAP_MS,
+  createRemintClock,
   isAwsInstanceId,
   parseAwsEc2ErrorXml,
   resolveRemintProvider,
+  startCloudVm,
+  waitForAwsStoppedWithinBudget,
   waitForRunningAndIps,
   type ResumableVm,
 } from "./vm-resume.ts";
@@ -41,13 +44,20 @@ Deno.test("resolveRemintProvider: account, then template, then cloud id; i-* vs 
   );
 });
 
-Deno.test("AWS persistent remint wait caps at 110s and returns starting with no IPs", async () => {
+Deno.test("AWS persistent remint total wait caps at 100s across stopped and running", async () => {
+  assertEquals(AWS_REMINT_WAIT_CAP_MS, 100_000);
   let t = 0;
   const warns: string[] = [];
   const origWarn = console.warn;
   console.warn = (msg?: unknown, ...rest: unknown[]) => {
     warns.push([msg, ...rest].map(String).join(" "));
   };
+  const clock = createRemintClock({
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+    },
+  });
   const vm: ResumableVm = {
     id: "vm-1",
     status: "starting",
@@ -56,13 +66,23 @@ Deno.test("AWS persistent remint wait caps at 110s and returns starting with no 
     provider_account_id: null,
     expires_at: null,
   };
+  let runningDescribes = 0;
   try {
+    const stopped = await waitForAwsStoppedWithinBudget(async () => {
+      return { state: t >= 40_000 ? "stopped" : "stopping" };
+    }, clock);
+    assertEquals(stopped.state, "stopped");
+    assertEquals(stopped.capped, undefined);
+    assertEquals(t >= 40_000 && t < AWS_REMINT_WAIT_CAP_MS, true);
+
     const result = await waitForRunningAndIps({} as never, "aws", vm, 120_000, {
-      now: () => t,
-      sleep: async (ms) => {
-        t += ms;
+      now: clock.now,
+      sleep: clock.sleep,
+      startedAt: clock.startedAt,
+      describe: async () => {
+        runningDescribes += 1;
+        return { state: "pending", publicIp: "203.0.113.5", privateIp: "10.1.1.5" };
       },
-      describe: async () => ({ state: "pending", publicIp: "203.0.113.5", privateIp: "10.1.1.5" }),
     });
     assertEquals(result.running, false);
     assertEquals(result.state, "starting");
@@ -71,11 +91,63 @@ Deno.test("AWS persistent remint wait caps at 110s and returns starting with no 
     assertEquals(result.capped, true);
     assertEquals(result.elapsedMs, AWS_REMINT_WAIT_CAP_MS);
     assertEquals(t, AWS_REMINT_WAIT_CAP_MS);
-    assertEquals(AWS_REMINT_WAIT_CAP_MS, 110_000);
-    assertEquals(warns.some((w) => w.includes("aws_remint_wait_capped") && w.includes("110000")), true);
+    assertEquals(runningDescribes > 0, true);
+    assertEquals(warns.some((w) => w.includes("aws_remint_wait_capped") && w.includes("100000")), true);
   } finally {
     console.warn = origWarn;
   }
+});
+
+Deno.test("stopped-wait that consumes the 100s cap does not start or write running IPs", async () => {
+  let t = 0;
+  const clock = createRemintClock({
+    now: () => t,
+    sleep: async (ms) => {
+      t += ms;
+    },
+  });
+  let starts = 0;
+  const vm: ResumableVm = {
+    id: "vm-1",
+    status: "deallocated",
+    azure_vm_id: "i-0123456789abcdef0",
+    private_ip: null,
+    provider_account_id: "acct",
+    expires_at: null,
+    region: "us-east-1",
+  };
+  const started = await startCloudVm({} as never, "aws", vm, {
+    clock,
+    resolveAwsRuntime: async () => ({ defaultRegion: "us-east-1" }),
+    describeAwsInstance: async () => ({ state: "stopping", publicIp: null, privateIp: null }),
+    ec2Action: async () => {
+      starts += 1;
+      return { ok: true, status: 200, text: "", xml: "" };
+    },
+  });
+  assertEquals(started.ok, true);
+  assertEquals(started.capped, true);
+  assertEquals(started.awsState, "starting");
+  assertEquals(starts, 0);
+  assertEquals(t, AWS_REMINT_WAIT_CAP_MS);
+
+  let runningDescribes = 0;
+  const result = await waitForRunningAndIps({} as never, "aws", vm, clock.capMs, {
+    now: clock.now,
+    sleep: clock.sleep,
+    startedAt: clock.startedAt,
+    describe: async () => {
+      runningDescribes += 1;
+      return { state: "running", publicIp: "203.0.113.5", privateIp: "10.1.1.5" };
+    },
+  });
+  assertEquals(runningDescribes, 0);
+  assertEquals(result.running, false);
+  assertEquals(result.state, "starting");
+  assertEquals(result.publicIp, null);
+  assertEquals(result.privateIp, null);
+  assertEquals(result.capped, true);
+  assertEquals(t, AWS_REMINT_WAIT_CAP_MS);
 });
 
 Deno.test("parseAwsEc2ErrorXml extracts InvalidInstanceID.NotFound", () => {

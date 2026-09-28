@@ -18,17 +18,23 @@ export function idempotencyKeyFrom(req: Request, body: Record<string, unknown>):
   return crypto.randomUUID();
 }
 
+/** A killed edge run must not wedge the key forever. About five minutes. */
+export const IDEMPOTENCY_IN_PROGRESS_TTL_MS = 5 * 60 * 1000;
+
 export async function claimIdempotency(
   supabase: SupabaseClient,
-  args: { key: string; userId: string; action: string; correlationId: string },
+  args: { key: string; userId: string; action: string; correlationId: string; now?: Date },
 ): Promise<ClaimResult> {
-  const { error } = await supabase.from("provisioning_idempotency").insert({
+  const now = args.now ?? new Date();
+  const insertRow = {
     idempotency_key: args.key,
     user_id: args.userId,
     action: args.action,
     correlation_id: args.correlationId,
-    status: "in_progress",
-  });
+    status: "in_progress" as const,
+    created_at: now.toISOString(),
+  };
+  const { error } = await supabase.from("provisioning_idempotency").insert(insertRow);
 
   if (!error) return { outcome: "new", key: args.key };
 
@@ -37,7 +43,7 @@ export async function claimIdempotency(
 
   const { data: existing } = await supabase
     .from("provisioning_idempotency")
-    .select("status, response, correlation_id")
+    .select("status, response, correlation_id, created_at")
     .eq("user_id", args.userId)
     .eq("action", args.action)
     .eq("idempotency_key", args.key)
@@ -50,6 +56,23 @@ export async function claimIdempotency(
       response: (existing.response as Record<string, unknown>) ?? {},
       correlationId: existing.correlation_id ?? null,
     };
+  }
+
+  const createdMs = existing?.created_at ? Date.parse(String(existing.created_at)) : NaN;
+  const stale = existing?.status === "in_progress"
+    && Number.isFinite(createdMs)
+    && now.getTime() - createdMs >= IDEMPOTENCY_IN_PROGRESS_TTL_MS;
+  if (stale) {
+    await supabase
+      .from("provisioning_idempotency")
+      .delete()
+      .eq("user_id", args.userId)
+      .eq("action", args.action)
+      .eq("idempotency_key", args.key)
+      .eq("status", "in_progress");
+    const { error: reclaimed } = await supabase.from("provisioning_idempotency").insert(insertRow);
+    if (!reclaimed) return { outcome: "new", key: args.key };
+    if (reclaimed.code !== "23505") throw new Error(`Idempotency reclaim failed: ${reclaimed.message}`);
   }
 
   return { outcome: "in_progress", key: args.key, correlationId: existing?.correlation_id ?? null };

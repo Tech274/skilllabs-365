@@ -8,6 +8,7 @@ import {
 } from "../_shared/azure-reconcile.ts";
 import { resolveAwsRuntime, describeAwsInstance } from "../_shared/cloud-providers/aws-runtime.ts";
 import { reconcileWritesEnabled, reconcileVms, type ReconcileVm } from "../_shared/vm-reconcile.ts";
+import { isVmGuarded } from "../_shared/lab-expiry.ts";
 
 Deno.serve(async (req) => {
   const corsHeaders = corsHeadersFor(req);
@@ -28,6 +29,11 @@ Deno.serve(async (req) => {
 
     const forbidden = await requireOwnerOrAdmin(auth, vm.user_id);
     if (forbidden) return forbidden;
+
+    // Guarded VMs are returned as stored. No cloud describe and no status write.
+    if (isVmGuarded(vm)) {
+      return jsonResponse({ status: vm.status, code: "VM_PROTECTED" });
+    }
 
     const applyReconcile = reconcileWritesEnabled();
 

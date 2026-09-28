@@ -14,7 +14,7 @@ export function learnerLeaveNotice(data: LearnerLeavePayload): { title: string; 
   if (data?.success === true && data.kept_running === true && data.reason === "VM_PROTECTED") {
     return {
       title: "Left the lab",
-      description: "Session closed. This machine is protected, so it was kept running.",
+      description: "This machine is protected and was left running.",
     };
   }
   const w = data?.wallet;

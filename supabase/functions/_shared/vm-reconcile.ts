@@ -51,7 +51,20 @@ export interface ReconcileResult {
   would_be?: HubSnap;
 }
 
-export interface ReconcileOpts { source: string; dryRun?: boolean; azureFor?: AzureResolver }
+export interface ReconcileOpts {
+  source: string;
+  dryRun?: boolean;
+  azureFor?: AzureResolver;
+  /**
+   * Test seam. When set, live AWS Describe is not called. Production callers
+   * omit this.
+   */
+  awsDescribe?: (
+    accountId: string | null,
+    region: string | null,
+    ids: string[],
+  ) => Promise<Map<string, { state: AwsInstanceState | "unavailable"; privateIp: string | null; publicIp: string | null; error?: string }>>;
+}
 
 const START_HOLD_MS = 3 * 60_000;
 const STOP_PENDING_FRESH_MS = 15 * 60_000;
@@ -62,10 +75,12 @@ const PROMOTABLE = new Set(["provisioning", "starting"]);
  * Writes (including provisioning/starting → running promotions) happen only
  * when an operator opts in. Default, unset, and `VM_RECONCILE_DRY_RUN=true`
  * are dry-run. Opt in with `VM_RECONCILE_MODE=apply` or
- * `VM_RECONCILE_DRY_RUN=false`.
+ * `VM_RECONCILE_DRY_RUN=false`. An explicit `VM_RECONCILE_MODE=dry-run` wins
+ * over `VM_RECONCILE_DRY_RUN=false`.
  */
 export function reconcileWritesEnabled(env?: { mode?: string | null; dryRun?: string | null }): boolean {
   const mode = String(env?.mode ?? Deno.env.get("VM_RECONCILE_MODE") ?? "").trim().toLowerCase();
+  if (mode === "dry-run") return false;
   if (mode === "apply") return true;
   const dry = String(env?.dryRun ?? Deno.env.get("VM_RECONCILE_DRY_RUN") ?? "").trim().toLowerCase();
   return dry === "false";
@@ -342,7 +357,10 @@ export async function reconcileVms(admin: Admin, vms: ReconcileVm[], opts: Recon
   }
   const awsDesc = new Map<string, AwsDesc>();
   for (const g of awsGroups.values()) {
-    const res = await describeAwsBatch(admin, g.acct, g.region, [...new Set(g.ids)]);
+    const ids = [...new Set(g.ids)];
+    const res = opts.awsDescribe
+      ? await opts.awsDescribe(g.acct, g.region, ids)
+      : await describeAwsBatch(admin, g.acct, g.region, ids);
     for (const [k, v] of res) awsDesc.set(`${g.acct ?? ""}|${g.region ?? ""}|${k}`, v);
   }
 

@@ -396,7 +396,20 @@ Deno.serve(async (req) => {
     }
 
     // Close expired sessions first so the UI stops showing them as live.
+    // A guarded VM keeps its session row: no write and it is not added as a target.
     for (const s of expiredSessions ?? []) {
+      if (s.vm_id) {
+        const { data: guardVm } = await supabase
+          .from("virtual_machines")
+          .select("id, azure_vm_id")
+          .eq("id", s.vm_id)
+          .maybeSingle();
+        const candidate = guardVm ?? { id: s.vm_id, azure_vm_id: null };
+        if (isVmGuarded(candidate)) {
+          skipped.push(`session ${String(s.id).slice(0, 8)}: protected — session left open`);
+          continue;
+        }
+      }
       await supabase
         .from("sessions")
         .update({ status: "completed", ended_at: nowIso })
@@ -638,20 +651,21 @@ Deno.serve(async (req) => {
             actions.push(`vm ${vm.id.slice(0, 8)}: protected — auto-terminate skipped`);
             continue;
           }
-          // Existing main hard-delete path (ALLOW_AUTO_TERMINATE, default off).
-          stopConfirmed = true;
+          // stopConfirmed becomes true only after terminate/delete succeeds.
+          // A thrown or false delete leaves the Hub row in place.
           try {
             if (cloudProvider === "aws") {
               const aws = await resolveAwsRuntime(supabase, vm.provider_account_id);
               if (vm.region) aws.defaultRegion = String(vm.region);
               await terminateAwsInstance(aws, vm.azure_vm_id);
               azureDeleted = true;
+              stopConfirmed = true;
             } else {
               const az = await azureFor(vm.provider_account_id);
               const vmName = extractVmName(vm.azure_vm_id);
               azureDeleted = await deleteAzureVM(az.token, az.subscriptionId, az.resourceGroup, vmName);
+              if (azureDeleted) stopConfirmed = true;
             }
-            stopConfirmed = true;
           } catch (e) {
             await timeline.failed(
               SOURCE,
@@ -667,7 +681,7 @@ Deno.serve(async (req) => {
 
         // Soft path writes deallocated only after a confirmed stop (or when
         // there is no cloud id). Hard path (ALLOW_AUTO_TERMINATE, default off)
-        // still records terminated when a delete was attempted.
+        // records terminated only after terminate/delete returns success.
         await markVmEnded(supabase, vm.id, {
           status: nextStatus,
           ended_by: SOURCE,

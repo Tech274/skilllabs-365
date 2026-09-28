@@ -27,7 +27,7 @@ import {
   readNicPublicIpRef,
 } from "../_shared/azure-public-ip.ts";
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
-import { findResumableVm, LIVE_VM_STATUSES, RESUMABLE_VM_STATUSES, resolveRemintProvider, startCloudVm, waitForRunningAndIps } from "../_shared/cloud-providers/vm-resume.ts";
+import { createRemintClock, findResumableVm, LIVE_VM_STATUSES, RESUMABLE_VM_STATUSES, resolveRemintProvider, startCloudVm, waitForRunningAndIps } from "../_shared/cloud-providers/vm-resume.ts";
 import { adminPersistentRemintSkipsOwnerWallet, buildWalletSnapshot, persistentStartClearsExpiresAt, walletBlockMessage } from "../_shared/lab-wallet.ts";
 
 const SOURCE = "provision-lab";
@@ -680,6 +680,8 @@ Deno.serve(async (req) => {
       let freshPrivateIp: string | null = existingVm.private_ip;
       if (needsStart) {
         await trace.start(SOURCE, "remint", "Resuming your existing persistent lab VM (no new machine)");
+        // One clock for wait-until-stopped and wait-until-running (100s total).
+        const remintClock = createRemintClock();
         try {
           // Account → template → cloud id. Never a lone vm.provider stamp.
           let accountProvider: string | null = null;
@@ -704,7 +706,7 @@ Deno.serve(async (req) => {
               mismatch: true,
               detail: `REMINT_PROVIDER_MISMATCH: ${existingVm.azure_vm_id} is EC2 but resolved ${resolved.provider} via ${resolved.source}`,
             }
-            : await startCloudVm(supabase, resolvedProvider, existingVm);
+            : await startCloudVm(supabase, resolvedProvider, existingVm, { clock: remintClock });
           started = startResult.ok;
           remintDetail = startResult.detail ?? null;
           remintAwsState = (startResult as { awsState?: string }).awsState ?? null;
@@ -739,7 +741,11 @@ Deno.serve(async (req) => {
           await supabase.from("virtual_machines").update(baseUpdate).eq("id", existingVm.id);
           finalStatus = "starting";
           try {
-            const w = await waitForRunningAndIps(supabase, resolvedProvider, existingVm);
+            const w = await waitForRunningAndIps(supabase, resolvedProvider, existingVm, remintClock.capMs, {
+              now: remintClock.now,
+              sleep: remintClock.sleep,
+              startedAt: remintClock.startedAt,
+            });
             if (w.running) {
               freshPublicIp = w.publicIp;
               if (w.privateIp) freshPrivateIp = w.privateIp;

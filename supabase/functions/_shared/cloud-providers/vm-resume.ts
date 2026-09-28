@@ -42,7 +42,7 @@ export type StartCloudVmResult = {
   ok: boolean;
   /** Short reason for logs / 502 `detail` (AWS Code/Message or Azure status). */
   detail?: string;
-  awsState?: AwsInstanceState;
+  awsState?: AwsInstanceState | "starting";
   /**
    * Hub row points at an EC2 id AWS no longer knows (InvalidInstanceID.NotFound).
    * Callers must mark the Hub VM failed/terminated — never StartInstances.
@@ -50,6 +50,33 @@ export type StartCloudVmResult = {
   ghost?: boolean;
   /** i-* id would have been sent to Azure start — refused (REMINT_PROVIDER_MISMATCH). */
   mismatch?: boolean;
+  /**
+   * The shared remint budget ran out. Callers return `starting` and must not
+   * write running or a fresh IP. Reconcile promotes later.
+   */
+  capped?: boolean;
+};
+
+/** Shared clock for the stopped-wait and the running-wait. Both phases draw from one cap. */
+export type RemintClock = {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  startedAt: number;
+  capMs: number;
+};
+
+export type StartCloudDeps = {
+  clock?: RemintClock;
+  resolveAwsRuntime?: (supabase: SupabaseLike, accountId: string | null) => Promise<{ defaultRegion?: string }>;
+  describeAwsInstance?: (
+    rt: { defaultRegion?: string },
+    instanceId: string,
+  ) => Promise<{ state: string; publicIp: string | null; privateIp: string | null }>;
+  ec2Action?: (
+    rt: { defaultRegion?: string },
+    action: string,
+    params: Record<string, string>,
+  ) => Promise<{ ok: boolean; status: number; text: string; xml: string }>;
 };
 
 /** Newest reusable VM this learner already holds for this template, if any. */
@@ -104,27 +131,40 @@ export function parseAwsEc2ErrorXml(xml: string): string {
   return trimmed.slice(0, 240) || "unknown AWS error";
 }
 
-async function waitUntilAwsStopped(
-  rt: Awaited<ReturnType<typeof resolveAwsRuntime>>,
-  instanceId: string,
-  maxMs = 90_000,
-): Promise<{ state: AwsInstanceState; detail?: string }> {
-  const deadline = Date.now() + maxMs;
-  let last: AwsInstanceState = "stopping";
-  while (Date.now() < deadline) {
-    const desc = await describeAwsInstance(rt, instanceId);
+/**
+ * Poll until AWS reports stopped, or the shared remint budget is gone.
+ * Does not start its own 90s timer: `clock` is the total budget for both phases.
+ */
+export async function waitForAwsStoppedWithinBudget(
+  describe: () => Promise<{ state: string }>,
+  clock: RemintClock,
+): Promise<{ state: string; detail?: string; capped?: boolean }> {
+  const deadline = clock.startedAt + clock.capMs;
+  let last = "stopping";
+  while (clock.now() < deadline) {
+    const desc = await describe();
     last = desc.state;
     if (desc.state === "stopped") return { state: "stopped" };
     if (desc.state === "terminated" || desc.state === "shutting-down") {
-      return { state: desc.state, detail: `instance ${instanceId} is ${desc.state} — cannot Start` };
+      return { state: desc.state, detail: `instance is ${desc.state} — cannot Start` };
     }
     if (desc.state === "running" || desc.state === "pending") {
       // Leave failed mid-stop / race — treat as already up.
       return { state: desc.state };
     }
-    await sleep(3_000);
+    const remaining = deadline - clock.now();
+    if (remaining <= 0) break;
+    await clock.sleep(Math.min(3_000, remaining));
   }
-  return { state: last, detail: `timed out waiting for stopped (last=${last})` };
+  const elapsed = clock.now() - clock.startedAt;
+  console.warn(JSON.stringify({
+    event: "aws_remint_wait_capped",
+    phase: "stopped",
+    elapsed_ms: elapsed,
+    cap_ms: clock.capMs,
+    state: last,
+  }));
+  return { state: last, detail: `timed out waiting for stopped (last=${last})`, capped: true };
 }
 
 /** True when the cloud id is an EC2 instance id (i-xxxxxxxx). */
@@ -155,8 +195,12 @@ export function resolveRemintProvider(args: {
   return { provider, source, mismatch };
 }
 
-/** Edge wall-clock headroom: the remint poll must return before the function limit. */
-export const AWS_REMINT_WAIT_CAP_MS = 110_000;
+/**
+ * Total edge budget for a persistent AWS remint: wait-until-stopped plus
+ * wait-until-running together. Replaces the old 110s running-only cap, which
+ * stacked on a separate 90s stopped wait and could pass Supabase's 150s limit.
+ */
+export const AWS_REMINT_WAIT_CAP_MS = 100_000;
 
 export type WaitForRunningResult = {
   running: boolean;
@@ -164,16 +208,31 @@ export type WaitForRunningResult = {
   publicIp: string | null;
   privateIp: string | null;
   elapsedMs: number;
-  /** True when the 110s cap was hit. Callers must not write running or IPs. */
+  /** True when the shared total cap was hit. Callers must not write running or IPs. */
   capped?: boolean;
 };
+
+export function createRemintClock(deps?: {
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+  capMs?: number;
+}): RemintClock {
+  const now = deps?.now ?? Date.now;
+  return {
+    now,
+    sleep: deps?.sleep ?? sleep,
+    startedAt: now(),
+    capMs: deps?.capMs ?? AWS_REMINT_WAIT_CAP_MS,
+  };
+}
 
 /**
  * After a successful Start, poll the cloud until Running and return the FRESH
  * IPs. Never reuse a deallocated-era public_ip.
  *
- * AWS waits at most 110s. Hitting the cap returns `starting` with null IPs
- * (no running/IP write) and logs the elapsed time.
+ * AWS time is whatever remains of the shared 100s total (stopped-wait plus
+ * this poll). Hitting the cap returns `starting` with null IPs (no running/IP
+ * write) and logs the elapsed time from the shared start.
  */
 export async function waitForRunningAndIps(
   supabase: SupabaseLike,
@@ -183,12 +242,13 @@ export async function waitForRunningAndIps(
   deps: {
     now?: () => number;
     sleep?: (ms: number) => Promise<void>;
+    startedAt?: number;
     describe?: (instanceId: string) => Promise<{ state: string; publicIp: string | null; privateIp: string | null }>;
   } = {},
 ): Promise<WaitForRunningResult> {
   const now = deps.now ?? Date.now;
   const sleepFn = deps.sleep ?? sleep;
-  const started = now();
+  const started = deps.startedAt ?? now();
   const capMs = Math.min(AWS_REMINT_WAIT_CAP_MS, Math.max(0, maxMs));
   const finish = (
     result: Omit<WaitForRunningResult, "elapsedMs">,
@@ -248,6 +308,7 @@ export async function startCloudVm(
   supabase: SupabaseLike,
   provider: string,
   vm: ResumableVm,
+  deps: StartCloudDeps = {},
 ): Promise<StartCloudVmResult> {
   if (!vm.azure_vm_id) return { ok: false, detail: "VM has no cloud instance id" };
 
@@ -262,12 +323,23 @@ export async function startCloudVm(
 
   if (provider === "aws") {
     const instanceId = String(vm.azure_vm_id);
+    // Injected test doubles are not AwsRuntime. Keep the call sites on `any`
+    // so a mock clock/describe does not have to satisfy the live client type.
+    // deno-lint-ignore no-explicit-any
+    const resolveRt: any = deps.resolveAwsRuntime ?? resolveAwsRuntime;
+    // deno-lint-ignore no-explicit-any
+    const describe: any = deps.describeAwsInstance ?? describeAwsInstance;
+    // deno-lint-ignore no-explicit-any
+    const ec2: any = deps.ec2Action ?? ec2Action;
+    // Callers that also poll for running pass one clock so both phases share 100s.
+    // A lone start (no second phase) keeps the historical 90s stopped wait.
+    const clock = deps.clock ?? createRemintClock({ capMs: 90_000 });
     try {
-      const rt = await resolveAwsRuntime(supabase, vm.provider_account_id);
+      const rt = await resolveRt(supabase, vm.provider_account_id);
       if (vm.region) rt.defaultRegion = String(vm.region);
 
-      const desc0 = await describeAwsInstance(rt, instanceId);
-      let state: AwsInstanceState = desc0.state;
+      const desc0 = await describe(rt, instanceId);
+      let state = desc0.state as AwsInstanceState;
 
       // Ghost Hub row: DescribeInstances InvalidInstanceID.NotFound — never Start.
       if (state === "not-found") {
@@ -296,13 +368,22 @@ export async function startCloudVm(
       }
 
       if (state === "stopping") {
-        const waited = await waitUntilAwsStopped(rt, instanceId);
+        const waited = await waitForAwsStoppedWithinBudget(
+          async () => {
+            const d = await describe(rt, instanceId);
+            return { state: d.state };
+          },
+          clock,
+        );
+        if (waited.capped) {
+          return { ok: true, awsState: "starting", capped: true, detail: waited.detail };
+        }
         if (waited.state === "running" || waited.state === "pending") {
-          return { ok: true, awsState: waited.state, detail: `already ${waited.state} after wait` };
+          return { ok: true, awsState: waited.state as AwsInstanceState, detail: `already ${waited.state} after wait` };
         }
         if (waited.state !== "stopped") {
           console.error(`StartInstances wait failed: ${waited.detail}`);
-          return { ok: false, awsState: waited.state, detail: waited.detail };
+          return { ok: false, awsState: waited.state as AwsInstanceState, detail: waited.detail };
         }
         state = "stopped";
       }
@@ -312,7 +393,7 @@ export async function startCloudVm(
         return { ok: false, awsState: state, detail };
       }
 
-      const res = await ec2Action(rt, "StartInstances", { "InstanceId.1": instanceId });
+      const res = await ec2(rt, "StartInstances", { "InstanceId.1": instanceId });
       if (!res.ok) {
         const detail = parseAwsEc2ErrorXml(res.text);
         console.error(`StartInstances failed (${res.status}): ${detail}`);

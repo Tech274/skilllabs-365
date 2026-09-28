@@ -10,8 +10,9 @@ describe("learner leave notice", () => {
       reason: "VM_PROTECTED",
     });
     expect(notice.title).toBe("Left the lab");
-    expect(notice.description).toContain("kept running");
+    expect(notice.description).toContain("left running");
     expect(notice.description.toLowerCase()).not.toContain("leave failed");
+    expect(notice.description.toLowerCase()).not.toContain("session closed");
   });
 
   it("keeps the wallet equation when the machine was soft-stopped", () => {

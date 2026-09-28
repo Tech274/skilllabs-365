@@ -16,6 +16,13 @@ Deno.test("held VMs are skipped by every automatic pass and purge", () => {
   assert(src.includes("isVmGuarded("));
   assert(src.includes("guardedDeleteBlock("));
   assert(src.includes("guardedLearnerLeaveBody()"));
+  const leaveGuard = src.indexOf("Guarded leave: no session write");
+  const leaveClose = src.indexOf('disconnect_reason: "learner_leave"');
+  assert(leaveGuard > 0 && leaveClose > leaveGuard, "leave must guard before the session close");
+  const idle = src.indexOf("Process idle sessions");
+  const idleGuard = src.indexOf("session left open, not deallocated", idle);
+  const idleClose = src.indexOf('disconnect_reason: "idle_timeout"', idle);
+  assert(idle > 0 && idleGuard > idle && idleClose > idleGuard, "idle pass must guard before the session close");
   const stopBeforeClose = src.indexOf('action === "stop-vm" &&');
   const sharedClose = src.indexOf("Guarded delete and stop return 423 before any session close");
   const closeCall = src.indexOf('.update({ ended_at: new Date().toISOString(), status: "completed" })', sharedClose);
