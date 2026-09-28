@@ -623,7 +623,7 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
     // SOFT_EXPIRY_MODE gates ONLY the soft-expiry sweep. The idle, orphan
     // (incl. Cancel pending-stop retries) and stuck-provisioning passes run in
     // every mode, including `off` — product decision, keep it that way.
-    // Unknown values fail safe to dry-run (warned + reported in the response).
+    // Unset, empty, and unknown values fail safe to dry-run (warned + reported).
     const softExpiryModeConfig = resolveSoftExpiryMode(Deno.env.get("SOFT_EXPIRY_MODE"));
     const softExpiryMode = softExpiryModeConfig.mode;
     if (softExpiryModeConfig.warning) {

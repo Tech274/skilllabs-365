@@ -118,12 +118,14 @@ npm run functions:test    # deno test supabase/functions/
   → end active sessions, **deallocate** (never delete), notify learner + admins.
   Azure OS-level `stopped` still bills compute, so it is deallocated too. The
   run response carries `soft_expiry: { mode, mode_configured, mode_warning, scanned, due, deallocated, stop_failed, held_skipped, dry_run_due, template_unknown_skipped }`.
-  * `SOFT_EXPIRY_MODE` secret: unset/empty = `legacy` (enforce only what the old
+  * `SOFT_EXPIRY_MODE` secret: explicit `legacy` (enforce only what the old
     sweep enforced; OS-stopped VMs and idle-past-expires_at are logged as
     `soft_expiry_dry_run_due`), `enforce` (full SCRUM-28 scope), `dry-run`
-    (report only), `off` (skip). **Any other value (e.g. `dry_run`, `disabled`)
-    fails safe to `dry-run`**, logs `soft_expiry_mode_invalid` and shows up as
-    `soft_expiry.mode_warning`. Flip to `enforce` only after reviewing `expiry-preview`.
+    (report only), `off` (skip). **Unset, empty, or any other value (e.g.
+    `dry_run`, `disabled`) fails safe to `dry-run`**, logs
+    `soft_expiry_mode_invalid` and shows up as `soft_expiry.mode_warning`.
+    `legacy` is no longer the default. Flip to `enforce` or `legacy` only after
+    reviewing `expiry-preview`.
   * **`SOFT_EXPIRY_MODE` only gates the soft-expiry sweep.** The idle pass, the
     orphan pass (incl. Cancel retries) and the stuck-provisioning pass run in
     every mode, including `off` (product decision). Note: `legacy` pages up to
@@ -192,9 +194,11 @@ constant-time and fails when `CRON_SHARED_SECRET` is unset or empty. A valid
 cron secret does not authorize `stop-vm`, `delete-vm`, `cancel-provisioning`,
 `start-vm` (including the admin wallet override), `purge-failed`, or
 `clear-guacamole`. Service-role and admin callers that do not present a
-matching cron secret are unchanged. `SOFT_EXPIRY_MODE` and `CLEANUP_HELD_VM_IDS`
-are unchanged: held VMs, including the built-in `bba27e8f` prefix, are skipped,
-and soft-expiry `dry-run` does not stop or delete.
+matching cron secret are unchanged. `CLEANUP_HELD_VM_IDS` is unchanged: held
+VMs, including the built-in `bba27e8f` prefix, are skipped, and soft-expiry
+`dry-run` does not stop or delete. Unset, empty, or unrecognised
+`SOFT_EXPIRY_MODE` fails safe to `dry-run` and logs a warning. Explicit
+`legacy`, `enforce`, `dry-run`, and `off` still mean what they meant before.
 
 Job 1 should send `x-cron-secret` from Vault `cron_shared_secret`, the same
 header jobs 4 and 9 send.
