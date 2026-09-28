@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
+  contentSecurityPolicy,
   headersFile,
   securityHeaders,
   vercelConfig,
@@ -59,6 +60,21 @@ describe("SCRUM-23 hosting config", () => {
     expect(assets?.headers).toEqual([
       { key: "Cache-Control", value: "public, max-age=31536000, immutable" },
     ]);
+  });
+});
+
+describe("index.html document CSP", () => {
+  it("carries the live CSP meta, including guac-azure, and not the stale tip", () => {
+    const html = readFileSync(resolve(root, "index.html"), "utf8");
+    const meta = html.match(/<meta http-equiv="Content-Security-Policy" content="([^"]*)" \/>/);
+    const policy = contentSecurityPolicy()
+      .split("; ")
+      .filter((directive) => !directive.startsWith("frame-ancestors"))
+      .join("; ");
+    expect(meta?.[1]).toBe(policy);
+    expect(meta?.[1]).toContain("https://guac-azure.skillhub365.co.in");
+    expect(html).not.toContain('name="skillhub-tip"');
+    expect(html).not.toContain("9de17a0a50abc0af37c2b375cf2abfba3ea80510");
   });
 });
 
