@@ -1,5 +1,6 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { AuthCtx } from "../_shared/auth.ts";
+import { withLockedEnv } from "../_shared/cron-auth.test-helpers.ts";
 
 Deno.env.set("DENO_TESTING", "1");
 Deno.env.set("CLEANUP_SKIP_SERVE", "1");
@@ -57,6 +58,7 @@ async function invoke(
   vm: Record<string, unknown>,
   extra?: { startCloudVm?: (supabase: unknown, provider: string, row: unknown) => Promise<Record<string, unknown>> },
 ) {
+  return await withLockedEnv({}, async () => {
   const cloud: string[] = [];
   const { client, writes, auth } = mockSupabase(vm);
   const res = await handleCleanupRequest(
@@ -69,6 +71,7 @@ async function invoke(
   );
   const body = await res.json();
   return { status: res.status, body, writes, cloud };
+  });
 }
 
 Deno.test("guarded stop, delete and cancel write nothing and call no cloud", async () => {

@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { withCronSecretEnv } from "../_shared/cron-auth.test-helpers.ts";
+import { withCronSecretEnv, withLockedEnv } from "../_shared/cron-auth.test-helpers.ts";
 
 Deno.env.set("DENO_TESTING", "1");
 Deno.env.set("VM_RECONCILE_SKIP_SERVE", "1");
@@ -118,6 +118,26 @@ Deno.test("vm-reconcile unset or empty CRON_SHARED_SECRET is 401", async () => {
   await withCronSecretEnv("", async () => {
     const res = await call(FIXTURE);
     assertEquals(res.status, 401);
+  });
+});
+
+Deno.test("vm-reconcile omits dry_run and defaults to dry-run", async () => {
+  const { client, writes } = emptyClient();
+  await withLockedEnv({
+    CRON_SHARED_SECRET: FIXTURE,
+    VM_RECONCILE_MODE: null,
+    VM_RECONCILE_DRY_RUN: null,
+  }, async () => {
+    const res = await handleVmReconcile(
+      request(FIXTURE, { scope: "fleet" }, { Authorization: `Bearer ${ANON}` }),
+      { supabase: client },
+    );
+    const body = await res.json();
+    assertEquals(res.status, 200);
+    assertEquals(body.dry_run, true);
+    assertEquals(body.checked, 0);
+    assertEquals(body.changed, []);
+    assertEquals(writes, []);
   });
 });
 

@@ -1,5 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
-import { withCronSecretEnv } from "../_shared/cron-auth.test-helpers.ts";
+import { withCronSecretEnv, withLockedEnv } from "../_shared/cron-auth.test-helpers.ts";
 
 Deno.env.set("DENO_TESTING", "1");
 Deno.env.set("CLEANUP_SKIP_SERVE", "1");
@@ -242,28 +242,15 @@ function dueVmClient(id: string) {
   });
 }
 
-async function withEnv(vars: Record<string, string | null>, fn: () => Promise<void>): Promise<void> {
-  const saved = new Map<string, string | undefined>();
-  for (const key of Object.keys(vars)) saved.set(key, Deno.env.get(key));
-  try {
-    for (const [key, value] of Object.entries(vars)) {
-      if (value === null) Deno.env.delete(key);
-      else Deno.env.set(key, value);
-    }
-    await fn();
-  } finally {
-    for (const [key, prev] of saved) {
-      if (prev === undefined) Deno.env.delete(key);
-      else Deno.env.set(key, prev);
-    }
-  }
+function withEnv(vars: Record<string, string | null>, fn: () => Promise<void>): Promise<void> {
+  return withLockedEnv(vars, fn);
 }
 
 Deno.test("cron scheduled cleanup skips a non-built-in CLEANUP_HELD_VM_IDS entry", async () => {
   assertEquals(EXTRA_HELD_ID.startsWith("bba27e8f"), false);
   const { client, writes } = dueVmClient(EXTRA_HELD_ID);
-  await withCronSecretEnv(FIXTURE, () =>
-    withEnv({
+  await withEnv({
+      CRON_SHARED_SECRET: FIXTURE,
       CLEANUP_HELD_VM_IDS: EXTRA_HELD_ID,
       VM_PROTECTED_IDS: null,
       SOFT_EXPIRY_MODE: "enforce",
@@ -277,15 +264,14 @@ Deno.test("cron scheduled cleanup skips a non-built-in CLEANUP_HELD_VM_IDS entry
       assertEquals(res.body.soft_expiry.stop_failed, 0);
       assertEquals(res.cloud, []);
       assertEquals(writes, []);
-    })
-  );
+    });
 });
 
 Deno.test("cron scheduled cleanup skips a VM listed only in VM_PROTECTED_IDS", async () => {
   assertEquals(EXTRA_PROTECTED_ID.startsWith("bba27e8f"), false);
   const { client, writes } = dueVmClient(EXTRA_PROTECTED_ID);
-  await withCronSecretEnv(FIXTURE, () =>
-    withEnv({
+  await withEnv({
+      CRON_SHARED_SECRET: FIXTURE,
       CLEANUP_HELD_VM_IDS: null,
       VM_PROTECTED_IDS: EXTRA_PROTECTED_ID,
       SOFT_EXPIRY_MODE: "enforce",
@@ -299,6 +285,5 @@ Deno.test("cron scheduled cleanup skips a VM listed only in VM_PROTECTED_IDS", a
       assertEquals(res.body.soft_expiry.stop_failed, 0);
       assertEquals(res.cloud, []);
       assertEquals(writes, []);
-    })
-  );
+    });
 });

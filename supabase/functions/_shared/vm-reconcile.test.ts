@@ -1,4 +1,5 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
+import { withLockedEnv } from "./cron-auth.test-helpers.ts";
 import {
   effectiveReconcileDryRun,
   planAzure,
@@ -8,46 +9,16 @@ import {
   type ReconcileVm,
 } from "./vm-reconcile.ts";
 
-function withEnv(pairs: Record<string, string | null>, fn: () => void) {
-  const prev = new Map<string, string | undefined>();
-  for (const [k, v] of Object.entries(pairs)) {
-    prev.set(k, Deno.env.get(k));
-    if (v === null) Deno.env.delete(k);
-    else Deno.env.set(k, v);
-  }
-  try {
-    fn();
-  } finally {
-    for (const [k, v] of prev) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
+function withEnv(pairs: Record<string, string | null>, fn: () => void | Promise<void>) {
+  return withLockedEnv(pairs, fn);
 }
 
-async function withEnvAsync(pairs: Record<string, string | null>, fn: () => Promise<void>) {
-  const prev = new Map<string, string | undefined>();
-  for (const [k, v] of Object.entries(pairs)) {
-    prev.set(k, Deno.env.get(k));
-    if (v === null) Deno.env.delete(k);
-    else Deno.env.set(k, v);
-  }
-  try {
-    await fn();
-  } finally {
-    for (const [k, v] of prev) {
-      if (v === undefined) Deno.env.delete(k);
-      else Deno.env.set(k, v);
-    }
-  }
-}
-
-Deno.test("vm-reconcile defaults to dry-run and writes nothing, promotions included", () => {
-  withEnv({ VM_RECONCILE_MODE: null, VM_RECONCILE_DRY_RUN: null }, () => {
+Deno.test("vm-reconcile defaults to dry-run and writes nothing, promotions included", async () => {
+  await withEnv({ VM_RECONCILE_MODE: null, VM_RECONCILE_DRY_RUN: null }, () => {
     assertEquals(reconcileWritesEnabled(), false);
     assertEquals(effectiveReconcileDryRun({}), true);
   });
-  withEnv({ VM_RECONCILE_MODE: null, VM_RECONCILE_DRY_RUN: "true" }, () => {
+  await withEnv({ VM_RECONCILE_MODE: null, VM_RECONCILE_DRY_RUN: "true" }, () => {
     assertEquals(reconcileWritesEnabled(), false);
     assertEquals(effectiveReconcileDryRun({}), true);
   });
@@ -61,13 +32,13 @@ Deno.test("vm-reconcile defaults to dry-run and writes nothing, promotions inclu
   );
 });
 
-Deno.test("vm-reconcile opt-in enables writes; body dry_run still forces a report", () => {
-  withEnv({ VM_RECONCILE_MODE: "apply", VM_RECONCILE_DRY_RUN: null }, () => {
+Deno.test("vm-reconcile opt-in enables writes; body dry_run still forces a report", async () => {
+  await withEnv({ VM_RECONCILE_MODE: "apply", VM_RECONCILE_DRY_RUN: null }, () => {
     assertEquals(reconcileWritesEnabled(), true);
     assertEquals(effectiveReconcileDryRun({}), false);
     assertEquals(effectiveReconcileDryRun({ bodyDryRun: true }), true);
   });
-  withEnv({ VM_RECONCILE_MODE: null, VM_RECONCILE_DRY_RUN: "false" }, () => {
+  await withEnv({ VM_RECONCILE_MODE: null, VM_RECONCILE_DRY_RUN: "false" }, () => {
     assertEquals(reconcileWritesEnabled(), true);
     assertEquals(effectiveReconcileDryRun({}), false);
   });
@@ -77,12 +48,12 @@ Deno.test("vm-reconcile opt-in enables writes; body dry_run still forces a repor
   );
 });
 
-Deno.test("VM_RECONCILE_MODE=dry-run wins over VM_RECONCILE_DRY_RUN=false", () => {
-  withEnv({ VM_RECONCILE_MODE: "dry-run", VM_RECONCILE_DRY_RUN: "false" }, () => {
+Deno.test("VM_RECONCILE_MODE=dry-run wins over VM_RECONCILE_DRY_RUN=false", async () => {
+  await withEnv({ VM_RECONCILE_MODE: "dry-run", VM_RECONCILE_DRY_RUN: "false" }, () => {
     assertEquals(reconcileWritesEnabled(), false);
     assertEquals(effectiveReconcileDryRun({}), true);
   });
-  withEnv({ VM_RECONCILE_MODE: "apply", VM_RECONCILE_DRY_RUN: "false" }, () => {
+  await withEnv({ VM_RECONCILE_MODE: "apply", VM_RECONCILE_DRY_RUN: "false" }, () => {
     assertEquals(reconcileWritesEnabled(), true);
   });
 });
@@ -128,7 +99,7 @@ Deno.test("reconcileVms dry-run makes zero write calls", async () => {
     "i-0123456789abcdef0",
     { state: "running" as const, publicIp: "203.0.113.9", privateIp: "10.0.0.9" },
   ]]);
-  await withEnvAsync({ VM_RECONCILE_MODE: "dry-run", VM_RECONCILE_DRY_RUN: "false" }, async () => {
+  await withEnv({ VM_RECONCILE_MODE: "dry-run", VM_RECONCILE_DRY_RUN: "false" }, async () => {
     const results = await reconcileVms(admin, [vm], {
       source: "test",
       awsDescribe: async () => described,
