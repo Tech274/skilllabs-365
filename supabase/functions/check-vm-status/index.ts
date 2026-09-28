@@ -1,4 +1,4 @@
-import { corsHeadersFor, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse } from "../_shared/auth.ts";
+import { corsHeadersFor, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse, type AuthCtx } from "../_shared/auth.ts";
 import { serviceClient } from "../_shared/cloud-providers/accounts.ts";
 import { getAzureToken } from "../_shared/azure-preflight.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
@@ -10,20 +10,27 @@ import { resolveAwsRuntime, describeAwsInstance } from "../_shared/cloud-provide
 import { reconcileWritesEnabled, reconcileVms, type ReconcileVm } from "../_shared/vm-reconcile.ts";
 import { isVmGuarded } from "../_shared/lab-expiry.ts";
 
-Deno.serve(async (req) => {
+export type CheckVmStatusDeps = {
+  auth?: AuthCtx;
+  // deno-lint-ignore no-explicit-any -- test double or service client
+  supabase?: any;
+  onCloud?: (name: string) => void;
+};
+
+export async function handleCheckVmStatus(req: Request, deps?: CheckVmStatusDeps): Promise<Response> {
   const corsHeaders = corsHeadersFor(req);
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
 
   try {
-    const auth = await requireUser(req);
+    const auth = deps?.auth ?? await requireUser(req);
     if (auth instanceof Response) return auth;
 
     const { vm_id } = await req.json();
     if (!vm_id) return errorResponse("vm_id is required", 400);
 
-    const admin = serviceClient();
+    const admin = deps?.supabase ?? serviceClient();
     const { data: vm } = await admin.from("virtual_machines").select("*").eq("id", vm_id).maybeSingle();
     if (!vm) return errorResponse("VM not found", 404);
 
@@ -31,6 +38,7 @@ Deno.serve(async (req) => {
     if (forbidden) return forbidden;
 
     // Guarded VMs are returned as stored. No cloud describe and no status write.
+    // A provisioning or starting row stays that way until an operator moves it.
     if (isVmGuarded(vm)) {
       return jsonResponse({ status: vm.status, code: "VM_PROTECTED" });
     }
@@ -42,6 +50,7 @@ Deno.serve(async (req) => {
     let drift: Record<string, unknown> | null = null;
     if (vm.azure_vm_id) {
       try {
+        deps?.onCloud?.("reconcileVms");
         const [r] = await reconcileVms(admin, [vm as ReconcileVm], {
           source: "check-vm-status",
           dryRun: !applyReconcile,
@@ -93,6 +102,7 @@ Deno.serve(async (req) => {
     if (provider === "aws") {
       const aws = await resolveAwsRuntime(admin, vm.provider_account_id);
       if (vm.region) aws.defaultRegion = String(vm.region);
+      deps?.onCloud?.("describeAwsInstance");
       const desc = await describeAwsInstance(aws, vm.azure_vm_id);
       if (desc.state === "running") {
         await applyPromoteToRunning(admin, vm_id, desc.privateIp, desc.publicIp);
@@ -156,4 +166,8 @@ Deno.serve(async (req) => {
       { status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   }
-});
+}
+
+if (Deno.env.get("DENO_TESTING") !== "1" || Deno.env.get("CHECK_VM_STATUS_SKIP_SERVE") !== "1") {
+  Deno.serve((req) => handleCheckVmStatus(req));
+}

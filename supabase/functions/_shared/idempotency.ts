@@ -62,14 +62,22 @@ export async function claimIdempotency(
   const stale = existing?.status === "in_progress"
     && Number.isFinite(createdMs)
     && now.getTime() - createdMs >= IDEMPOTENCY_IN_PROGRESS_TTL_MS;
-  if (stale) {
-    await supabase
+  if (stale && existing?.created_at) {
+    // Pin the delete to this exact stale row. A delete on status alone can
+    // remove the row a concurrent retry just inserted, so both would get "new".
+    const { data: removed, error: delErr } = await supabase
       .from("provisioning_idempotency")
       .delete()
       .eq("user_id", args.userId)
       .eq("action", args.action)
       .eq("idempotency_key", args.key)
-      .eq("status", "in_progress");
+      .eq("status", "in_progress")
+      .eq("created_at", existing.created_at)
+      .select("idempotency_key");
+    if (delErr) throw new Error(`Idempotency reclaim failed: ${delErr.message}`);
+    if (!removed || removed.length !== 1) {
+      return { outcome: "in_progress", key: args.key, correlationId: existing.correlation_id ?? null };
+    }
     const { error: reclaimed } = await supabase.from("provisioning_idempotency").insert(insertRow);
     if (!reclaimed) return { outcome: "new", key: args.key };
     if (reclaimed.code !== "23505") throw new Error(`Idempotency reclaim failed: ${reclaimed.message}`);

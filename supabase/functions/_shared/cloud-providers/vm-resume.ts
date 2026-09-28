@@ -51,10 +51,12 @@ export type StartCloudVmResult = {
   /** i-* id would have been sent to Azure start — refused (REMINT_PROVIDER_MISMATCH). */
   mismatch?: boolean;
   /**
-   * The shared remint budget ran out. Callers return `starting` and must not
-   * write running or a fresh IP. Reconcile promotes later.
+   * True when the shared budget ran out before StartInstances. `ok` is false
+   * and `code` is REMINT_START_FAILED. Callers must leave the VM row unchanged.
+   * A cap after StartInstances is reported by waitForRunningAndIps, not here.
    */
   capped?: boolean;
+  code?: "REMINT_START_FAILED";
 };
 
 /** Shared clock for the stopped-wait and the running-wait. Both phases draw from one cap. */
@@ -376,7 +378,22 @@ export async function startCloudVm(
           clock,
         );
         if (waited.capped) {
-          return { ok: true, awsState: "starting", capped: true, detail: waited.detail };
+          // Budget gone before StartInstances. The instance is still stopped.
+          // Do not report success: callers must not write status=starting.
+          console.warn(JSON.stringify({
+            event: "aws_remint_cap_before_start",
+            instance_id: instanceId,
+            elapsed_ms: clock.now() - clock.startedAt,
+            cap_ms: clock.capMs,
+            state: waited.state,
+          }));
+          return {
+            ok: false,
+            awsState: waited.state as AwsInstanceState,
+            capped: true,
+            code: "REMINT_START_FAILED",
+            detail: waited.detail ?? "remint wait cap hit before StartInstances",
+          };
         }
         if (waited.state === "running" || waited.state === "pending") {
           return { ok: true, awsState: waited.state as AwsInstanceState, detail: `already ${waited.state} after wait` };

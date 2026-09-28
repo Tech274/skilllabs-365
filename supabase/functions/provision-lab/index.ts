@@ -29,6 +29,7 @@ import {
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
 import { createRemintClock, findResumableVm, LIVE_VM_STATUSES, RESUMABLE_VM_STATUSES, resolveRemintProvider, startCloudVm, waitForRunningAndIps } from "../_shared/cloud-providers/vm-resume.ts";
 import { adminPersistentRemintSkipsOwnerWallet, buildWalletSnapshot, persistentStartClearsExpiresAt, walletBlockMessage } from "../_shared/lab-wallet.ts";
+import { isVmGuarded } from "../_shared/lab-expiry.ts";
 
 const SOURCE = "provision-lab";
 
@@ -560,6 +561,20 @@ Deno.serve(async (req) => {
         ? await findResumableVm(supabase, { userId: walletOwnerId, labTemplateId: lab_template_id })
         : null;
 
+    // Smoke and other guarded VMs are controlled manually. The admin wallet
+    // override must not start one, and neither may a learner remint.
+    if (existingVmForGate && isVmGuarded(existingVmForGate)) {
+      const failure = {
+        error: "VM_PROTECTED",
+        code: "VM_PROTECTED",
+        vm_id: existingVmForGate.id,
+        correlation_id: correlationId,
+      };
+      await completeIdempotency(supabase, { key: idemKey, userId, action: "provision-lab", response: failure });
+      idem = null;
+      return new Response(JSON.stringify(failure), { status: 423, headers: traceHeaders });
+    }
+
     // --- Lab wallet Start gate --------------------------------------------
     // Exhausted minutes (or ended date window) block learner Start/Launch.
     // Do NOT delete the VM — soft-stop / Leave already held it.
@@ -727,6 +742,8 @@ Deno.serve(async (req) => {
           console.error("persistent remint start failed", e);
           remintDetail = e instanceof Error ? e.message : String(e);
         }
+        // ok:false (including REMINT_START_FAILED when the cap hits before
+        // StartInstances) skips this write, so the VM row status stays as it was.
         if (started) {
           const baseUpdate: Record<string, unknown> = {
             status: "starting",

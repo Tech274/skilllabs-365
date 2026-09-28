@@ -1,6 +1,7 @@
 import { assertEquals } from "https://deno.land/std@0.224.0/assert/mod.ts";
 import type { AuthCtx } from "../_shared/auth.ts";
 
+Deno.env.set("DENO_TESTING", "1");
 Deno.env.set("CLEANUP_SKIP_SERVE", "1");
 const { handleCleanupRequest } = await import("./index.ts");
 

@@ -22,11 +22,15 @@ function fakeDb(rows: Row[]) {
       maybeSingle() { return Promise.resolve({ data: rows.find(match) ?? null, error: null }); },
       delete() {
         const run = () => {
-          for (let i = rows.length - 1; i >= 0; i--) if (match(rows[i])) rows.splice(i, 1);
-          return { error: null };
+          const removed: Row[] = [];
+          for (let i = rows.length - 1; i >= 0; i--) {
+            if (match(rows[i])) removed.push(rows.splice(i, 1)[0]);
+          }
+          return { data: removed, error: null, count: removed.length };
         };
         const del: Record<string, unknown> = {
           eq(k: string, v: unknown) { filters.push([k, v]); return del; },
+          select() { return del; },
           then(res: (v: unknown) => unknown) { return Promise.resolve(run()).then(res); },
         };
         return del;
@@ -101,4 +105,30 @@ Deno.test("in_progress idempotency claims expire after about 5 minutes", async (
   assertEquals(stale[0].correlation_id, "retry");
   assertEquals(stale[0].status, "in_progress");
   assertEquals(stale[0].created_at, now.toISOString());
+});
+
+Deno.test("two concurrent stale reclaimers: exactly one wins", async () => {
+  const now = new Date("2026-09-28T00:00:00.000Z");
+  const staleAt = new Date(now.getTime() - IDEMPOTENCY_IN_PROGRESS_TTL_MS - 1_000).toISOString();
+  const rows: Row[] = [{
+    idempotency_key: base.key,
+    user_id: "u1",
+    action: base.action,
+    status: "in_progress",
+    correlation_id: "killed",
+    created_at: staleAt,
+  }];
+  const db = fakeDb(rows);
+  const [a, b] = await Promise.all([
+    claimIdempotency(db, { ...base, correlationId: "A", now }),
+    claimIdempotency(db, { ...base, correlationId: "B", now }),
+  ]);
+  const outcomes = [a.outcome, b.outcome].sort();
+  assertEquals(outcomes, ["in_progress", "new"]);
+  assertEquals(rows.length, 1);
+  assertEquals(rows[0].status, "in_progress");
+  assertEquals(rows[0].created_at, now.toISOString());
+  assertEquals(rows[0].correlation_id === "A" || rows[0].correlation_id === "B", true);
+  const winner = a.outcome === "new" ? "A" : "B";
+  assertEquals(rows[0].correlation_id, winner);
 });

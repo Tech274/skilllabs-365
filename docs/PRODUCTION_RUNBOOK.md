@@ -158,7 +158,9 @@ npm run functions:test    # deno test supabase/functions/
   close the session row (the VM is left running). There is no admin bypass on
   delete: remove the VM from the held or protected list first. Admin Start of
   a persistent VM whose owner is out of minutes is allowed, audited, and does
-  not deduct that wallet, unless that VM is itself guarded.
+  not deduct that wallet. If that VM is itself guarded, `provision-lab` returns
+  423 `VM_PROTECTED` and does not start it (the smoke VM is controlled manually).
+  The T-15m pre-expiry warning skips guarded rows.
 * VMs stuck in `provisioning` > 10 min → mark failed and delete the Azure resource
 * orphaned Guacamole users/connections with no live session → removed
 

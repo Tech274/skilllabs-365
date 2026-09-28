@@ -1868,6 +1868,7 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
         .limit(100);
 
       for (const vm of soonExpiring ?? []) {
+        if (isHeldVm(vm, heldVms) || isVmGuarded(vm)) continue;
         const label = vm.azure_vm_id ? extractVmName(vm.azure_vm_id) : vm.id.slice(0, 8);
         await notifyLearnerAndAdmins(supabase, {
           userId: vm.user_id,
@@ -2144,8 +2145,8 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
   }
 }
 
-// Tests import the handler with CLEANUP_SKIP_SERVE=1 so this file does not
-// bind a port. Production and `supabase functions serve` leave the env unset.
-if (Deno.env.get("CLEANUP_SKIP_SERVE") !== "1") {
+// Skip the listener only when a test sets both flags. CLEANUP_SKIP_SERVE alone
+// must not stop a production or `supabase functions serve` process.
+if (Deno.env.get("DENO_TESTING") !== "1" || Deno.env.get("CLEANUP_SKIP_SERVE") !== "1") {
   Deno.serve((req) => handleCleanupRequest(req));
 }
