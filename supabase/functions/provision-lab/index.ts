@@ -29,6 +29,7 @@ import {
 import { checkConnectivity } from "../_shared/connectivity-check.ts";
 import { createRemintClock, findResumableVm, LIVE_VM_STATUSES, RESUMABLE_VM_STATUSES, resolveRemintProvider, startCloudVm, waitForRunningAndIps } from "../_shared/cloud-providers/vm-resume.ts";
 import { adminPersistentRemintSkipsOwnerWallet, buildWalletSnapshot, persistentStartClearsExpiresAt, walletBlockMessage } from "../_shared/lab-wallet.ts";
+import { adminRestartOutcome, adminStartOverrideMessage, type AdminStartOverrideOutcome } from "../_shared/admin-start-override.ts";
 import { isVmGuarded } from "../_shared/lab-expiry.ts";
 
 const SOURCE = "provision-lab";
@@ -377,6 +378,7 @@ Deno.serve(async (req) => {
       return new Response(
         JSON.stringify({
           error: "A provisioning request with this idempotency key is already in progress.",
+          code: "IDEMPOTENCY_IN_PROGRESS",
           correlation_id: claim.correlationId ?? correlationId,
           idempotent_replay: true,
         }),
@@ -672,30 +674,14 @@ Deno.serve(async (req) => {
       }
     }
 
-    const adminRestartOutcome = (
-      didStart: boolean,
-      status: string,
-    ): "already_running" | "start_accepted" | "running" => {
-      const normalized = String(status || "").toLowerCase();
-      const live = normalized === "running" || normalized === "idle";
-      if (!didStart) return live ? "already_running" : "start_accepted";
-      return live ? "running" : "start_accepted";
-    };
-
     const writeAdminStartOverrideAudit = async (
-      restartOutcome: "already_running" | "start_accepted" | "running" | "failed",
+      restartOutcome: AdminStartOverrideOutcome,
       errorCode?: string,
     ) => {
       if (!adminOverrideAudit) return;
       const audit = adminOverrideAudit;
       adminOverrideAudit = null;
-      const message = restartOutcome === "failed"
-        ? `Admin Start did not power the VM on${errorCode ? ` (${errorCode})` : ""}. Minutes were not deducted.`
-        : restartOutcome === "already_running"
-          ? "Admin Start found the VM already running. Minutes were not deducted."
-          : restartOutcome === "running"
-            ? "Admin Start powered the VM on. Minutes were not deducted."
-            : "Admin Start was accepted; the VM is still starting. Minutes were not deducted.";
+      const message = adminStartOverrideMessage(restartOutcome, errorCode);
       await recordAudit(supabase, {
         actorId: userId,
         actorType: "user",

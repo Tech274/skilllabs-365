@@ -27,7 +27,28 @@ const OUTCOME_STYLES: Record<string, string> = {
   success: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30",
   failed: "bg-destructive/10 text-destructive border-destructive/30",
   blocked: "bg-amber-500/10 text-amber-400 border-amber-500/30",
+  already_running: "bg-sky-500/10 text-sky-400 border-sky-500/30",
+  already_starting: "bg-violet-500/10 text-violet-400 border-violet-500/30",
+  start_accepted: "bg-blue-500/10 text-blue-400 border-blue-500/30",
+  running: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30",
 };
+
+const OUTCOME_LABELS: Record<string, string> = {
+  success: "Success",
+  failed: "Failed",
+  blocked: "Blocked",
+  already_running: "Already running",
+  already_starting: "Already starting",
+  start_accepted: "Start accepted",
+  running: "Running",
+};
+
+function outcomeBadge(outcome: string): { label: string; className: string } {
+  return {
+    label: OUTCOME_LABELS[outcome] ?? outcome,
+    className: OUTCOME_STYLES[outcome] ?? "",
+  };
+}
 
 function toCsv(rows: AuditRow[]): string {
   const header = [
@@ -132,10 +153,16 @@ export default function AdminAuditLog() {
                 </tr>
               </thead>
               <tbody>
-                {filtered.map((r, i) => (
-                  <motion.tr key={r.id} initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+                {filtered.map((r, i) => {
+                  const badge = outcomeBadge(r.outcome);
+                  return (
+                  <motion.tr
+                    key={r.id}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
                     transition={{ delay: Math.min(i * 0.01, 0.3) }}
-                    className="border-b border-border/50 last:border-0 align-top">
+                    className="border-b border-border/50 last:border-0 align-top"
+                  >
                     <td className="p-3 whitespace-nowrap text-muted-foreground">
                       {new Date(r.created_at).toLocaleString()}
                     </td>
@@ -149,7 +176,7 @@ export default function AdminAuditLog() {
                       <div className="text-xs text-muted-foreground">{r.entity_type}</div>
                     </td>
                     <td className="p-3">
-                      <Badge variant="outline" className={OUTCOME_STYLES[r.outcome] ?? ""}>{r.outcome}</Badge>
+                      <Badge variant="outline" className={badge.className}>{badge.label}</Badge>
                     </td>
                     <td className="p-3 max-w-md">
                       {r.message && <div className="text-xs text-muted-foreground">{r.message}</div>}
@@ -160,7 +187,8 @@ export default function AdminAuditLog() {
                       )}
                     </td>
                   </motion.tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
