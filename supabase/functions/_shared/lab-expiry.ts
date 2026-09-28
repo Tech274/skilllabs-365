@@ -399,8 +399,8 @@ export function guardedDeleteBlock(
 
 /**
  * Learner leave on a guarded VM. HTTP 200 so the SPA does not show "Leave failed".
- * No session row is written and no cloud stop is attempted. The session stays
- * open and the VM stays running. Atlas should confirm the open session row.
+ * The handler closes only the learner's session (wallet stops). No cloud stop
+ * and no VM-row write. The machine stays running.
  */
 export function guardedLearnerLeaveBody(): {
   success: true;

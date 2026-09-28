@@ -16,9 +16,11 @@ Deno.test("held VMs are skipped by every automatic pass and purge", () => {
   assert(src.includes("isVmGuarded("));
   assert(src.includes("guardedDeleteBlock("));
   assert(src.includes("guardedLearnerLeaveBody()"));
-  const leaveGuard = src.indexOf("Guarded leave: no session write");
+  const leaveGuard = src.indexOf("Guarded leave: close only the learner session");
   const leaveClose = src.indexOf('disconnect_reason: "learner_leave"');
-  assert(leaveGuard > 0 && leaveClose > leaveGuard, "leave must guard before the session close");
+  const leaveReturn = src.indexOf("kept_running: true", leaveGuard);
+  const softStop = src.indexOf("softStopLearnerVm(", leaveGuard);
+  assert(leaveGuard > 0 && leaveClose > leaveGuard && leaveReturn > leaveClose && softStop > leaveReturn, "guarded leave closes the session and returns before any cloud stop");
   const warn = src.indexOf("Pre-expiry warning");
   const warnGuard = src.indexOf("isVmGuarded(vm)", warn);
   const warnedAt = src.indexOf("expiry_warned_at: now.toISOString()", warn);

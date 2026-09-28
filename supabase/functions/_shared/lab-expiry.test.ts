@@ -358,7 +358,7 @@ Deno.test("delete-vm: a VM guarded by either list is 423, with no admin bypass",
   assertEquals(guardedDeleteBlock({ id: "cafe0000-1111-2222-3333-444455556666" }, empty), null);
 });
 
-Deno.test("learner-leave on a guarded VM is success and does not claim the session closed", () => {
+Deno.test("learner-leave on a guarded VM is success and leaves the machine running", () => {
   assertEquals(guardedLearnerLeaveBody(), {
     success: true,
     kept_running: true,

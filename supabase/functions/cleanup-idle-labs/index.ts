@@ -587,7 +587,8 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
     // Held VMs (smoke VM, Guac hosts, Ops holds) are never touched by automatic
     // passes or purge. Stop, cancel, delete, and start on a guarded VM return
     // 423 before any session or VM-row write and before any cloud call.
-    // Learner leave returns 200 kept_running and does not close the session.
+    // Learner leave on a guarded VM returns 200 kept_running, closes only the
+    // learner session, and does not write the VM row or call the cloud.
     // There is no admin bypass on delete; remove the VM from the list first.
     const heldConfig = parseHeldVmConfig(Deno.env.get("CLEANUP_HELD_VM_IDS"));
     const heldVms = heldConfig.entries;
@@ -808,9 +809,18 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
       let hubStatus = String(vm.status || "running");
       const priorStatus = hubStatus;
 
-      // Guarded leave: no session write, no audit write, no cloud call.
-      // The session row stays open so Atlas can confirm that product choice.
+      // Guarded leave: close only the learner session (same fields as a normal
+      // Leave, so the wallet stops). No audit write, no VM-row write, no cloud call.
       if (leaveGuarded) {
+        await supabase
+          .from("sessions")
+          .update({
+            ended_at: nowIso,
+            status: "completed",
+            disconnect_reason: "learner_leave",
+          })
+          .eq("vm_id", targetVmId)
+          .eq("status", "active");
         console.log(JSON.stringify({
           event: "learner_leave",
           vm_id: targetVmId,
@@ -818,6 +828,7 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
           stopped: false,
           kept_running: true,
           reason: "VM_PROTECTED",
+          session_closed: true,
           hub_status: hubStatus,
           prior_status: priorStatus,
         }));

@@ -71,7 +71,7 @@ async function invoke(
   return { status: res.status, body, writes, cloud };
 }
 
-Deno.test("guarded stop, leave, delete and cancel write nothing and call no cloud", async () => {
+Deno.test("guarded stop, delete and cancel write nothing and call no cloud", async () => {
   const vm = {
     id: GUARDED_ID,
     azure_vm_id: "i-0123456789abcdef0",
@@ -102,7 +102,21 @@ Deno.test("guarded stop, leave, delete and cancel write nothing and call no clou
   assertEquals(cancel.body.code, "VM_PROTECTED");
   assertEquals(cancel.writes, []);
   assertEquals(cancel.cloud, []);
+});
 
+Deno.test("guarded leave closes only the learner session and calls no cloud", async () => {
+  const vm = {
+    id: GUARDED_ID,
+    azure_vm_id: "i-0123456789abcdef0",
+    status: "running",
+    user_id: "owner",
+    lab_template_id: "tpl",
+    provider_account_id: "acct",
+    region: "us-east-1",
+    private_ip: "10.0.0.5",
+    expires_at: null,
+    ended_reason: null,
+  };
   const leave = await invoke("learner-leave", vm);
   assertEquals(leave.status, 200);
   assertEquals(leave.body.success, true);
@@ -111,8 +125,7 @@ Deno.test("guarded stop, leave, delete and cancel write nothing and call no clou
   assertEquals(typeof leave.body.message, "string");
   assertEquals(String(leave.body.message).toLowerCase().includes("protected"), true);
   assertEquals(String(leave.body.message).toLowerCase().includes("left running"), true);
-  assertEquals(leave.body.session_closed, undefined);
-  assertEquals(leave.writes, []);
+  assertEquals(leave.writes, ["sessions.update"]);
   assertEquals(leave.cloud, []);
 });
 
