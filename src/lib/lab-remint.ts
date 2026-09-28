@@ -8,10 +8,12 @@
  * Persistent labs remint through provision-lab with the pinned vm_id. That
  * path resumes the existing machine; it does not create a new one. Other labs
  * resume through cleanup-idle-labs `start-vm`. Each click sends a fresh
- * Idempotency-Key. The key is dropped on success and on failure, so Leave then
- * Start is a new request and not a replay of the stored 200. A 409 while that
- * key is still in progress keeps the key. Double-clicks are refused by the
- * in-flight guard (the Start button is also disabled while the call runs).
+ * Idempotency-Key. The key is dropped on success, on failure, and when the
+ * 180s running wait times out, so the next click is a new request and not a
+ * replay of the stored 200. A 409 while that key is still in progress keeps
+ * the key and is shown as "already starting", not as a failed start.
+ * Double-clicks are refused by the in-flight guard (the Start button is also
+ * disabled while the call runs).
  *
  * We never open Guacamole — and never claim "Connected" — while the machine is
  * deallocated/stopped/starting.
@@ -195,9 +197,12 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
       }
       await new Promise((r) => setTimeout(r, pollMs));
     }
+    // The start call may already have dropped the key. Drop it again here so a
+    // timed-out wait cannot leave a stored 200 for the next click to replay.
+    resetIdempotency(scope);
     throw new Error(`${REMINT_FAIL_CODE}: timed out waiting for running after ${timeoutMs}ms`);
   } catch (err) {
-    if (minted && !preserveKey) resetIdempotency(scope);
+    if (!preserveKey) resetIdempotency(scope);
     throw err;
   } finally {
     inFlightRemints.delete(opts.vmId);
@@ -206,15 +211,18 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
 
 /**
  * Admin Start on /vms. Persistent labs use the same fresh-key remint as a
- * learner. Other labs call cleanup `start-vm` with reason `admin_start` and
- * do not wait for running. Either way the key is new per click, dropped on
- * success and on failure, and kept when the server returns 409.
+ * learner, including the 180s running-wait timeout. Other labs call cleanup
+ * `start-vm` with reason `admin_start` and do not wait for running. Either
+ * way the key is new per click, dropped on success and on failure, and kept
+ * when the server returns 409.
  */
 export async function adminStartVm(opts: {
   vmId: string;
   labTemplateId?: string | null;
   isPersistent?: boolean;
   onPhase?: RemintOptions["onPhase"];
+  timeoutMs?: number;
+  pollMs?: number;
 }): Promise<void> {
   if (opts.isPersistent && opts.labTemplateId) {
     await remintAndWaitRunning({
@@ -222,6 +230,8 @@ export async function adminStartVm(opts: {
       labTemplateId: opts.labTemplateId,
       isPersistent: true,
       onPhase: opts.onPhase,
+      timeoutMs: opts.timeoutMs,
+      pollMs: opts.pollMs,
     });
     return;
   }

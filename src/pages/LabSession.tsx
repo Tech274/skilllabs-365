@@ -406,7 +406,6 @@ export default function LabSession() {
             alreadyStarting: vmStatus === "starting",
           });
         } catch (err) {
-          console.error("[remint] failed:", err);
           if (cancelled) return;
           if (err instanceof WalletBlockedError) {
             showWalletBlock(err.code, err.message);
@@ -420,6 +419,7 @@ export default function LabSession() {
             });
             return;
           }
+          console.error("[remint] failed:", err);
           setReminting(false);
           const detail = err instanceof Error ? err.message : REMINT_FAIL_CODE;
           setLastError(detail);

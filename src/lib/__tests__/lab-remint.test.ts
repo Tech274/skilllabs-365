@@ -159,6 +159,29 @@ describe("remint idempotency key", () => {
     const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
     expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
   });
+
+  it("drops the key when the 180s running wait times out so the next click is fresh", async () => {
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "deallocated" }, error: null };
+      return { data: { vm_id: "vm-1", status: "starting" }, error: null };
+    });
+    await expect(remintAndWaitRunning({
+      vmId: "vm-1",
+      labTemplateId: "lab-1",
+      isPersistent: true,
+      timeoutMs: 30,
+      pollMs: 5,
+    })).rejects.toThrow(/timed out waiting for running/);
+    expect(sessionStorage.getItem("idem:provision:lab-1:vm-1")).toBeNull();
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-1", status: "starting" }, error: null };
+    });
+    await remintAndWaitRunning({ vmId: "vm-1", labTemplateId: "lab-1", isPersistent: true });
+    const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
+    expect(starts).toHaveLength(2);
+    expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
+  });
 });
 
 describe("admin /vms Start", () => {
@@ -210,5 +233,28 @@ describe("admin /vms Start", () => {
     const sent = invoke.mock.calls[0][1].headers["Idempotency-Key"] as string;
     const raw = sessionStorage.getItem("idem:start-vm:vm-9");
     expect(JSON.parse(raw as string).key).toBe(sent);
+  });
+
+  it("drops the /vms key when the running wait times out so the next Start is fresh", async () => {
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "deallocated" }, error: null };
+      return { data: { vm_id: "vm-9", status: "starting" }, error: null };
+    });
+    await expect(adminStartVm({
+      vmId: "vm-9",
+      labTemplateId: "lab-9",
+      isPersistent: true,
+      timeoutMs: 30,
+      pollMs: 5,
+    })).rejects.toThrow(/timed out waiting for running/);
+    expect(sessionStorage.getItem("idem:provision:lab-9:vm-9")).toBeNull();
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-9", status: "starting" }, error: null };
+    });
+    await adminStartVm({ vmId: "vm-9", labTemplateId: "lab-9", isPersistent: true });
+    const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
+    expect(starts).toHaveLength(2);
+    expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
   });
 });
