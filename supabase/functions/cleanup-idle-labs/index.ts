@@ -1,6 +1,7 @@
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
 import { CANCEL_PENDING_STOP_REASON, decideLearnerCancel } from "../_shared/lab-cancel-policy.ts";
 import { corsHeadersFor, corsHeaders, requireAdmin, requireUser, requireOwnerOrAdmin, errorResponse, jsonResponse, type AuthCtx } from "../_shared/auth.ts";
+import { cronSecretMatches } from "../_shared/cron-auth.ts";
 import { correlationIdFrom, ProvisioningTimeline } from "../_shared/provisioning-audit.ts";
 import { claimIdempotency, completeIdempotency, idempotencyKeyFrom, releaseIdempotency } from "../_shared/idempotency.ts";
 import { resolveAzureRuntime } from "../_shared/cloud-providers/azure-runtime.ts";
@@ -566,22 +567,48 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
     } catch { /* no body = scheduled run */ }
     const correlationId = correlationIdFrom(req);
 
+    // `scheduled-cleanup` is the same scheduled pass as an omitted action
+    // (`auto-cleanup`). Job 1's body is `{}`.
+    if (action === "scheduled-cleanup") action = "auto-cleanup";
+
     // Student-callable actions (scoped to the caller's own VM):
     //   cancel-provisioning — hard cancel while provisioning
     //   learner-leave       — Leave / soft-stop: end session (wallet deduct) + deallocate, never delete
     //   start-vm            — Start-from-deallocated: resume SAME allocation (owner + wallet gate)
     // Everything else stays admin / service-role only.
-    const auth = deps?.auth
-      ?? ((action === "cancel-provisioning" || action === "learner-leave" || action === "start-vm")
-        ? await requireUser(req)
-        : await requireAdmin(req));
-    if (auth instanceof Response) return auth;
+    //
+    // Scheduled cron (job 1) may instead send `x-cron-secret`, checked against
+    // `CRON_SHARED_SECRET` the same way jobs 4 and 9 do. That credential is
+    // accepted only for the scheduled cleanup and the read-only expiry-preview.
+    // It does not authorize stop, delete, cancel, start, or any other mutation,
+    // and it is not an admin override. Service-role and admin JWTs are unchanged
+    // when the header is absent or does not match.
+    const cronOk = !deps?.auth && cronSecretMatches(req.headers.get("x-cron-secret"));
+    const cronActionAllowed = action === "auto-cleanup" || action === "expiry-preview";
+    if (cronOk && !cronActionAllowed) return errorResponse("Forbidden", 403);
+
+    const studentAction = action === "cancel-provisioning" || action === "learner-leave" || action === "start-vm";
+    let auth: AuthCtx | Response | null = deps?.auth ?? null;
+    if (!auth && !cronOk) {
+      auth = studentAction ? await requireUser(req) : await requireAdmin(req);
+      if (auth instanceof Response) return auth;
+    }
 
     const supabase = deps?.supabase ?? createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
       { auth: { autoRefreshToken: false, persistSession: false } },
     );
+    if (!auth) {
+      // Cron actor is not a service role, so a missed gate cannot take the
+      // admin-override branch inside start-vm.
+      auth = {
+        supabase,
+        userId: "00000000-0000-0000-0000-000000000000",
+        email: null,
+        isServiceRole: false,
+      };
+    }
     const azureFor = makeAzureResolver(supabase);
     const stopBudget = newStopPollBudget();
     // Held VMs (smoke VM, Guac hosts, Ops holds) are never touched by automatic

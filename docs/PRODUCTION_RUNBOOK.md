@@ -88,7 +88,7 @@ npm run functions:test    # deno test supabase/functions/
 | `provision-lab` | student/instructor | JWT + Azure preflight + budget cap |
 | `check-vm-status` | owner / admin | `requireUser` + `requireOwnerOrAdmin` |
 | `guacamole-proxy` | owner / admin | JWT + VM ownership; scoped Guacamole token |
-| `cleanup-idle-labs` | cron (service role), admin, **student `cancel-provisioning` only** | `requireAdmin`, or `requireUser` + `requireOwnerOrAdmin` for cancel |
+| `cleanup-idle-labs` | cron (`x-cron-secret` for the scheduled run and `expiry-preview`; service role still works), admin, **student `cancel-provisioning` / `learner-leave` / `start-vm`** | `x-cron-secret` only for `auto-cleanup` and read-only `expiry-preview`; otherwise `requireAdmin`, or `requireUser` + `requireOwnerOrAdmin` for the student actions |
 | `cloud-access-session` | student | JWT + `user_can_access_template` |
 | `cloud-provider-config`, `cloud-provider-health`, `azure-quota`, `daily-report`, `ai-health` | admin | `requireAdmin` |
 | `ai-assistant`, `ai-chat` | signed-in user | `requireUser` + quota + circuit breaker |
@@ -185,6 +185,20 @@ dry-run and writes nothing (promotions included) unless
 also sends `dry_run: true`. Jobs 4 and 9 authenticate with `x-cron-secret`
 (Vault name `cron_shared_secret`) and `Authorization`.
 
+`cleanup-idle-labs` accepts that same header for the scheduled cleanup
+(`{}`, which is `auto-cleanup`; `scheduled-cleanup` is the same pass) and for
+`expiry-preview` (read-only: no writes, no cloud calls). The compare is
+constant-time and fails when `CRON_SHARED_SECRET` is unset or empty. A valid
+cron secret does not authorize `stop-vm`, `delete-vm`, `cancel-provisioning`,
+`start-vm` (including the admin wallet override), `purge-failed`, or
+`clear-guacamole`. Service-role and admin callers that do not present a
+matching cron secret are unchanged. `SOFT_EXPIRY_MODE` and `CLEANUP_HELD_VM_IDS`
+are unchanged: held VMs, including the built-in `bba27e8f` prefix, are skipped,
+and soft-expiry `dry-run` does not stop or delete.
+
+Job 1 should send `x-cron-secret` from Vault `cron_shared_secret`, the same
+header jobs 4 and 9 send.
+
 Documentation only — do not execute while jobid 1 exists:
 
 ```sql
@@ -193,9 +207,13 @@ select cron.schedule(
   '*/5 * * * *',
   $$select net.http_post(
       url := 'https://<project-ref>.supabase.co/functions/v1/cleanup-idle-labs',
-      headers := jsonb_build_object('Content-Type','application/json','Authorization','Bearer ' || current_setting('app.service_role_key')),
+      headers := jsonb_build_object(
+        'Content-Type', 'application/json',
+        'Authorization', 'Bearer ' || current_setting('app.service_role_key'),
+        'x-cron-secret', (select decrypted_secret from vault.decrypted_secrets where name = 'cron_shared_secret')
+      ),
       body := '{}'::jsonb
-  );$$
+  ) as request_id;$$
 );
 ```
 
