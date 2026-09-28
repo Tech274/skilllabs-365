@@ -2,18 +2,22 @@
  * Lab REMINT helpers (Leave → Start same allocation).
  *
  * Disconnect is not deallocate. When a learner returns to a lab whose machine
- * is powered off, we must START the existing allocation via cleanup-idle-labs
- * `start-vm` (never provision-lab — that spins a NEW VM for non-persistent),
- * wait until it reports `running`, and only then ask guacamole-proxy for a
- * tokenized desktop URL.
+ * is powered off, we START that same allocation, wait until it reports
+ * `running`, and only then ask guacamole-proxy for a tokenized desktop URL.
  *
- * Persistent and non-persistent both resume the SAME vm_id when wallet allows.
+ * Persistent labs remint through provision-lab with the pinned vm_id. That
+ * path resumes the existing machine; it does not create a new one. Other labs
+ * resume through cleanup-idle-labs `start-vm`. Both calls send a stable
+ * Idempotency-Key, the same way Launch does. A failed start drops the key so
+ * the next click is a real retry, not a replay of the stored 503.
+ *
  * We never open Guacamole — and never claim "Connected" — while the machine is
  * deallocated/stopped/starting.
  */
 
 import { supabase } from "@/integrations/supabase/client";
 import { readFunctionError, readFunctionErrorPayload } from "@/lib/function-error";
+import { idempotencyHeaders, resetIdempotency } from "@/lib/idempotency";
 
 /** Machine states where the allocation exists but compute is not live yet. */
 export const REMINT_STATUSES = ["deallocated", "stopped", "starting"] as const;
@@ -76,9 +80,20 @@ export type RemintOptions = {
   onPhase?: (phase: "starting" | "waiting-running") => void;
 };
 
+/** Stable key for one VM so a double-click replays instead of starting twice. */
+export function remintIdempotencyScope(opts: {
+  vmId: string;
+  labTemplateId?: string | null;
+  isPersistent?: boolean;
+}): string {
+  if (opts.isPersistent && opts.labTemplateId) return `provision:${opts.labTemplateId}:${opts.vmId}`;
+  return `start-vm:${opts.vmId}`;
+}
+
 /**
- * Power the existing allocation back on via start-vm (same vm_id) and poll
- * check-vm-status until it reports `running`. Never creates a new VM.
+ * Power the existing allocation back on and poll check-vm-status until it
+ * reports `running`. Persistent labs call provision-lab with the same vm_id.
+ * Other labs call cleanup-idle-labs start-vm. Neither path creates a new VM.
  */
 export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
   const timeoutMs = opts.timeoutMs ?? 180_000;
@@ -88,14 +103,18 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
     if (!opts.vmId) throw new Error(REMINT_FAIL_CODE);
     opts.onPhase?.("starting");
     const usePersistentRemint = Boolean(opts.isPersistent && opts.labTemplateId);
+    const scope = remintIdempotencyScope(opts);
     const { data, error } = usePersistentRemint
       ? await supabase.functions.invoke("provision-lab", {
           body: { lab_template_id: opts.labTemplateId, vm_id: opts.vmId },
+          headers: idempotencyHeaders(scope),
         })
       : await supabase.functions.invoke("cleanup-idle-labs", {
           body: { action: "start-vm", vm_id: opts.vmId, reason: "learner_start" },
+          headers: idempotencyHeaders(scope),
         });
     if (error || data?.error) {
+      resetIdempotency(scope);
       const payload = await readFunctionErrorPayload(error, data);
       const msg = await readFunctionError(error, data);
       const code = String(payload?.code ?? data?.code ?? "");

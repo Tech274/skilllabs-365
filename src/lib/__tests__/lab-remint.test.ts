@@ -1,5 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { isResumableStatus, needsRemint, shouldEndOnCountdown } from "@/lib/lab-remint";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const invoke = vi.hoisted(() => vi.fn());
+
+vi.mock("@/integrations/supabase/client", () => ({
+  supabase: { functions: { invoke } },
+}));
+
+import { isResumableStatus, needsRemint, remintAndWaitRunning, remintIdempotencyScope, shouldEndOnCountdown } from "@/lib/lab-remint";
 
 describe("lab-remint helpers", () => {
   it("needsRemint covers powered-off and starting", () => {
@@ -29,5 +36,63 @@ describe("lab-remint helpers", () => {
     expect(shouldEndOnCountdown({ remainingMs: -1, reminting: false, vmStatus: "idle" })).toBe(true);
     expect(shouldEndOnCountdown({ remainingMs: 5_000, reminting: false, vmStatus: "running" })).toBe(false);
     expect(shouldEndOnCountdown({ remainingMs: Number.NaN, reminting: false, vmStatus: "running" })).toBe(false);
+  });
+});
+
+describe("remint idempotency key", () => {
+  beforeEach(() => {
+    invoke.mockReset();
+    sessionStorage.clear();
+  });
+
+  it("scopes a persistent remint separately from a start-vm remint", () => {
+    expect(remintIdempotencyScope({ vmId: "vm-1", labTemplateId: "lab-1", isPersistent: true }))
+      .toBe("provision:lab-1:vm-1");
+    expect(remintIdempotencyScope({ vmId: "vm-1", labTemplateId: "lab-1" })).toBe("start-vm:vm-1");
+  });
+
+  it("sends Idempotency-Key on provision-lab and reuses it for a second click", async () => {
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-1", status: "starting" }, error: null };
+    });
+    const opts = { vmId: "vm-1", labTemplateId: "lab-1", isPersistent: true as const };
+    await remintAndWaitRunning(opts);
+    await remintAndWaitRunning(opts);
+    const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
+    expect(starts).toHaveLength(2);
+    expect(starts[0][1].headers["Idempotency-Key"]).toEqual(expect.any(String));
+    expect(starts[0][1].headers["Idempotency-Key"]).toBe(starts[1][1].headers["Idempotency-Key"]);
+    expect(starts[0][1].body).toEqual({ lab_template_id: "lab-1", vm_id: "vm-1" });
+  });
+
+  it("sends Idempotency-Key on cleanup start-vm", async () => {
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-1", status: "starting" }, error: null };
+    });
+    await remintAndWaitRunning({ vmId: "vm-1" });
+    const start = invoke.mock.calls.find((call) => call[0] === "cleanup-idle-labs");
+    expect(start?.[1].body).toEqual({ action: "start-vm", vm_id: "vm-1", reason: "learner_start" });
+    expect(start?.[1].headers["Idempotency-Key"]).toEqual(expect.any(String));
+  });
+
+  it("drops the key after a failed start so the retry is not a replay", async () => {
+    invoke.mockResolvedValueOnce({
+      data: { error: "still stopping", code: "REMINT_START_FAILED", retryable: true },
+      error: null,
+    });
+    await expect(remintAndWaitRunning({
+      vmId: "vm-1",
+      labTemplateId: "lab-1",
+      isPersistent: true,
+    })).rejects.toThrow();
+    invoke.mockImplementation(async (name: string) => {
+      if (name === "check-vm-status") return { data: { status: "running" }, error: null };
+      return { data: { vm_id: "vm-1", status: "starting" }, error: null };
+    });
+    await remintAndWaitRunning({ vmId: "vm-1", labTemplateId: "lab-1", isPersistent: true });
+    const starts = invoke.mock.calls.filter((call) => call[0] === "provision-lab");
+    expect(starts[0][1].headers["Idempotency-Key"]).not.toBe(starts[1][1].headers["Idempotency-Key"]);
   });
 });

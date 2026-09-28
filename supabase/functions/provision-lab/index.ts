@@ -581,6 +581,14 @@ Deno.serve(async (req) => {
     // Admin Start of an existing persistent VM is an override: allowed, audited,
     // and the owner's wallet is not deducted. Learner remint stays enforced.
     // A platform admin fresh Launch (no existing VM) still skips the gate.
+    // The override audit is recorded only after the restart result is known.
+    let adminOverrideAudit: {
+      vmId: string;
+      code: string;
+      allocated: number;
+      used: number;
+      remaining: number;
+    } | null = null;
     {
       const adminRemintOverride = adminPersistentRemintSkipsOwnerWallet(
         isAdminCaller,
@@ -641,24 +649,13 @@ Deno.serve(async (req) => {
         });
         const blocked = walletBlockMessage(snap);
         if (blocked) {
-          await recordAudit(supabase, {
-            actorId: userId,
-            actorType: "user",
-            action: "vm.admin_start_override",
-            entityType: "virtual_machine",
-            entityId: existingVmForGate.id,
-            outcome: "success",
-            correlationId,
-            changes: {
-              code: blocked.code,
-              wallet_deducted: false,
-              owner_user_id: walletOwnerId,
-              allocated_minutes: snap.allocatedMinutes,
-              used_minutes: snap.usedMinutes,
-              remaining_minutes: snap.remainingMinutes,
-            },
-            message: "Admin Start allowed despite the owner's wallet. Minutes were not deducted.",
-          });
+          adminOverrideAudit = {
+            vmId: existingVmForGate.id,
+            code: blocked.code,
+            allocated: snap.allocatedMinutes,
+            used: snap.usedMinutes,
+            remaining: snap.remainingMinutes,
+          };
         }
         await trace.skipped(SOURCE, "wallet-gate", "Admin persistent Start override — owner wallet not deducted", {
           user_id: userId,
@@ -675,6 +672,33 @@ Deno.serve(async (req) => {
       }
     }
 
+    const writeAdminStartOverrideAudit = async (outcome: "success" | "failed") => {
+      if (!adminOverrideAudit) return;
+      const audit = adminOverrideAudit;
+      adminOverrideAudit = null;
+      await recordAudit(supabase, {
+        actorId: userId,
+        actorType: "user",
+        action: "vm.admin_start_override",
+        entityType: "virtual_machine",
+        entityId: audit.vmId,
+        outcome,
+        correlationId,
+        changes: {
+          code: audit.code,
+          wallet_deducted: false,
+          owner_user_id: walletOwnerId,
+          allocated_minutes: audit.allocated,
+          used_minutes: audit.used,
+          remaining_minutes: audit.remaining,
+          restart_outcome: outcome,
+        },
+        message: outcome === "success"
+          ? "Admin Start allowed despite the owner's wallet. Minutes were not deducted."
+          : "Admin Start did not power the VM on. Minutes were not deducted.",
+      });
+    };
+
     // --- Persistent lab REMINT --------------------------------------------
     // Leave / soft-stop deallocates compute but keeps the allocation. Inside the
     // grant/template window a Start after Leave must hand back the SAME VM.
@@ -689,6 +713,7 @@ Deno.serve(async (req) => {
       let remintAwsState: string | null = null;
       let remintGhost = false;
       let remintMismatch = false;
+      let remintRetryable = false;
       let resolvedProvider: "aws" | "azure" = "azure";
       let finalStatus: string = existingVm.status;
       let freshPublicIp: string | null = null;
@@ -727,6 +752,7 @@ Deno.serve(async (req) => {
           remintAwsState = (startResult as { awsState?: string }).awsState ?? null;
           remintMismatch = (startResult as { mismatch?: boolean }).mismatch === true;
           remintGhost = (startResult as { ghost?: boolean }).ghost === true || remintAwsState === "not-found";
+          remintRetryable = (startResult as { code?: string }).code === "REMINT_START_FAILED";
           if (!started) {
             console.error("persistent remint start rejected", remintDetail, remintAwsState, remintGhost);
             if (remintGhost) {
@@ -743,7 +769,8 @@ Deno.serve(async (req) => {
           remintDetail = e instanceof Error ? e.message : String(e);
         }
         // ok:false (including REMINT_START_FAILED when the cap hits before
-        // StartInstances) skips this write, so the VM row status stays as it was.
+        // StartInstances) skips this write. Status, ended_*, and expires_at
+        // stay as they were. Only a start that was actually sent may clear them.
         if (started) {
           const baseUpdate: Record<string, unknown> = {
             status: "starting",
@@ -791,6 +818,7 @@ Deno.serve(async (req) => {
         }
         if (!started) {
           await trace.failed(SOURCE, "remint", "Could not power the existing lab VM back on");
+          await writeAdminStartOverrideAudit("failed");
           const failure = {
             error: remintGhost
               ? "Cloud instance no longer exists (ghost Hub row reconciled to failed). It was NOT terminated by this Start."
@@ -798,6 +826,7 @@ Deno.serve(async (req) => {
                 ? "This lab machine is registered to the wrong cloud provider, so it was not started. It has NOT been deleted — please contact support."
                 : "Your persistent lab machine could not be powered back on. It has NOT been deleted — please retry in a minute or contact support.",
             code: remintGhost ? "GHOST_INSTANCE" : remintMismatch ? "REMINT_PROVIDER_MISMATCH" : "REMINT_START_FAILED",
+            ...(remintRetryable ? { retryable: true } : {}),
             vm_id: existingVm.id,
             detail: remintDetail,
             aws_state: remintAwsState,
@@ -829,6 +858,7 @@ Deno.serve(async (req) => {
           : "Existing persistent lab VM is still allocated — reconnecting to it",
         { vm_id: existingVm.id, status: resumed.status },
       );
+      await writeAdminStartOverrideAudit("success");
       if (requestedVmId && String(resumed.vm_id) !== requestedVmId) {
         const mismatch = {
           error: "Start targeted a different machine — refused.",

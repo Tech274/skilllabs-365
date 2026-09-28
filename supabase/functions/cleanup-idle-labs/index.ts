@@ -530,6 +530,8 @@ export type CleanupHandlerDeps = {
   auth?: AuthCtx;
   /** Invoked immediately before a cloud call. Tests assert this stays empty. */
   onCloud?: (name: string) => void;
+  /** Test seam. Production uses startCloudVm. */
+  startCloudVm?: typeof startCloudVm;
 };
 
 export async function handleCleanupRequest(req: Request, deps?: CleanupHandlerDeps): Promise<Response> {
@@ -1092,7 +1094,8 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
 
         const provider = await providerOf(supabase, vm.provider_account_id);
         noteCloud("startCloudVm");
-        const started = await startCloudVm(supabase, provider, {
+        const startFn = deps?.startCloudVm ?? startCloudVm;
+        const started = await startFn(supabase, provider, {
           id: vm.id,
           status: vm.status,
           azure_vm_id: vm.azure_vm_id,
@@ -1102,6 +1105,22 @@ async function handleCleanupRequestInner(req: Request, deps?: CleanupHandlerDeps
           region: vm.region ?? null,
         });
         if (!started.ok) {
+          // 90s default clock (no shared remint clock on this path). A cap
+          // before StartInstances is retryable and must not touch the row.
+          if (started.code === "REMINT_START_FAILED") {
+            return new Response(JSON.stringify({
+              error: "Your lab machine was still stopping, so it was not started. Nothing was changed — please retry in a minute.",
+              code: "REMINT_START_FAILED",
+              retryable: true,
+              vm_id: targetVmId,
+              detail: started.detail ?? "remint wait cap hit before StartInstances",
+              aws_state: started.awsState ?? null,
+              provider,
+              region: vm.region ?? null,
+            }), {
+              status: 503, headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
           console.error(JSON.stringify({
             event: "vm_start_rejected",
             vm_id: targetVmId,

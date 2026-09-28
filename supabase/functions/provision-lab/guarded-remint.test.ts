@@ -13,3 +13,18 @@ Deno.test("admin persistent Start refuses a guarded VM before the wallet overrid
   assert(refusal.includes('code: "VM_PROTECTED"'));
   assert(refusal.includes("status: 423"));
 });
+
+Deno.test("capped remint is 503 retryable with no row clear, and the override audit follows the result", () => {
+  const startedWrite = src.indexOf("if (started) {");
+  const clear = src.indexOf("ended_at: null");
+  const startCall = src.indexOf("await startCloudVm(");
+  const helper = src.indexOf("const writeAdminStartOverrideAudit");
+  const failedAudit = src.indexOf('writeAdminStartOverrideAudit("failed")');
+  const successAudit = src.indexOf('writeAdminStartOverrideAudit("success")');
+  const retryable = src.indexOf("retryable: true");
+  assert(startedWrite > 0 && clear > startedWrite, "ended_* is cleared only after a start was accepted");
+  assert(helper > 0 && !src.slice(0, helper).includes('action: "vm.admin_start_override"'), "override audit is not written up front");
+  assert(failedAudit > startCall, "failed override audit is after StartInstances returns");
+  assert(successAudit > failedAudit, "success override audit is after a known restart");
+  assert(retryable > failedAudit && retryable < successAudit, "retryable 503 is the cap-before-start failure");
+});

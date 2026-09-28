@@ -52,7 +52,11 @@ function mockSupabase(vm: Record<string, unknown>) {
   return { client, writes, auth };
 }
 
-async function invoke(action: string, vm: Record<string, unknown>) {
+async function invoke(
+  action: string,
+  vm: Record<string, unknown>,
+  extra?: { startCloudVm?: (supabase: unknown, provider: string, row: unknown) => Promise<Record<string, unknown>> },
+) {
   const cloud: string[] = [];
   const { client, writes, auth } = mockSupabase(vm);
   const res = await handleCleanupRequest(
@@ -61,7 +65,7 @@ async function invoke(action: string, vm: Record<string, unknown>) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ action, vm_id: vm.id }),
     }),
-    { supabase: client, auth, onCloud: (name) => cloud.push(name) },
+    { supabase: client, auth, onCloud: (name) => cloud.push(name), startCloudVm: extra?.startCloudVm as never },
   );
   const body = await res.json();
   return { status: res.status, body, writes, cloud };
@@ -110,4 +114,34 @@ Deno.test("guarded stop, leave, delete and cancel write nothing and call no clou
   assertEquals(leave.body.session_closed, undefined);
   assertEquals(leave.writes, []);
   assertEquals(leave.cloud, []);
+});
+
+Deno.test("start-vm capped before StartInstances is 503 retryable and writes nothing", async () => {
+  const vm = {
+    id: "11111111-2222-4333-8444-555555555555",
+    azure_vm_id: "i-0abc",
+    status: "stopped",
+    user_id: "owner",
+    lab_template_id: "tpl",
+    provider_account_id: "acct",
+    region: "us-east-1",
+    private_ip: "10.0.0.8",
+    expires_at: "2026-09-28T00:00:00.000Z",
+    ended_reason: null,
+    ended_at: "2026-09-27T00:00:00.000Z",
+  };
+  const started = await invoke("start-vm", vm, {
+    startCloudVm: async () => ({
+      ok: false,
+      code: "REMINT_START_FAILED",
+      capped: true,
+      awsState: "stopping",
+      detail: "remint wait cap hit before StartInstances",
+    }),
+  });
+  assertEquals(started.status, 503);
+  assertEquals(started.body.code, "REMINT_START_FAILED");
+  assertEquals(started.body.retryable, true);
+  assertEquals(started.writes, []);
+  assertEquals(started.cloud.includes("describeAwsInstance"), false);
 });

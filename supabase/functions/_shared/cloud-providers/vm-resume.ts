@@ -52,8 +52,10 @@ export type StartCloudVmResult = {
   mismatch?: boolean;
   /**
    * True when the shared budget ran out before StartInstances. `ok` is false
-   * and `code` is REMINT_START_FAILED. Callers must leave the VM row unchanged.
-   * A cap after StartInstances is reported by waitForRunningAndIps, not here.
+   * and `code` is REMINT_START_FAILED. Callers respond 503 with retryable:true
+   * and write nothing: no status change and no clearing of ended_* or expires_at.
+   * A cap after StartInstances was accepted is reported by waitForRunningAndIps
+   * (status stays starting), not here.
    */
   capped?: boolean;
   code?: "REMINT_START_FAILED";
