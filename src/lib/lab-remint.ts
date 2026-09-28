@@ -8,10 +8,12 @@
  * Persistent labs remint through provision-lab with the pinned vm_id. That
  * path resumes the existing machine; it does not create a new one. Other labs
  * resume through cleanup-idle-labs `start-vm`. Each click sends a fresh
- * Idempotency-Key. The key is dropped on success, on failure, and when the
- * 180s running wait times out, so the next click is a new request and not a
- * replay of the stored 200. A 409 while that key is still in progress keeps
- * the key and is shown as "already starting", not as a failed start.
+ * Idempotency-Key. The key is dropped on success, on failure (including 409s
+ * other than an in-flight idempotency claim), and when the 180s running wait
+ * times out, so the next click is a new request and not a replay of the stored
+ * 200. Only `code: IDEMPOTENCY_IN_PROGRESS` keeps the key and is shown as
+ * "already starting". NOT_RESUMABLE, VM_STATE_CHANGED, and any other 409
+ * surface their own error.
  * Double-clicks are refused by the in-flight guard (the Start button is also
  * disabled while the call runs).
  *
@@ -81,18 +83,24 @@ export class AlreadyStartingError extends Error {
 
 const inFlightRemints = new Set<string>();
 
+/** Server code for an idempotency key whose first request is still running. */
+const IDEMPOTENCY_IN_PROGRESS_CODE = "IDEMPOTENCY_IN_PROGRESS";
+
+function responseCode(value: unknown): string {
+  if (!value || typeof value !== "object" || !("code" in value)) return "";
+  return String((value as { code?: unknown }).code ?? "");
+}
+
+/**
+ * True only for the in-flight idempotency conflict. Other 409s (NOT_RESUMABLE,
+ * VM_STATE_CHANGED, …) must fall through so the caller shows their real error.
+ */
 function isAlreadyStartingResponse(
-  error: unknown,
+  payload: { code?: unknown } | null | undefined,
   data: unknown,
-  payloadError: string,
-  message: string,
 ): boolean {
-  const status = (error as { context?: { status?: number } } | null)?.context?.status;
-  if (status === 409) return true;
-  const dataError = data && typeof data === "object" && "error" in data
-    ? String((data as { error?: unknown }).error ?? "")
-    : "";
-  return /already in progress/i.test(payloadError) || /already in progress/i.test(message) || /already in progress/i.test(dataError);
+  return responseCode(payload) === IDEMPOTENCY_IN_PROGRESS_CODE
+    || responseCode(data) === IDEMPOTENCY_IN_PROGRESS_CODE;
 }
 
 export type RemintOptions = {
@@ -152,7 +160,7 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
       if (error || data?.error) {
         const payload = await readFunctionErrorPayload(error, data);
         const msg = await readFunctionError(error, data);
-        if (isAlreadyStartingResponse(error, data, String(payload?.error ?? ""), msg)) {
+        if (isAlreadyStartingResponse(payload, data)) {
           // Same key is still in progress on the server. Keep it and do not start again.
           preserveKey = true;
           throw new AlreadyStartingError();
@@ -213,8 +221,8 @@ export async function remintAndWaitRunning(opts: RemintOptions): Promise<void> {
  * Admin Start on /vms. Persistent labs use the same fresh-key remint as a
  * learner, including the 180s running-wait timeout. Other labs call cleanup
  * `start-vm` with reason `admin_start` and do not wait for running. Either
- * way the key is new per click, dropped on success and on failure, and kept
- * when the server returns 409.
+ * way the key is new per click, dropped on success and on failure (including
+ * other 409s), and kept only when the server returns IDEMPOTENCY_IN_PROGRESS.
  */
 export async function adminStartVm(opts: {
   vmId: string;
@@ -251,7 +259,7 @@ export async function adminStartVm(opts: {
     if (error || data?.error) {
       const payload = await readFunctionErrorPayload(error, data);
       const msg = await readFunctionError(error, data);
-      if (isAlreadyStartingResponse(error, data, String(payload?.error ?? ""), msg)) {
+      if (isAlreadyStartingResponse(payload, data)) {
         preserveKey = true;
         throw new AlreadyStartingError();
       }

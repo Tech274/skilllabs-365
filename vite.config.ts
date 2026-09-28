@@ -5,9 +5,11 @@ import { componentTagger } from "lovable-tagger";
 import { contentSecurityPolicy, securityHeaders } from "./scripts/security-headers";
 
 /**
- * Injects the production CSP as a <meta http-equiv> at build time so the policy
- * is enforced even on hosts that do not read `public/_headers`.
- * (frame-ancestors is header-only; `_headers` + the dev server cover it.)
+ * Keeps a single production CSP `<meta http-equiv>` in the built index.html.
+ * Source `index.html` already carries the live policy so a host that serves
+ * that file still enforces it. The build refreshes that tag in place (it does
+ * not append a second one, and it does not drop it).
+ * frame-ancestors is header-only; `_headers` + the dev server cover it.
  *
  * Tip 9de17a0a used `@lovable.dev/mcp-js` mcpPlugin — omitted here so GH CI
  * stays free of that optional runtime; CSP + headers remain tip-aligned.
@@ -21,10 +23,11 @@ function cspMetaPlugin() {
         .split("; ")
         .filter(d => !d.startsWith("frame-ancestors"))
         .join("; ");
-      return html.replace(
-        "</head>",
-        `  <meta http-equiv="Content-Security-Policy" content="${policy}" />\n  </head>`,
-      );
+      const meta = `<meta http-equiv="Content-Security-Policy" content="${policy}" />`;
+      if (/<meta\s+http-equiv="Content-Security-Policy"\s+/i.test(html)) {
+        return html.replace(/<meta\s+http-equiv="Content-Security-Policy"\s+[^>]*>/i, meta);
+      }
+      return html.replace("</head>", `  ${meta}\n  </head>`);
     },
   };
 }
