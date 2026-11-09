@@ -41,3 +41,6 @@ verify_jwt = false
 
 [functions.vm-reconcile]
 verify_jwt = false
+
+[functions.skilltrack-sso-exchange]
+verify_jwt = false

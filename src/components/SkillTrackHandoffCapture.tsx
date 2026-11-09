@@ -5,8 +5,10 @@ import {
   captureHandoffFromLocation,
   logHandoffEvent,
   readStoredHandoff,
+  shouldLogHandoff,
 } from "@/lib/skilltrack-handoff";
 import { supabase } from "@/integrations/supabase/client";
+import { SSO_PATH } from "@/lib/skilltrack-sso";
 
 /**
  * Captures ?handoff=&email=&sku=&cert= on first paint, stores in sessionStorage,
@@ -19,13 +21,18 @@ export function SkillTrackHandoffCapture() {
   const { session, loading, role } = useAuth();
 
   useEffect(() => {
+    // The SSO landing page owns its own flow (and its URL fragment).
+    if (location.pathname === SSO_PATH) return;
     const captured = captureHandoffFromLocation(location.search);
     const stored = captured || readStoredHandoff();
     if (!stored) return;
 
-    void logHandoffEvent(supabase, { ...stored, user_id: session?.user?.id ?? null });
-
     if (loading) return;
+
+    const userId = session?.user?.id ?? null;
+    if (shouldLogHandoff(stored.capturedAt, userId)) {
+      void logHandoffEvent(supabase, { ...stored, user_id: userId });
+    }
 
     // Strip query from URL after capture so refreshes stay clean (storage keeps context).
     if (location.search && stored.handoff) {

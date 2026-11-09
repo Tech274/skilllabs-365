@@ -61,6 +61,7 @@ import AdminManualLabGrants from "./pages/AdminManualLabGrants";
 import AdminCloudQuotas from "./pages/AdminCloudQuotas";
 import AdminNetworkHealth from "./pages/AdminNetworkHealth";
 import { SkillTrackHandoffCapture } from "./components/SkillTrackHandoffCapture";
+import SkillTrackSso from "./pages/SkillTrackSso";
 
 
 const queryClient = new QueryClient();
@@ -78,6 +79,7 @@ const App = () => (
               <Routes>
                 <Route path="/login" element={<Login />} />
                 <Route path="/signup" element={<Signup />} />
+                <Route path="/sso/skilltrack" element={<SkillTrackSso />} />
                 <Route path="/.lovable/oauth/consent" element={<OAuthConsent />} />
                 <Route path="/oauth/notion/return" element={<NotionReturn />} />
                 {/* Admin-only routes */}
