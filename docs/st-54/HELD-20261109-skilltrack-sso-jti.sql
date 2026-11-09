@@ -18,8 +18,10 @@ revoke all on public.skilltrack_sso_jti from anon, authenticated;
 create index if not exists skilltrack_sso_jti_expires_at_idx
   on public.skilltrack_sso_jti (expires_at);
 
--- Housekeeping (optional, also held): rows are useless once expires_at has passed.
--- delete from public.skilltrack_sso_jti where expires_at < now() - interval '1 day';
+-- Housekeeping: no scheduled job. The exchange function deletes rows with
+-- expires_at < now() - 1 day opportunistically on each call (best effort; a
+-- failed cleanup never fails or delays the exchange). The expires_at index
+-- above keeps that delete cheap.
 
 -- Rollback:
 -- drop table if exists public.skilltrack_sso_jti;

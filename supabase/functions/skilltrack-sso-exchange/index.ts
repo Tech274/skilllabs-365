@@ -8,20 +8,25 @@
 // migration docs/st-54/HELD-20261109-skilltrack-sso-jti.sql. Without either,
 // this returns 503 and the SPA falls back to /login (today's behaviour).
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.1";
-import { corsHeadersFor } from "../_shared/auth.ts";
+import { runBestEffort, ssoCorsGate, ssoCorsHeaders } from "../_shared/skilltrack-sso-cors.ts";
 import { exchangeSkillTrackSso, type JtiClaim } from "../_shared/skilltrack-sso-exchange.ts";
 
 const PRIVILEGED_ROLES = ["admin", "super_admin", "content_admin", "instructor"];
 
+// Supabase edge runtime global; absent in plain Deno.
+declare const EdgeRuntime: { waitUntil?: (p: Promise<unknown>) => void } | undefined;
+
 Deno.serve(async (req) => {
-  const cors = corsHeadersFor(req);
+  // Only https://skillhub365.co.in, enforced here; does NOT use ALLOWED_ORIGINS.
+  const gated = ssoCorsGate(req);
+  if (gated) return gated;
+  const cors = ssoCorsHeaders(req.headers.get("origin"));
   const json = (body: unknown, status: number) =>
     new Response(JSON.stringify(body), {
       status,
       headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "no-store" },
     });
 
-  if (req.method === "OPTIONS") return new Response(null, { headers: cors });
   if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
 
   let token: unknown = null;
@@ -73,5 +78,19 @@ Deno.serve(async (req) => {
   });
 
   if (!result.ok) console.warn("[skilltrack-sso] refused", result.body.error, result.body.reason ?? "");
+
+  // Opportunistic cleanup of expired jti rows. Best effort: never fails or
+  // delays the exchange (runs after the result is computed, kept alive by
+  // waitUntil when available). No scheduled job needed.
+  runBestEffort(
+    async () => {
+      const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const { error } = await admin.from("skilltrack_sso_jti").delete().lt("expires_at", cutoff);
+      if (error) throw error;
+    },
+    typeof EdgeRuntime !== "undefined" ? EdgeRuntime?.waitUntil?.bind(EdgeRuntime) : undefined,
+    (e) => console.warn("[skilltrack-sso] jti cleanup skipped", (e as { code?: string })?.code ?? ""),
+  );
+
   return json(result.body, result.status);
 });

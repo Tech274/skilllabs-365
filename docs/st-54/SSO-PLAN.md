@@ -1,6 +1,6 @@
 # ST-54 — Single sign-on from SkillTrack into SkillHub Labs
 
-Status: **PR only, HELD.** Nothing here is deployed, published or applied.
+Status: **PR only, HELD.** Atlas gave an Eng PASS on the design on 9 Nov 2026. Nothing here is deployed, published or applied.
 Two PRs, cross-linked:
 
 - SkillTrack (signing + redirect): `Tech274/sktrck365---Certification-Platform`, branch `feat/st-54-skillhub-sso`
@@ -61,15 +61,30 @@ Logic lives in `_shared/skilltrack-sso-exchange.ts` (pure, unit-tested) and runs
 3. **User matching:** `profiles.email` equal (case-insensitive) to the token email must give
    **exactly one** user. Then `auth.users.email` for that id must equal the token email and be
    confirmed. Zero matches return 404 `no_account`; more than one returns 409 `ambiguous_account`.
-4. **No privileged SSO:** users with `admin`, `super_admin`, `content_admin` or `instructor` get
+4. **Learners only (v1):** users with `admin`, `super_admin`, `content_admin` or `instructor` get
    403 `privileged_account` and must sign in normally. On a role-lookup error it fails closed.
 5. **Session:** `auth.admin.generateLink({type:"magiclink"})` gives a single-use `hashed_token`
    (no email is sent). The browser calls `supabase.auth.verifyOtp({token_hash, type:"magiclink"})`,
    so supabase-js stores the session exactly as a normal sign-in would.
+6. **Opportunistic jti cleanup:** after the result is computed, each call deletes
+   `skilltrack_sso_jti` rows with `expires_at < now() - 1 day`. The delete is best effort: it is
+   handed to `EdgeRuntime.waitUntil` (or fired and forgotten), and errors are swallowed and logged
+   by code only. It never fails or delays the exchange. There is **no scheduled job**.
 
-### User creation rule (v1)
-**No silent account creation.** `no_account` sends the user to SkillHub `/signup` with the email
-prefilled. Auto-provisioning learners is an open question (section 8).
+### CORS (hard requirement)
+- The exchange allows **only** `https://skillhub365.co.in`. That rule is the explicit constant
+  `SSO_ALLOWED_ORIGINS` in `_shared/skilltrack-sso-cors.ts`, matched as an exact string.
+- It does **not** use the shared `corsHeadersFor` or the `ALLOWED_ORIGINS` secret. Lovable
+  preview, `localhost` and custom origins are refused too.
+- A preflight from the allowed origin gets 204 with the CORS headers. Any other origin, or a
+  request with no Origin, gets 403 with no `Access-Control-Allow-Origin`, before any token or DB
+  work.
+- Consequence: SSO can only be exercised from the production SkillHub origin, not from
+  Lovable/Vercel previews.
+
+### User creation rule (v1, Atlas decision)
+**No auto-create.** `no_account` sends the user to SkillHub `/signup` with the email prefilled.
+Every other failure goes to `/login` with the email prefilled.
 
 ### SPA (SkillHub `src/pages/SkillTrackSso.tsx`, route `/sso/skilltrack`)
 - Strips the fragment with `history.replaceState` before any network call. Runs once, even under
@@ -92,7 +107,8 @@ prefilled. Auto-provisioning learners is an open question (section 8).
   sets `opener = null`, then fetches the link with a 4 s timeout.
 - It only accepts a URL starting with `https://skillhub365.co.in/sso/skilltrack#`. Otherwise it
   uses the old handoff URL.
-- `/labs` (SSR redirect) is unchanged; it has no session on the server.
+- `/labs` (SSR redirect) is unchanged; it has no session on the server. This is an Atlas
+  decision: SSO happens on the Labs click, client-side only.
 
 ## 3. Failure modes
 
@@ -107,6 +123,8 @@ prefilled. Auto-provisioning learners is an open question (section 8).
 | Admin/instructor account | 403 `privileged_account`, then `/login` |
 | Slow SkillTrack server (>4 s) | old handoff link |
 | Popup blocked | navigates current tab |
+| Call from any origin other than `https://skillhub365.co.in` | 403 `origin_not_allowed`, no ACAO |
+| jti cleanup delete fails | ignored (logged by code), exchange unaffected |
 | Clock skew > 30 s | `expired` / `not_yet_valid`, then `/login` |
 
 ## 4. HELD items (need Atlas first; nothing created or applied)
@@ -121,16 +139,17 @@ prefilled. Auto-provisioning learners is an open question (section 8).
    **not** in `supabase/migrations/`, so Lovable can't auto-apply it.
 3. **Edge deploy** of `skilltrack-sso-exchange`. `config.toml` adds `verify_jwt = false`, because the
    caller is anonymous and the token is the credential.
-4. **CORS:** `_shared/auth.ts` allows `https://skillhub365.co.in` only if it is in the
-   `ALLOWED_ORIGINS` secret. It presumably already is (existing functions work from prod), but this
-   needs confirming; no change is made here.
+4. **CORS:** none needed. The function enforces its own single-origin allowlist and does not read
+   `ALLOWED_ORIGINS`. (For reference, the shared helper `_shared/auth.ts#isAllowedOrigin` hard-codes
+   `*.lovable.app`, `*.lovableproject.com`, `localhost` and `127.0.0.1`, and adds the
+   comma-separated `ALLOWED_ORIGINS` secret. `skillhub365.co.in` is not hard-coded there.)
 5. **Supabase Auth settings (SkillHub):** the magic-link OTP expiry is the default and is fine.
    No redirect URL is needed, because `verifyOtp` runs in-page.
 
 ## 5. Rollout order (after GO)
 1. Apply the jti migration (SkillHub).
 2. Set the SkillHub secret, then deploy `skilltrack-sso-exchange`, then merge and publish the SkillHub PR.
-3. Smoke-test with a test learner account (Vivek picks it): an anonymous-looking POST with a junk
+3. Smoke-test with a test learner account. **Vivek names the account.** Steps: an anonymous-looking POST with a junk
    token must return 401, and a real click must land signed in.
 4. Set the SkillTrack secret, merge and publish the SkillTrack PR. SSO turns on at this step.
 
@@ -141,7 +160,7 @@ prefilled. Auto-provisioning learners is an open question (section 8).
 - Code: revert either PR. Old link on new SkillHub works unchanged. But new SkillTrack (key set)
   against reverted SkillHub would land on a 404 page, so always unset the SkillTrack key (or revert
   SkillTrack) **before** reverting SkillHub.
-- DB: `drop table public.skilltrack_sso_jti;` (in the held SQL).
+- DB: `drop table public.skilltrack_sso_jti;` (in the held SQL). The cleanup delete is best effort, so it is harmless while the table is missing.
 
 ## 7. Tests
 - SkillTrack `src/lib/skillhub-sso.test.ts`:
@@ -155,11 +174,24 @@ prefilled. Auto-provisioning learners is an open question (section 8).
   - exchange order, replay, fails closed, matching rules, privileged refusal
   - client fragment parsing, verifyOtp, the once-only log fix
   - the **same cross-repo vector**
-- SkillHub Deno test `_shared/skilltrack-sso-token.test.ts` runs the verifier under Deno WebCrypto.
+- SkillHub `src/test/skilltrack-sso-cors.test.ts`:
+  - only the single allowed origin passes; look-alike, http, subdomain, preview, localhost and
+    missing origins get 403 with no ACAO
+  - preflight returns 204
+  - `ALLOWED_ORIGINS` is never read
+  - best-effort cleanup never throws or blocks
+- SkillHub Deno tests `_shared/skilltrack-sso-token.test.ts` and `_shared/skilltrack-sso-cors.test.ts`
+  run the verifier and the CORS gate under Deno, the latter with `ALLOWED_ORIGINS` set to a
+  different origin.
 
-## 8. Open questions for Atlas / Vivek
-1. Auto-create SkillHub learner accounts for verified SkillTrack users, or keep `/signup` prefill (v1)?
-2. Should instructors be allowed SSO? v1 refuses them, along with all admin roles.
-3. HS256 shared key (v1) or ES256 key pair?
-4. Should `/labs` (SSR redirect) also attempt SSO? That needs a client hop.
-5. Is a scheduled cleanup of expired `skilltrack_sso_jti` rows wanted? (The held SQL has it commented out.)
+## 8. Decisions (Atlas, Eng PASS, 9 Nov 2026)
+1. **No auto-create.** Unknown emails go to `/signup` with the email prefilled; other failures go
+   to `/login` with the email prefilled.
+2. **Learners only for v1.** Admin, super_admin, content_admin and instructor accounts are
+   refused SSO.
+3. **HS256 for v1.** ES256 (a key pair, so no shared secret) is a later ticket.
+4. **Labs click on the client only.** The `/labs` server redirect is unchanged.
+5. **Opportunistic jti cleanup** in the exchange; no scheduled job.
+6. **Vivek names the smoke-test learner** account.
+
+Still HELD on Atlas GO: the secret, the migration, the edge deploy, and the merge/publish.
