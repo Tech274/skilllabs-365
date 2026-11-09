@@ -97,6 +97,31 @@ export async function logHandoffEvent(
   }
 }
 
+export const HANDOFF_LOGGED_KEY = "skilltrack_handoff_logged_v1";
+
+/**
+ * ST-54: log a handoff at most once, and only when signed in. The table's insert
+ * policy is `authenticated` only, so the old anonymous first-paint insert could
+ * never succeed (most likely the console error reported as the "400"; not
+ * reproduced against prod, by rule), and the effect re-ran on every route/session
+ * change, re-posting the same row.
+ */
+export function shouldLogHandoff(
+  capturedAt: string | undefined,
+  userId: string | null | undefined,
+  storage: Pick<Storage, "getItem" | "setItem"> = sessionStorage,
+): boolean {
+  if (!userId || !capturedAt) return false;
+  const marker = `${userId}:${capturedAt}`;
+  try {
+    if (storage.getItem(HANDOFF_LOGGED_KEY) === marker) return false;
+    storage.setItem(HANDOFF_LOGGED_KEY, marker);
+  } catch {
+    return false;
+  }
+  return true;
+}
+
 export const HUB_WHATSAPP_UPSELL =
   "https://wa.me/919999999999?text=" +
   encodeURIComponent("Hi SkillTrack — I need Hub lab access after payment.");
